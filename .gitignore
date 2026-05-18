@@ -9,3 +9,5 @@ build/
 .venv/
 # fsp-rewards local cache (mirrors the upstream `rewards-data/` convention)
 rewards-data/
+# clif auto runtime status (no secrets — status only)
+.clif-state/

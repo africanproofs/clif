@@ -1,0 +1,41 @@
+# clif deployment. `clif-auto` is the always-on daemon; `clif` (profile: cli)
+# is the one-shot used for the rehearsal ladder + manual ops.
+#
+# Networking: clif reaches fwd at FWD_ENDPOINT (default http://fwd:8080), which
+# requires sharing fwd's Docker network. fwd's compose network is project-
+# prefixed (typically `fwd_fwd-callers`); override via FWD_NETWORK in .env if
+# different. If clif runs on another host, set FWD_ENDPOINT to a reachable URL
+# and replace the external network with a normal bridge.
+
+services:
+  clif-auto:
+    build: .
+    image: clif:dev
+    container_name: clif-auto
+    command: ["auto"]
+    env_file: [.env]
+    networks: [fwd-net]
+    restart: unless-stopped
+    healthcheck:
+      # `clif status` exits non-zero when degraded or when the daemon is
+      # dead/stale — the scrapable money-path health signal.
+      test: ["CMD", "clif", "status"]
+      interval: 300s
+      timeout: 15s
+      retries: 3
+      start_period: 1200s
+
+  clif:
+    build: .
+    image: clif:dev
+    profiles: ["cli"]
+    env_file: [.env]
+    networks: [fwd-net]
+    entrypoint: ["clif"]
+    # one-shot, e.g.:  docker compose run --rm clif claim --type fee
+    # rehearsal:        docker compose run --rm clif claim --type fee --epoch <N>
+
+networks:
+  fwd-net:
+    external: true
+    name: ${FWD_NETWORK:-fwd_fwd-callers}

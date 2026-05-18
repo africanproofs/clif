@@ -23,17 +23,43 @@ to start if any `*PRIVATE_KEY*` variable is present in its environment.
 poetry install
 ```
 
-## Commands (keyless half — pre-operator-gate)
+## Commands
+
+Keyless (no fwd provisioning needed):
 
 ```
 clif health      # probe fwd /healthz (require master == "ok")
-clif list        # enumerate AP's claimable FEE/DIRECT epochs + amounts (keyless)
+clif list        # enumerate AP's claimable FEE/DIRECT epochs + amounts
 clif spec        # emit docs/fwd-integration-spec.md from REAL captured calldata
 ```
 
-`clif claim` and `clif auto` (the signing/submission path and the Docker
-auto-claimer) land after the operator reviews `docs/fwd-integration-spec.md`
-and provisions the matching fwd policy, wallet, and caller token.
+Claim + automation (needs fwd provisioned + the new wallet authorized on-chain
+as executor — **operator-gated for production**, Core invariant #15):
+
+```
+clif claim [-t fee|direct] [-e EPOCH] [--no-wait]   # one-shot (rehearsal/ops)
+clif auto  [--interval SECONDS]                     # resilient daemon
+clif status                                         # scrapable health
+```
+
+## How automation works
+
+A reward epoch becomes claimable when providers' reward-signing weight crosses
+**>50%** — observable on-chain as `FlareSystemsManager.rewardsHash(epoch)`
+flipping non-zero, which `clif`'s keyless discovery already detects. `clif
+auto` polls (~15 min default; epochs are ~3.5 days so this is ample), and when
+an epoch is claimable it builds the `claim` calldata and submits via fwd
+(non-blocking; fwd mines/replaces; idempotency-keyed so retries never double
+broadcast). It never exits on error: a transient failure retries next cycle; a
+**terminal** failure (policy denial / on-chain revert / fwd down) enters a
+cooldown (no fwd-denial spam) and marks clif **degraded**. Because unclaimed
+FTSO rewards eventually expire, a claimable epoch left unclaimed past
+`stale_after` (24h default) also goes degraded. Degraded state is loud in the
+logs and exposed by `clif status` (non-zero exit; also detects a dead daemon)
+for the Docker healthcheck / monitoring.
+
+Deploy: `docker compose up -d clif-auto` (see `docker-compose.yml` for the fwd
+network note). One-shot: `docker compose run --rm clif claim -t fee`.
 
 ## Configuration
 
@@ -41,6 +67,18 @@ Copy `.env.example` to `.env`. `NETWORK`, the beneficiary addresses
 (`IDENTITY_ADDRESS` for FEE, `SIGNING_POLICY_ADDRESS` for DIRECT),
 `CLAIM_RECIPIENT_ADDRESS`, and the fwd connection (`FWD_ENDPOINT`,
 `FWD_WALLET_NAME`, `FWD_CALLER_TOKEN`) are all keyless.
+
+## Knowledge base
+
+This repo is self-contained — no external repo or constitution needed.
+`CLAUDE.md` is the entry point; the binding references are:
+
+- `docs/phase8b-spec.md` — binding spec (authoritative; do not relitigate)
+- `docs/decisions.md` — settled decisions D1–D10
+- `docs/fwd-contract.md` — verified fwd HTTP + ABI contract + the policy trap
+- `docs/onchain-migration.md` — networks, actors, the >50% trigger, rotation
+- `docs/verification.md` — what's proven vs blocked; rehearsal ladder
+- `docs/fwd-integration-spec.md` — Deliverable 2 (operator handshake)
 
 ## On the signing-tool / `SIGNING_POLICY_PRIVATE_KEY`
 

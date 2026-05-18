@@ -9,9 +9,12 @@ Contract verified against `fwd/src/fwd/api/sign.py:38-161` this session:
   GET  /v1/transactions/{tx_id}  -> {status,hashes,confirmed_at} (caller-gated)
   GET  /healthz                  -> {master,rpc,fwd}
 
-Retry policy (prompt §"Verified fwd integration contract"):
-  401/403/404/503 and 400 are TERMINAL — never retry.
-  502 (rpc_unreachable) is RETRYABLE.
+Retry policy (fwd v1.0.0 taxonomy — Reviewer-binding):
+  400/401/403/404 and 422 (transaction_rejected — the node deterministically
+    refused, e.g. insufficient funds) are TERMINAL — never retry.
+  502 (rpc_unreachable), 503 (sealed-master) and ANY httpx transport error
+    (ConnectError/ReadTimeout/PoolTimeout/…) are RETRYABLE — a down or
+    restarting fwd must degrade `clif auto`, never crash it.
 
 This module is pure transport. It does not build claim calldata and does not
 decide what to sign — that orchestration is `claimer.py` (Phase 8b step 4,
@@ -27,8 +30,9 @@ import httpx
 
 from clif.models import Health, SignAndSendResponse, TxStatus
 
-_TERMINAL_STATUSES = {400, 401, 403, 404, 503}
-_RETRYABLE_STATUSES = {502}
+_TERMINAL_STATUSES = {400, 401, 403, 404, 422}
+_RETRYABLE_STATUSES = {502, 503}
+_TRANSPORT_ERROR_STATUS = 0  # synthetic: no HTTP response (down/restarting fwd)
 
 
 class FwdError(RuntimeError):
@@ -48,15 +52,30 @@ class FwdRetryableError(FwdError):
 
 
 def make_idempotency_key(
-    network: str, claim_type: int, beneficiary: str, last_epoch_id: int
+    network: str,
+    claim_type: int,
+    beneficiary: str,
+    last_epoch_id: int,
+    retry: str | None = None,
 ) -> str:
-    """Deterministic per logical claim.
+    """Deterministic per logical claim, with an explicit retry discriminator.
 
-    A retry of the same (network, claim type, beneficiary, last epoch) claim
-    replays to the same fwd `tx_id` instead of broadcasting twice. Stable
-    across processes; ≤128 chars (fwd's limit).
+    A network retry / crash-rerun of the **same logical attempt** (same
+    network, claim type, beneficiary, last epoch — and same `retry`) produces
+    the **same** key, so fwd dedups instead of broadcasting twice (the
+    double-claim safety property — must not regress).
+
+    `retry` is the operator-controlled discriminator for a **deliberate**
+    logical re-attempt after an on-chain failure (fwd replay is status-blind
+    by design — fwd D14: a cached failed tx is pinned forever for its key).
+    `retry=None` ⇒ the key is byte-identical to the legacy deterministic key.
+    A new `retry` value ⇒ a fresh key. clif never auto-generates it.
+
+    Stable across processes; ≤128 chars (fwd's limit).
     """
     raw = f"clif:{network}:{claim_type}:{beneficiary.lower()}:{last_epoch_id}"
+    if retry:
+        raw += f":retry={retry}"
     digest = hashlib.sha256(raw.encode()).hexdigest()
     return f"clif-{network}-{claim_type}-{last_epoch_id}-{digest[:16]}"
 
@@ -97,8 +116,18 @@ class FwdClient:
         # Unmapped status: treat as terminal (fail closed).
         raise FwdTerminalError(resp.status_code, err, msg)
 
+    def _transport_retryable(self, exc: httpx.RequestError) -> FwdRetryableError:
+        return FwdRetryableError(
+            _TRANSPORT_ERROR_STATUS,
+            "transport_error",
+            f"{type(exc).__name__}: {exc}",
+        )
+
     def health(self) -> Health:
-        resp = self._client.get(f"{self._base}/healthz")
+        try:
+            resp = self._client.get(f"{self._base}/healthz")
+        except httpx.RequestError as exc:
+            raise self._transport_retryable(exc) from exc
         resp.raise_for_status()
         return Health.model_validate(resp.json())
 
@@ -124,16 +153,22 @@ class FwdClient:
         headers = dict(self._auth)
         if idempotency_key is not None:
             headers["Idempotency-Key"] = idempotency_key
-        resp = self._client.post(
-            f"{self._base}/v1/sign-and-send", json=payload, headers=headers
-        )
+        try:
+            resp = self._client.post(
+                f"{self._base}/v1/sign-and-send", json=payload, headers=headers
+            )
+        except httpx.RequestError as exc:
+            raise self._transport_retryable(exc) from exc
         self._raise_for_error(resp)
         return SignAndSendResponse.model_validate(resp.json())
 
     def get_transaction(self, tx_id: str) -> TxStatus:
-        resp = self._client.get(
-            f"{self._base}/v1/transactions/{tx_id}", headers=self._auth
-        )
+        try:
+            resp = self._client.get(
+                f"{self._base}/v1/transactions/{tx_id}", headers=self._auth
+            )
+        except httpx.RequestError as exc:
+            raise self._transport_retryable(exc) from exc
         self._raise_for_error(resp)
         return TxStatus.model_validate(resp.json())
 

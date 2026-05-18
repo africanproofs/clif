@@ -59,6 +59,16 @@ class RpcClient:
         result = self._call("eth_getTransactionReceipt", [tx_hash])
         return result if result else None  # null until mined
 
+    def get_transaction_by_hash(self, tx_hash: str) -> dict | None:
+        """The mined tx (incl. on-chain `from`) — the fwd-custody proof read.
+
+        `from` is the secp256k1-recovered sender: it equals the fwd-custodied
+        executor wallet iff fwd signed. clif never signs, so this is how the
+        rehearsal proves the custody path end-to-end.
+        """
+        result = self._call("eth_getTransactionByHash", [tx_hash])
+        return result if result else None  # null until propagated
+
     # ---- typed view helpers (keyless) ----
 
     def rewards_hash(self, flare_systems_manager: str, epoch_id: int) -> str:

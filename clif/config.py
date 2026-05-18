@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -67,21 +68,55 @@ _NETWORKS: dict[str, NetworkConfig] = {
 
 
 class KeylessViolation(RuntimeError):
-    """Raised when a *PRIVATE_KEY* variable is present — clif holds no keys."""
+    """Raised when a *PRIVATE_KEY* name is present — clif holds no keys."""
 
 
-def assert_keyless() -> None:
+def _env_file_offenders(env_file: str | os.PathLike[str] | None) -> list[str]:
+    """`*PRIVATE_KEY*` key *names* declared in the resolved .env source file.
+
+    Pydantic silently ignores unknown .env keys, so a `.env` containing
+    ``CLAIM_EXECUTOR_PRIVATE_KEY=…`` would let clif start green while the
+    Phase-8b headline ("the `.env PRIVATE_KEY=` line is gone") is false. The
+    file is parsed for key names only — values are never read into the
+    environment. Missing/None file → no offenders (clean env+file passes).
+    """
+    if env_file is None:
+        return []
+    path = Path(env_file)
+    if not path.is_file():
+        return []
+    offenders: list[str] = []
+    for line in path.read_text().splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        name = s.split("=", 1)[0].strip()
+        if name.startswith("export "):
+            name = name[len("export "):].strip()
+        if "PRIVATE_KEY" in name.upper():
+            offenders.append(name)
+    return offenders
+
+
+def assert_keyless(env_file: str | os.PathLike[str] | None = ".env") -> None:
     """fwd Core invariant #7, operationalised inside clif.
 
-    If any environment variable name contains ``PRIVATE_KEY`` (e.g. a
-    leftover ``CLAIM_EXECUTOR_PRIVATE_KEY`` from the TS tool), clif refuses
-    to run. clif must never custody a signing key.
+    clif refuses to run if any ``*PRIVATE_KEY*`` name is present **either** in
+    the live environment **or** in the configured ``.env`` source file (the
+    latter is what pydantic would otherwise ignore). This *strengthens*
+    keylessness — clif still holds zero keys; a clean env+file passes.
     """
-    offenders = [k for k in os.environ if "PRIVATE_KEY" in k.upper()]
-    if offenders:
+    env_off = [k for k in os.environ if "PRIVATE_KEY" in k.upper()]
+    file_off = _env_file_offenders(env_file)
+    if env_off or file_off:
+        parts = []
+        if env_off:
+            parts.append(f"environment: {', '.join(sorted(env_off))}")
+        if file_off:
+            parts.append(f"{env_file} file: {', '.join(file_off)}")
         raise KeylessViolation(
-            "clif holds no private keys (fwd Core invariant #7). "
-            f"Remove these environment variables: {', '.join(sorted(offenders))}"
+            "clif holds no private keys (fwd Core invariant #7). Remove the "
+            f"offending *PRIVATE_KEY* name(s) — {'; '.join(parts)}"
         )
 
 
@@ -103,6 +138,27 @@ class Settings(BaseSettings):
     fwd_wallet_name: str | None = None
     fwd_caller_token: str | None = None
 
+    # Operator-controlled idempotency retry discriminator (production money
+    # path). Default None ⇒ the key is byte-identical to the legacy
+    # deterministic key, so a network retry / crash-rerun of the SAME logical
+    # attempt still collides on one key and fwd dedups (no double-claim). The
+    # operator bumps this ONLY for a deliberate logical re-attempt after an
+    # on-chain failure (fwd replay is status-blind by design — fwd D14): a new
+    # value yields a fresh idempotency key. Never auto-randomised by clif.
+    idempotency_retry: str | None = None
+
+    # Automation (clif auto). Reward epochs are ~3.5 days; the rewardsHash
+    # flip happens hours after epoch close, so a ~15 min keyless poll is
+    # ample. stale_after = how long an epoch may stay claimable-but-unclaimed
+    # before clif goes degraded (FTSO rewards eventually expire — silence is
+    # the danger). terminal_cooldown = after a terminal fwd error for an
+    # epoch, don't re-submit (and spam fwd denials) for this long, but stay
+    # degraded and loud.
+    clif_state_dir: str = ".clif-state"
+    poll_interval_sec: int = 900
+    stale_after_sec: int = 86_400
+    terminal_cooldown_sec: int = 3_600
+
     @property
     def net(self) -> NetworkConfig:
         return _NETWORKS[self.network]
@@ -115,8 +171,13 @@ class Settings(BaseSettings):
     def reward_data_url(self, epoch: int) -> str:
         return self.net.reward_data_url_template.format(epoch=epoch)
 
+    @property
+    def status_file(self) -> Path:
+        return Path(self.clif_state_dir) / "auto-status.json"
+
 
 def load_settings() -> Settings:
-    """Assert keyless first, then load .env-backed settings."""
-    assert_keyless()
+    """Assert keyless (env **and** the .env source file) first, then load."""
+    env_file = Settings.model_config.get("env_file", ".env")
+    assert_keyless(env_file)
     return Settings()

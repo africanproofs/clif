@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "clif"
-version = "0.1.0"
+version = "0.3.0"
 description = "Keyless FTSO v2 reward claimer for African Proofs — signs via the fwd daemon, holds no private keys (Phase 8b)"
 authors = ["African Proofs <dev@proofs.africa>"]
 readme = "README.md"
@@ -16,7 +16,7 @@ typer = {version = "^0.15", extras = ["all"]}
 rich = "^13.9"
 # HTTP — RPC, fwd, fsp-rewards fetch
 httpx = "^0.28"
-# ABI calldata encoding (endorsed by the Phase 8b canonical prompt).
+# ABI calldata encoding (endorsed by docs/phase8b-spec.md).
 # NOTE: deliberately NO eth-account / eth-keys / pycryptodome / web3 /
 # argon2 — those are local-signing signals and are forbidden for clif
 # (fwd Core invariant #7). keccak-256 is vendored (clif/_keccak.py) so
