@@ -63,3 +63,34 @@ clif does not edit fwd (`docs/phase8b-spec.md` constraint 2).
 
 clif builds + rehearses freely; it never performs steps 2–3, 5 and never the
 production Flare claim without explicit operator approval.
+
+## FSP actors (2026-05-19)
+
+| role | who | keyed? |
+|---|---|---|
+| **FSP signing wallet** | fwd-custodied wallet holding the signing-policy key for `signUptimeVote` / `signRewards` (Leg-1) | held by fwd; fwd admin provisions (`POST /v1/admin/wallets`); never in clif |
+| **FSP sender wallet** | fwd-custodied wallet that sends the on-chain `FlareSystemsManager` tx (Leg-2) | held by fwd; needs gas; distinct from signing wallet |
+| **FSP sign caller** (`clif-fsp-sign`) | clif's Leg-1 identity in fwd; receives `FSP_SIGN_CALLER_TOKEN` | `FSP_SIGN_CALLER_TOKEN` is keyless in clif (a Bearer token, not a signing key); authorized in fwd's `fsp_permissions` block only |
+| **FSP submit caller** (`clif-fsp-submit`) | clif's Leg-2 + tx-poll identity in fwd; receives `FSP_SUBMIT_CALLER_TOKEN` | `FSP_SUBMIT_CALLER_TOKEN` is keyless in clif; authorized in fwd's `permissions` block for FlareSystemsManager; used for `/v1/sign-and-send` and the per-caller-scoped `/v1/transactions/{id}` poll |
+
+**Two distinct callers are required (D15 MAJOR-2):** fwd's policy loader forbids
+the same `policy_path` key appearing in both `permissions` and `fsp_permissions`
+(cross-domain key reuse = fail-fast boot). One caller → one policy block. The
+Leg-1 sign caller and the Leg-2 submit caller must be different. Both are distinct
+from `FWD_CALLER_TOKEN` (the claim caller). clif never authors fwd policy.
+
+The FSP signing wallet address must be registered on-chain as the FSP provider
+for AP's identity address (chain-side operator step — offline key; clif does
+not perform this registration). Until done, Leg-2 may revert on-chain even if
+Leg-1 is successful.
+
+**Operator provisioning items (all GATE-1 — not yet done; see D15):**
+- Provision `FSP_SIGN_CALLER_TOKEN`: create `clif-fsp-sign` caller in fwd admin,
+  authorize in `fsp_permissions` block (Leg-1 `/v1/sign-fsp-message`)
+- Provision `FSP_SUBMIT_CALLER_TOKEN`: create `clif-fsp-submit` caller in fwd
+  admin, authorize in `permissions` block for FlareSystemsManager (Leg-2 +
+  per-caller-scoped tx poll)
+- Create `FSP_SIGNING_WALLET_NAME` in fwd with the signing-policy key
+- Create `FSP_SENDER_WALLET_NAME` in fwd with gas
+- Add `FlareSystemsManager` ABI + FSP policy to fwd (clif never authors this)
+- Register the FSP signing wallet address on-chain for AP's FSP role

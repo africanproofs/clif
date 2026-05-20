@@ -2,14 +2,19 @@
 
 The fsp-rewards schema mirrors the upstream Zod schema in
 `ftso-fee-claimer/src/interfaces.ts`. The fwd request/response models mirror
-`fwd/src/fwd/api/sign.py` (verified against source this session).
+`fwd/src/fwd/api/sign.py` (verified against source this session);
+`SignFspMessageResponse` ← `fwd/src/fwd/api/sign_fsp_message.py`; FSP message:
+sign_fsp_message.py.
 """
 
 from __future__ import annotations
 
+import re
 from enum import IntEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_MERKLE_ROOT_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
 
 class ClaimType(IntEnum):
@@ -94,3 +99,43 @@ class Health(BaseModel):
     master: str | None = None
     rpc: object | None = None
     fwd: str | None = None
+
+
+class SignFspMessageResponse(BaseModel):
+    """Response from fwd POST /v1/sign-fsp-message."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    message_hash: str
+    v: int
+    r: str
+    s: str
+    signature: str
+
+
+class RewardDistributionData(BaseModel):
+    """reward-distribution-data.json (not tuples variant) — epoch id, merkle root + weight count."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    reward_epoch_id: int = Field(alias="rewardEpochId")
+    merkle_root: str = Field(alias="merkleRoot")
+    no_of_weight_based_claims: int = Field(alias="noOfWeightBasedClaims")
+
+    @field_validator("merkle_root")
+    @classmethod
+    def _validate_merkle_root(cls, v: str) -> str:
+        if not _MERKLE_ROOT_RE.match(v):
+            raise ValueError(
+                f"merkleRoot must match ^0x[0-9a-fA-F]{{64}}$, got {v!r}"
+            )
+        return v
+
+    @field_validator("no_of_weight_based_claims")
+    @classmethod
+    def _validate_no_of_weight_based_claims(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                f"noOfWeightBasedClaims must be an integer >= 0, got {v}"
+            )
+        return v

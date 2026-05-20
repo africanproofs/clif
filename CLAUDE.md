@@ -1,4 +1,4 @@
-# clif — keyless FTSO reward claimer
+# clif — keyless FTSO reward claimer + keyless FSP signing-tool
 
 > Python successor to `ftso-fee-claimer`. Claims AP's FTSO v2 rewards (FEE +
 > DIRECT) on Flare/Songbird/Coston2 by calling the **fwd** signing daemon —
@@ -17,10 +17,13 @@ Inviolable. There is no `.env PRIVATE_KEY=` anywhere in clif and no
 local-signing dependency (`eth-account`, `eth-keys`, `pycryptodome`, `web3`,
 `argon2`). `clif.config.assert_keyless()` refuses to start if any
 `*PRIVATE_KEY*` env var is present. keccak-256 is vendored
-(`clif/_keccak.py`) solely to derive the `claim` selector — not a signing
-primitive. The one key operation, `RewardManager.claim`, is built locally as
-calldata and signed by **fwd**; clif never sees a key. Any change that
-re-introduces a key is a regression — STOP.
+(`clif/_keccak.py`) solely to derive the `claim` selector and FSM selectors
+(`signUptimeVote`, `signRewards`) + the `fakeVoteHash` / `UPTIME_VOTE_HASH`
+(`keccak256(0x00*32)`) — not a signing primitive. The key operations
+(`RewardManager.claim`, `FlareSystemsManager.signUptimeVote`,
+`FlareSystemsManager.signRewards`) are built locally as calldata and signed by
+**fwd**; clif never sees a key. Any change that re-introduces a key is a
+regression — STOP.
 
 ## Knowledge base (authoritative, in-repo)
 
@@ -45,6 +48,33 @@ remain **operator-gated** (fwd must be provisioned and the new wallet
 authorized on-chain as executor first). See `docs/verification.md` for the
 exact rung-by-rung state.
 
+## Status (2026-05-19)
+
+Keyless FSP signing-tool added. `fsp_calldata`, `fsp`, `fsp_autostate` modules
+code complete; `fsp uptime|rewards|status|auto` CLI commands added; 6 new test
+files (124 tests total), ruff clean, v0.4.0. Production FSP signing and the
+fwd provisioning steps remain **operator-gated** (FSP caller token, signing +
+sender wallet names, FlareSystemsManager ABI + policy in fwd — see
+`docs/verification.md` F1/F2 rungs and `docs/fsp-signing-tool-spec.md`).
+
+**Corrective pass (2026-05-19, D15, v0.5.0):** Two MAJOR defects corrected
+clif-side, surgically and additively (nothing committed — operator gates
+commits). (a) **Epoch-bind (MAJOR-1):** `reward-distribution-data.json` carries
+a top-level `rewardEpochId`; `RewardDistributionData` now requires it,
+validates `merkleRoot` `^0x[0-9a-fA-F]{64}$` and `noOfWeightBasedClaims` ≥ 0,
+and `run_sign_rewards` asserts `rdd.reward_epoch_id == reward_epoch_id` BEFORE
+Leg-1 (FAILED_TERMINAL with no sign call on mismatch — stale cache / wrong
+file). (b) **Two FSP caller tokens (MAJOR-2):** fwd forbids one `policy_path`
+key in both `permissions` and `fsp_permissions`, so one caller cannot span
+Leg-1 and Leg-2. `fsp_caller_token` replaced by `fsp_sign_caller_token`
+(Leg-1, `fsp_permissions`) and `fsp_submit_caller_token` (Leg-2 + tx poll,
+`permissions`). The orchestrator owns both clients; CLI no longer builds/passes
+an FSP `FwdClient`. (c) **`FSP_AUTO_ENABLED` hard-off:** `clif fsp auto`
+refuses loudly (exit 2, D15 message) unless `FSP_AUTO_ENABLED=true` — a valid
+signature over wrong data is irreversible on-chain. GATE-1 (F1/F2) remains
+environment-deferred; nothing here is claimed on-chain-proven. See D15 for the
+full rationale and accepted guard stack.
+
 ## fwd in one line
 
 `POST /v1/sign-and-send` (Bearer caller token, deterministic
@@ -56,11 +86,14 @@ verified contract: `docs/fwd-contract.md`.
 
 Python 3.12 · Poetry · Typer+rich · httpx (sync) · eth-abi · Pydantic v2.
 `clif/`: `config` (network table + keyless settings + `assert_keyless`),
-`models`, `rpc` (keyless view reads), `reward_data` (fsp-rewards),
-`discovery` (the >50% `rewardsHash` trigger), `calldata` (ABI-derived,
-anchored selector), `fwd_client` (transport + terminal/retry classes),
-`claimer` (discover→submit), `autostate` (degraded eval + status file),
-`cli`; `clif/abi/` vendored ABIs; `tests/`; `docs/`.
+`models`, `rpc` (keyless view reads), `reward_data` (fsp-rewards + reward
+distribution data), `discovery` (the >50% `rewardsHash` trigger), `calldata`
+(ABI-derived, anchored selector), `fsp_calldata` (FSM selectors + UPTIME_VOTE_HASH
++ calldata builders), `fwd_client` (transport + terminal/retry classes +
+`sign_fsp_message`), `claimer` (discover→submit), `fsp` (FSP Leg-1/Leg-2
+orchestrator), `autostate` (degraded eval + status file), `fsp_autostate` (FSP
+stream keys + build_fsp_report), `cli`; `clif/abi/` vendored ABIs; `tests/`;
+`docs/`.
 
 ## Working in this repo
 
@@ -93,6 +126,12 @@ Not a signer, key store, or wallet. Not multi-chain beyond
 Flare/Songbird/Coston2. No raw-digest signing. The flare-foundation
 signing-tool / `SIGNING_POLICY_PRIVATE_KEY` is out of scope — deferred to fwd
 Phase 9 (a structured protocol-message signer), never a local key.
+
+RESOLVED 2026-05-19: D7 ("signing-tool deferred") is resolved for the
+`signUptimeVote` / `signRewards` FSP protocol messages via
+`POST /v1/sign-fsp-message` (Leg-1) + `sign_and_send` to FlareSystemsManager
+(Leg-2). Raw-digest signing and `SIGNING_POLICY_PRIVATE_KEY` as a local key
+remain out of scope and forbidden.
 
 ## Origin (provenance — not a dependency)
 

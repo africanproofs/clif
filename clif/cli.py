@@ -5,6 +5,9 @@ operator-gated for production — fwd must be provisioned and the new wallet
 authorized on-chain as executor first): `claim` (one-shot), `auto` (resilient
 daemon), `status` (scrapable degraded state). The ">50% reward-signing-weight"
 trigger is the on-chain `rewardsHash` flip that `discovery` already detects.
+
+FSP signing-tool (keyless — fwd signs protocol messages): `fsp uptime`,
+`fsp rewards`, `fsp status`, `fsp auto`.
 """
 
 from __future__ import annotations
@@ -42,6 +45,13 @@ from clif.fwd_client import (
     make_idempotency_key,
 )
 from clif.models import ClaimType
+from clif.fsp import FspOutcome, run_sign_rewards, run_sign_uptime
+from clif.fsp_autostate import (
+    build_fsp_report,
+    fsp_status_exit_code,
+    fsp_stream_key,
+)
+from clif.reward_data import get_reward_distribution_data
 from clif.rpc import RpcClient, RpcError
 
 logging.basicConfig(
@@ -51,8 +61,21 @@ log = logging.getLogger("clif")
 
 app = typer.Typer(
     add_completion=False,
-    help="Keyless FTSO reward claimer — signs via the fwd daemon (Phase 8b).",
+    help=(
+        "Keyless FTSO reward claimer + FSP signing-tool — signs via the fwd daemon (Phase 8b). "
+        "Claim commands: claim, auto, status. FSP commands: fsp uptime, fsp rewards, "
+        "fsp status, fsp auto."
+    ),
 )
+
+fsp_app = typer.Typer(
+    add_completion=False,
+    help=(
+        "Keyless FSP signing-tool — fwd signs the message AND broadcasts; "
+        "clif holds zero keys."
+    ),
+)
+app.add_typer(fsp_app, name="fsp")
 console = Console()
 err = Console(stderr=True)
 
@@ -686,6 +709,221 @@ def status() -> None:
                 f"last={st['last_outcome']}"
             )
     raise typer.Exit(code)
+
+
+def _print_fsp_outcome(o: FspOutcome) -> None:
+    line = (
+        f"{o.message_type} epoch={o.reward_epoch_id} "
+        f"→ {o.status.value} ({o.detail})"
+    )
+    if o.tx_hash:
+        line += f" tx={o.tx_hash}"
+    if o.message_hash:
+        line += f" msg_hash={o.message_hash}"
+    if o.status == OutcomeStatus.SUBMITTED_MINED:
+        console.print(f"[bold green]{line}[/]")
+    elif o.status == OutcomeStatus.FAILED_TERMINAL:
+        err.print(f"[bold red]{line}[/]")
+    elif o.status == OutcomeStatus.FAILED_RETRYABLE:
+        err.print(f"[yellow]{line}[/]")
+    else:
+        console.print(line)
+
+
+@fsp_app.command()
+def uptime(
+    epoch: Annotated[int, typer.Option("--epoch", "-e", help="Reward epoch ID to sign")],
+    no_wait: Annotated[bool, typer.Option("--no-wait", help="don't poll to mined")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="skip confirmation prompt")] = False,
+    retry: Annotated[
+        Optional[str],
+        typer.Option("--retry", help="deliberate post-on-chain-failure retry discriminator"),
+    ] = None,
+) -> None:
+    """Sign an UPTIME vote via fwd (keyless — fwd signs and broadcasts).
+
+    Exit: 0 = mined/pending; 1 = transient; 2 = terminal (operator action needed).
+    """
+    s = _settings()
+    if not yes:
+        typer.confirm(f"Sign UPTIME for epoch {epoch}?", abort=True)
+    o = run_sign_uptime(s, epoch, wait=not no_wait, retry=retry)
+    _print_fsp_outcome(o)
+    raise typer.Exit(_exit_for(o.status))
+
+
+@fsp_app.command()
+def rewards(
+    epoch: Annotated[int, typer.Option("--epoch", "-e", help="Reward epoch ID to sign")],
+    no_wait: Annotated[bool, typer.Option("--no-wait", help="don't poll to mined")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="skip confirmation prompt")] = False,
+    retry: Annotated[
+        Optional[str],
+        typer.Option("--retry", help="deliberate post-on-chain-failure retry discriminator"),
+    ] = None,
+) -> None:
+    """Sign a REWARD_DISTRIBUTION for an epoch via fwd (keyless — fwd signs and broadcasts).
+
+    Fetches and validates reward-distribution-data.json first. Never signs an
+    unverified rewardsHash. Shows merkle_root + n before prompting.
+
+    Exit: 0 = mined/pending; 1 = transient; 2 = terminal (operator action needed).
+    """
+    s = _settings()
+    rdd = get_reward_distribution_data(s, epoch)
+    if rdd is None:
+        err.print(
+            f"[bold red]reward-distribution-data unavailable for epoch {epoch} "
+            "— cannot sign unverified rewardsHash[/]"
+        )
+        raise typer.Exit(2)
+    console.print(
+        f"epoch={epoch} merkle_root={rdd.merkle_root} "
+        f"no_of_weight_based_claims={rdd.no_of_weight_based_claims}"
+    )
+    if not yes:
+        typer.confirm(f"Sign REWARD_DISTRIBUTION for epoch {epoch} with the above data?", abort=True)
+    o = run_sign_rewards(s, epoch, wait=not no_wait, retry=retry)
+    _print_fsp_outcome(o)
+    raise typer.Exit(_exit_for(o.status))
+
+
+@fsp_app.command(name="status")
+def fsp_status() -> None:
+    """Scrapable FSP signing-tool health (also prints current reward epoch from chain).
+
+    Exit: 0 healthy; 2 degraded or daemon dead/stale; 3 no daemon state.
+    """
+    s = _settings()
+    report = read_status(s.fsp_status_file)
+    code, line = fsp_status_exit_code(report)
+    (console.print if code == 0 else err.print)(
+        f"[{'green' if code == 0 else 'bold red'}]{line}[/]"
+    )
+    if report is not None:
+        for st in report.get("streams", []):
+            console.print(
+                f"  {st['stream']}  pending={st.get('pending_epochs', st.get('claimable_epochs', []))}  "
+                f"last={st['last_outcome']}"
+            )
+    # Best-effort: read current epoch from chain.
+    try:
+        with RpcClient(s.rpc_url) as rpc:
+            current_epoch = rpc.get_current_reward_epoch_id(s.net.flare_systems_manager)
+            console.print(f"  current_reward_epoch_id (chain): {current_epoch}")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"  [yellow]current_reward_epoch_id: unavailable ({exc})[/]")
+    raise typer.Exit(code)
+
+
+@fsp_app.command(name="auto")
+def fsp_auto(
+    interval: Annotated[
+        Optional[int], typer.Option("--interval", help="poll interval seconds")
+    ] = None,
+    from_epoch: Annotated[
+        Optional[int], typer.Option("--from-epoch", help="start from this epoch (default: current)")
+    ] = None,
+) -> None:
+    """Resilient FSP signing daemon.
+
+    Polls the chain for closed epochs and signs UPTIME + REWARD_DISTRIBUTION
+    for each unseen epoch. Rewards data must be fetchable before a
+    REWARD_DISTRIBUTION sign is attempted — never signs an unverified rewardsHash.
+    Writes status to fsp_status_file (scraped by `clif fsp status`).
+    """
+    s = _settings()
+    # Hard-off gate: FSP_AUTO_ENABLED must be explicitly set to true.
+    # An unattended signer that signs over WRONG data still produces a
+    # cryptographically valid signature — irreversible on-chain (D15 §5 risk).
+    if not s.fsp_auto_enabled:
+        err.print(
+            "[bold red]clif fsp auto is HARD-DISABLED by default. The unattended "
+            "REWARDS auto-signer was operator-accepted 2026-05-19 (decisions.md D15), "
+            "gated on the MAJOR-1 epoch-bind. To run it the operator must explicitly "
+            "set FSP_AUTO_ENABLED=true. Refusing: a valid signature over wrong data is "
+            "irreversible on-chain (D15 §5 risk).[/]"
+        )
+        raise typer.Exit(2)
+
+    iv = interval or s.fsp_poll_interval_sec
+    state = AutoState()
+
+    # Determine watermark epoch: sign only epochs that close while we run,
+    # unless --from-epoch overrides.
+    watermark: int | None = None
+    if from_epoch is not None:
+        watermark = from_epoch
+        log.info("fsp auto watermark from --from-epoch=%s", watermark)
+    else:
+        try:
+            with RpcClient(s.rpc_url) as rpc:
+                watermark = rpc.get_current_reward_epoch_id(s.net.flare_systems_manager)
+                log.info("fsp auto watermark from chain current_epoch=%s", watermark)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("fsp auto: could not read current epoch (%s); watermark=0", exc)
+            watermark = 0
+
+    log.info(
+        "fsp auto start network=%s interval=%ss watermark=%s state=%s",
+        s.network, iv, watermark, s.fsp_status_file,
+    )
+
+    message_types = ["UPTIME", "REWARD_DISTRIBUTION"]
+    try:
+        while True:
+            now = time.time()
+            try:
+                with RpcClient(s.rpc_url) as rpc:
+                    current_epoch = rpc.get_current_reward_epoch_id(s.net.flare_systems_manager)
+                    # Act on closed epochs (< current) that are >= watermark.
+                    closed_epochs = list(range(watermark, current_epoch))
+                    for mt in message_types:
+                        key = fsp_stream_key(s.network, mt)
+                        # Track unsigned epochs as "pending" in the stream.
+                        _ = state.observe(key, closed_epochs, now)
+                        for epoch in closed_epochs:
+                            if state.in_cooldown(key, epoch, now):
+                                log.error(
+                                    "fsp auto %s epoch %s in terminal cooldown — skipping "
+                                    "(degraded; operator action likely needed)", key, epoch,
+                                )
+                                state.record_attempt(key, now, "terminal-cooldown")
+                                continue
+                            o = (run_sign_uptime if mt == "UPTIME" else run_sign_rewards)(
+                                s, epoch, wait=False,
+                            )
+                            state.record_attempt(key, now, o.status.value)
+                            if o.ok:
+                                log.info(
+                                    "fsp auto %s epoch %s submitted tx=%s",
+                                    key, epoch, o.tx_hash,
+                                )
+                            elif o.status == OutcomeStatus.FAILED_RETRYABLE:
+                                log.warning(
+                                    "fsp auto %s epoch %s transient: %s (retry next cycle)",
+                                    key, epoch, o.detail,
+                                )
+                            elif o.status == OutcomeStatus.FAILED_TERMINAL:
+                                state.record_terminal(
+                                    key, epoch, now, s.fsp_terminal_cooldown_sec
+                                )
+                                log.error(
+                                    "fsp auto %s epoch %s TERMINAL: %s — operator action likely needed",
+                                    key, epoch, o.detail,
+                                )
+            except RpcError as exc:
+                log.warning("fsp auto rpc failure: %s (retry next cycle)", exc)
+            except FwdRetryableError as exc:
+                log.warning("fsp auto fwd retryable: %s (retry next cycle)", exc)
+
+            report = build_fsp_report(state, s.network, iv, s.fsp_stale_after_sec, time.time())
+            write_status_atomic(s.fsp_status_file, report)
+            if report["degraded"]:
+                log.error("fsp auto DEGRADED: %s", "; ".join(report["reasons"]))
+            time.sleep(iv)
+    except KeyboardInterrupt:
+        log.info("fsp auto stopped")
 
 
 if __name__ == "__main__":

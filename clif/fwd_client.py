@@ -24,11 +24,14 @@ post operator gate).
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 
 import httpx
 
-from clif.models import Health, SignAndSendResponse, TxStatus
+from clif.models import Health, SignAndSendResponse, SignFspMessageResponse, TxStatus
+
+_REWARDS_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
 _TERMINAL_STATUSES = {400, 401, 403, 404, 422}
 _RETRYABLE_STATUSES = {502, 503}
@@ -49,6 +52,26 @@ class FwdTerminalError(FwdError):
 
 class FwdRetryableError(FwdError):
     """May retry after backoff (RPC unreachable)."""
+
+
+def make_fsp_idempotency_key(
+    network: str,
+    message_type: str,
+    reward_epoch_id: int,
+    leg: str,
+    retry: str | None = None,
+) -> str:
+    """Deterministic FSP idempotency key, ≤128 chars.
+
+    Stable per (network, message_type, epoch, leg, retry). The `leg` param
+    distinguishes Leg-1 (sign) from Leg-2 (submit) so each leg has an
+    independent dedup window at fwd.
+    """
+    raw = f"clif-fsp:{network}:{message_type}:{reward_epoch_id}:{leg}"
+    if retry:
+        raw += f":retry={retry}"
+    digest = hashlib.sha256(raw.encode()).hexdigest()
+    return f"clif-fsp-{network}-{message_type.lower()}-{reward_epoch_id}-{leg}-{digest[:16]}"
 
 
 def make_idempotency_key(
@@ -161,6 +184,72 @@ class FwdClient:
             raise self._transport_retryable(exc) from exc
         self._raise_for_error(resp)
         return SignAndSendResponse.model_validate(resp.json())
+
+    def sign_fsp_message(
+        self,
+        wallet: str,
+        message_type: str,
+        reward_epoch_id: int,
+        *,
+        chain_id: int | None = None,
+        no_of_weight_based_claims: int | None = None,
+        rewards_hash: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> SignFspMessageResponse:
+        """POST /v1/sign-fsp-message — Leg-1 of the FSP signing-tool path.
+
+        fwd signs the FSP message (UPTIME or REWARD_DISTRIBUTION) and returns
+        (message_hash, v, r, s, signature). clif never sees a key. Leg-2 is
+        the existing sign_and_send to FlareSystemsManager with the built calldata.
+
+        Cross-field rules (fail-loud before any HTTP — D14):
+        - UPTIME: chain_id / no_of_weight_based_claims / rewards_hash must all be None.
+        - REWARD_DISTRIBUTION: all three must be present; rewards_hash must match
+          ^0x[0-9a-fA-F]{64}$.
+        - Unknown message_type: ValueError.
+        """
+        rd_fields = (chain_id, no_of_weight_based_claims, rewards_hash)
+        if message_type == "UPTIME":
+            if any(f is not None for f in rd_fields):
+                raise ValueError(
+                    "UPTIME: chain_id / no_of_weight_based_claims / rewards_hash must all be None"
+                )
+        elif message_type == "REWARD_DISTRIBUTION":
+            if any(f is None for f in rd_fields):
+                raise ValueError(
+                    "REWARD_DISTRIBUTION: chain_id, no_of_weight_based_claims, "
+                    "and rewards_hash are all required"
+                )
+            assert rewards_hash is not None  # type narrowing for mypy
+            if not _REWARDS_HASH_RE.match(rewards_hash):
+                raise ValueError(
+                    f"rewards_hash must match ^0x[0-9a-fA-F]{{64}}$, got {rewards_hash!r}"
+                )
+        else:
+            raise ValueError(f"Unknown message_type {message_type!r}; expected UPTIME or REWARD_DISTRIBUTION")
+
+        payload: dict = {
+            "wallet": wallet,
+            "message_type": message_type,
+            "reward_epoch_id": reward_epoch_id,
+        }
+        if message_type == "REWARD_DISTRIBUTION":
+            payload["chain_id"] = chain_id
+            payload["no_of_weight_based_claims"] = no_of_weight_based_claims
+            payload["rewards_hash"] = rewards_hash
+
+        headers = dict(self._auth)
+        if idempotency_key is not None:
+            headers["Idempotency-Key"] = idempotency_key
+
+        try:
+            resp = self._client.post(
+                f"{self._base}/v1/sign-fsp-message", json=payload, headers=headers
+            )
+        except httpx.RequestError as exc:
+            raise self._transport_retryable(exc) from exc
+        self._raise_for_error(resp)
+        return SignFspMessageResponse.model_validate(resp.json())
 
     def get_transaction(self, tx_id: str) -> TxStatus:
         try:

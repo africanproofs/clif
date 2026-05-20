@@ -60,3 +60,66 @@
   never crashes it (D4 reward-expiry monitoring must survive fwd downtime).
   *Why: fwd v1.0.0 audit STOP-SHIP #3; fwd is correct-as-designed (a down
   fwd cannot emit a status — resilience is the consumer's).*
+- **D14 — FSP signing-tool mandate expansion (2026-05-19).** D7 ("signing-tool
+  deferred to fwd Phase 9") is **RESOLVED** for `signUptimeVote` /
+  `signRewards` via fwd's new `POST /v1/sign-fsp-message` endpoint (Leg-1) +
+  the existing `sign_and_send` to `FlareSystemsManager` (Leg-2). Settled:
+  (a) keccak scope extends to FSM selectors + `fakeVoteHash` (`keccak256(0x00*32)`
+  = UPTIME_VOTE_HASH); (b) two distinct fwd wallets/callers — `fsp_signing_wallet_name`
+  (Leg-1) and `fsp_sender_wallet_name` (Leg-2) separate from the claim wallet; (c) FSP
+  automation (`clif fsp auto`) implements both signing forms including a resilient
+  unattended daemon whose wrong-data guard is strict file validation +
+  deterministic idempotency with NO human confirm (operator-accepted 2026-05-19);
+  (d) `chain_id` for the `_noOfWeightBasedClaims` tuple is taken from the static
+  network table (`net.chain_id`) — no dynamic lookup required (static-table
+  chain_id simplification); (e) raw-digest signing and `SIGNING_POLICY_PRIVATE_KEY`
+  as a local key remain out of scope (Core invariant #7, D1).
+  *Why: AP expanded clif's mandate to cover FSP message signing; fwd Phase 9
+  is satisfied for the reward-epoch signing messages.*
+- **D15 — FSP corrective pass + unattended REWARDS auto-signer (2026-05-19).**
+  Appends to (does not edit) D14; supersedes/clarifies D14(c)'s thin
+  "operator-accepted 2026-05-19 / NO human confirm" sub-claim (D14 frozen).
+  Two MAJOR defects in the code-complete FSP client were corrected clif-side,
+  additively, nothing committed (operator gates commits).
+  **(a) Epoch-bind (MAJOR-1).** `reward-distribution-data.json` carries a
+  top-level `rewardEpochId` (== directory epoch; confirmed flare/230,
+  songbird/200, coston2/3156); upstream `signing-tool@838b87f`
+  `getRewardsData()` asserts `data.rewardEpochId === rewardEpochId`. clif now
+  mirrors it: `RewardDistributionData.reward_epoch_id` is required, `merkleRoot`
+  is regex-validated `^0x[0-9a-fA-F]{64}$`, `noOfWeightBasedClaims` is
+  validated integer ≥ 0, and `run_sign_rewards` asserts `rdd.reward_epoch_id
+  == reward_epoch_id` BEFORE Leg-1 — a stale cache / wrong-epoch / wrong
+  operator file is FAILED_TERMINAL with no sign call. The prior
+  `"fsp rdd verified"` log (which verified nothing about the epoch) is replaced
+  with one stating exactly what was bound.
+  **(b) Two FSP caller tokens (MAJOR-2).** fwd's policy loader forbids the
+  same `policy_path` key in both `permissions` and `fsp_permissions`
+  (cross-domain key reuse = fail-fast boot), so one caller authorizes EITHER
+  `/v1/sign-fsp-message` OR `/v1/sign-and-send`, never both. clif replaces the
+  single `fsp_caller_token` with `fsp_sign_caller_token` (Leg-1) and
+  `fsp_submit_caller_token` (Leg-2 + the per-caller-scoped tx poll), both
+  distinct from the fee-claimer `fwd_caller_token`. The two FSP wallets are
+  unchanged. The orchestrator owns both clients (the per-leg→caller mapping is
+  centralized; the CLI no longer builds/passes an FSP `FwdClient`). Operator
+  provisions two fwd callers (`clif-fsp-sign` → `fsp_permissions`;
+  `clif-fsp-submit` → `permissions` for FlareSystemsManager) — an operator
+  task; clif never authors fwd policy nor mints credentials.
+  **(c) Unattended REWARDS auto-signer — operator explicitly ACCEPTED
+  2026-05-19.** §5 risk in plain terms: an unattended signer that signs over
+  the WRONG data still produces a cryptographically valid signature, and that
+  is irreversible on-chain — strictly worse than no signature at all. The
+  guard stack accepted as sufficient: epoch-bound rdd (the `rewardEpochId`
+  equality assert of (a), which the auto path inherits because the bind lives
+  in `run_sign_rewards` — "no auto-sign of REWARDS over an unbound merkle
+  root, ever"); strict file validation (merkleRoot regex + n≥0); deterministic
+  idempotency (fwd dedups a re-run); fwd's on-chain already-signed revert; and
+  OFF-BY-DEFAULT with an explicit `FSP_AUTO_ENABLED=true` enable (`clif fsp
+  auto` refuses loudly and terminally otherwise). **clif-only /
+  fwd-automation-agnostic boundary:** the auto path is entirely clif-side; it
+  introduces/assumes/requests NO fwd-side automation, scheduling, auto-endpoint,
+  or automation-aware policy (the implementation has zero fwd-automation
+  footprint — kept and stated).
+  *Why: AP/operator accepted (2026-05-19) the unattended REWARDS auto-signer
+  under the above guard stack; the two MAJOR defects were corrected clif-side,
+  surgically and additively, before any on-chain use (GATE-1 remains
+  environment-deferred — nothing here is claimed on-chain-proven).*

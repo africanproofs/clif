@@ -16,12 +16,35 @@ import httpx
 from pydantic import ValidationError
 
 from clif.config import Settings
-from clif.models import RewardsData
+from clif.models import RewardDistributionData, RewardsData
 
 
 def _local_path(network: str, epoch: int) -> Path | None:
     p = Path.cwd() / "rewards-data" / network / str(epoch) / "reward-distribution-data-tuples.json"
     return p if p.exists() else None
+
+
+def get_reward_distribution_data(settings: Settings, epoch: int) -> RewardDistributionData | None:
+    """Fetch reward-distribution-data.json (not the tuples variant).
+
+    Prefers a local cache at rewards-data/{network}/{epoch}/reward-distribution-data.json,
+    otherwise fetches from the network URL (reward_distribution_url). Returns None on
+    any failure — the caller treats missing data as a terminal guard (never sign
+    unverified rewardsHash).
+    """
+    try:
+        local = (
+            Path.cwd() / "rewards-data" / settings.network / str(epoch) / "reward-distribution-data.json"
+        )
+        if local.exists():
+            return RewardDistributionData.model_validate_json(local.read_text())
+        url = settings.reward_distribution_url(epoch)
+        resp = httpx.get(url, timeout=30.0, follow_redirects=True)
+        resp.raise_for_status()
+        return RewardDistributionData.model_validate(resp.json())
+    except (httpx.HTTPError, ValidationError, ValueError, OSError) as exc:
+        print(f"Error fetching reward distribution data for epoch {epoch}: {exc}", file=sys.stderr)
+        return None
 
 
 def get_reward_calculation_data(settings: Settings, epoch: int) -> RewardsData | None:

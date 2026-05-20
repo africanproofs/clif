@@ -89,3 +89,10 @@ class RpcClient:
         data = "0x" + selector("getRewardEpochIdsWithClaimableRewards()").hex()
         start, end = abi_decode(["uint24", "uint24"], self.eth_call(reward_manager, data))
         return int(start), int(end)
+
+    def get_current_reward_epoch_id(self, flare_systems_manager: str) -> int:
+        """Read getCurrentRewardEpochId() → uint24 from FlareSystemsManager (keyless)."""
+        # Selector: keccak256("getCurrentRewardEpochId()")[:4] = 0x70562697 (verified anchor)
+        data = "0x" + selector("getCurrentRewardEpochId()").hex()
+        (out,) = abi_decode(["uint24"], self.eth_call(flare_systems_manager, data))
+        return int(out)

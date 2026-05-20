@@ -1,4 +1,8 @@
 .env
+# per-network deployment env files (.env.flare/.env.songbird/.env.coston2)
+# carry operator-injected fwd caller tokens — never committed (Core #12).
+.env.*
+!.env.example
 __pycache__/
 *.py[cod]
 *.egg-info/

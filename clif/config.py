@@ -159,6 +159,28 @@ class Settings(BaseSettings):
     stale_after_sec: int = 86_400
     terminal_cooldown_sec: int = 3_600
 
+    # FSP signing-tool (keyless — Leg-1 is fwd /v1/sign-fsp-message, Leg-2 is
+    # fwd /v1/sign-and-send to FlareSystemsManager). Distinct caller tokens and
+    # wallet names from the claim path (D14: two different fwd wallets/callers).
+    #
+    # fwd cross-domain policy_path rule: fwd's policy loader forbids the SAME
+    # policy_path key appearing in both `permissions` and `fsp_permissions`
+    # (cross-domain key reuse = fail-fast boot). One caller → one policy_path
+    # → one block. So one caller authorizes EITHER /v1/sign-fsp-message (Leg-1,
+    # fsp_permissions) OR /v1/sign-and-send (Leg-2, permissions) — never both.
+    # tx poll /v1/transactions/{id} is per-caller-scoped → it MUST use the
+    # Leg-2 (submit) caller.
+    fsp_sign_caller_token: str | None = None   # Leg-1: /v1/sign-fsp-message (fsp_permissions)
+    fsp_submit_caller_token: str | None = None  # Leg-2 + tx poll: /v1/sign-and-send (permissions)
+    fsp_auto_enabled: bool = False
+    fsp_signing_wallet_name: str | None = None
+    fsp_sender_wallet_name: str | None = None
+    fsp_submit_gas: int = 500_000
+    fsp_idempotency_retry: str | None = None
+    fsp_poll_interval_sec: int = 900
+    fsp_stale_after_sec: int = 86_400
+    fsp_terminal_cooldown_sec: int = 3_600
+
     @property
     def net(self) -> NetworkConfig:
         return _NETWORKS[self.network]
@@ -171,9 +193,18 @@ class Settings(BaseSettings):
     def reward_data_url(self, epoch: int) -> str:
         return self.net.reward_data_url_template.format(epoch=epoch)
 
+    def reward_distribution_url(self, epoch: int) -> str:
+        return self.net.reward_data_url_template.format(epoch=epoch).replace(
+            "reward-distribution-data-tuples.json", "reward-distribution-data.json"
+        )
+
     @property
     def status_file(self) -> Path:
-        return Path(self.clif_state_dir) / "auto-status.json"
+        return Path(self.clif_state_dir) / f"auto-status-{self.network}.json"
+
+    @property
+    def fsp_status_file(self) -> Path:
+        return Path(self.clif_state_dir) / f"fsp-auto-status-{self.network}.json"
 
 
 def load_settings() -> Settings:

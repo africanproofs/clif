@@ -6,6 +6,28 @@
 # prefixed (typically `fwd_fwd-callers`); override via FWD_NETWORK in .env if
 # different. If clif runs on another host, set FWD_ENDPOINT to a reachable URL
 # and replace the external network with a normal bridge.
+#
+# Multichain cutover (profile: multichain) — replaces the upstream
+# `~/opt/signing-tool` hot-key signer. clif drives ONE shared fwd for
+# Flare (14) ∥ Songbird (19) ∥ Coston2 (114) in parallel: per network, one
+# keyless fee-claim daemon (`auto`) + one FSP daemon (`fsp auto`), each with
+# its own gitignored `.env.<network>` and its own `CLIF_STATE_DIR`. Notes:
+#  - Per-network `CLIF_STATE_DIR` (e.g. `.clif-state/flare`) is REQUIRED in
+#    each `.env.<network>` — defense in depth on top of the now
+#    network-scoped status filenames (clean per-network logs/backups).
+#  - The fwd signing-policy wallet `clif-fsp-signing-policy-prod` and sender
+#    `clif-fsp-sender` are the SAME on every network; chain is a runtime
+#    parameter on the fwd side — clif only selects `NETWORK`.
+#  - Every process MUST boot keyless: no `*PRIVATE_KEY*` in env or the
+#    resolved `.env.<network>` (config.assert_keyless). clif holds no keys.
+#  - The FSP daemon stays hard-disabled unless `FSP_AUTO_ENABLED=true` in
+#    that network's env file (D15). Per-network fwd caller tokens are
+#    operator-injected secrets (Core #12) — only in the gitignored
+#    `.env.<network>`, never in this file.
+# Run a single network's pair, e.g.:
+#   docker compose --profile multichain up -d clif-auto-flare clif-fsp-auto-flare
+# or all three networks' daemons:
+#   docker compose --profile multichain up -d
 
 services:
   clif-auto:
@@ -34,6 +56,109 @@ services:
     entrypoint: ["clif"]
     # one-shot, e.g.:  docker compose run --rm clif claim --type fee
     # rehearsal:        docker compose run --rm clif claim --type fee --epoch <N>
+
+  # --- Multichain (Flare ∥ Songbird ∥ Coston2), one shared fwd ---
+  # Each service: own gitignored .env.<network> (NETWORK, CLIF_STATE_DIR,
+  # FWD_ENDPOINT, the per-network FSP_*_CALLER_TOKEN secrets, the shared
+  # FSP_SIGNING_WALLET_NAME=clif-fsp-signing-policy-prod /
+  # FSP_SENDER_WALLET_NAME=clif-fsp-sender). Additive — the single-network
+  # clif-auto/clif services above are unchanged.
+
+  clif-auto-coston2:
+    build: .
+    image: clif:dev
+    container_name: clif-auto-coston2
+    command: ["auto"]
+    env_file: [.env.coston2]
+    networks: [fwd-net]
+    profiles: ["multichain"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "clif", "status"]
+      interval: 300s
+      timeout: 15s
+      retries: 3
+      start_period: 1200s
+
+  clif-fsp-auto-coston2:
+    build: .
+    image: clif:dev
+    container_name: clif-fsp-auto-coston2
+    command: ["fsp", "auto"]
+    env_file: [.env.coston2]
+    networks: [fwd-net]
+    profiles: ["multichain"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "clif", "fsp", "status"]
+      interval: 300s
+      timeout: 15s
+      retries: 3
+      start_period: 1200s
+
+  clif-auto-songbird:
+    build: .
+    image: clif:dev
+    container_name: clif-auto-songbird
+    command: ["auto"]
+    env_file: [.env.songbird]
+    networks: [fwd-net]
+    profiles: ["multichain"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "clif", "status"]
+      interval: 300s
+      timeout: 15s
+      retries: 3
+      start_period: 1200s
+
+  clif-fsp-auto-songbird:
+    build: .
+    image: clif:dev
+    container_name: clif-fsp-auto-songbird
+    command: ["fsp", "auto"]
+    env_file: [.env.songbird]
+    networks: [fwd-net]
+    profiles: ["multichain"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "clif", "fsp", "status"]
+      interval: 300s
+      timeout: 15s
+      retries: 3
+      start_period: 1200s
+
+  clif-auto-flare:
+    build: .
+    image: clif:dev
+    container_name: clif-auto-flare
+    command: ["auto"]
+    env_file: [.env.flare]
+    networks: [fwd-net]
+    profiles: ["multichain"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "clif", "status"]
+      interval: 300s
+      timeout: 15s
+      retries: 3
+      start_period: 1200s
+
+  clif-fsp-auto-flare:
+    build: .
+    image: clif:dev
+    container_name: clif-fsp-auto-flare
+    command: ["fsp", "auto"]
+    env_file: [.env.flare]
+    networks: [fwd-net]
+    profiles: ["multichain"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "clif", "fsp", "status"]
+      interval: 300s
+      timeout: 15s
+      retries: 3
+      start_period: 1200s
 
 networks:
   fwd-net:

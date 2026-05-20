@@ -81,3 +81,25 @@ clif spec      # regenerate the operator handshake artifact
 clif status    # exit 3 with no daemon (correct)
 clif rehearse  # rehearsal-ladder fwd-custody proof (needs fwd + caller token)
 ```
+
+## FSP verification ladder (2026-05-19)
+
+| rung | confirms | status | blocker |
+|---|---|---|---|
+| F0 | FSP unit logic: selectors, UPTIME_VOTE_HASH, calldata builders, cross-field validation (merkleRoot regex, n≥0), epoch-bind (`rdd.reward_epoch_id==signing_epoch`), two-caller per-leg mapping, oracle vector parse | ✅ done | — see suite (ruff clean, both selectors anchored `0xdc5a4225`/`0xc00a1a97`) |
+| F1 | clif ↔ fwd FSP transport (Leg-1 `/v1/sign-fsp-message` with `FSP_SIGN_CALLER_TOKEN`; Leg-2 `/v1/sign-and-send` + tx poll with `FSP_SUBMIT_CALLER_TOKEN`) | ⛔ GATE-1 env-deferred | env: `FSP_SIGN_CALLER_TOKEN` / `FSP_SUBMIT_CALLER_TOKEN` / `FSP_SIGNING_WALLET_NAME` / `FSP_SENDER_WALLET_NAME` not provisioned; two fwd FSP callers not created; fwd `/v1/sign-fsp-message` endpoint not confirmed |
+| F2 | end-to-end FSP on Coston2 (mined, correct `from`); live byte-match of oracle vectors | ⛔ GATE-1 env+operator | F1 + operator provisions fwd FSP policy + wallets; on-chain FSP registration |
+
+F1/F2 are environment-deferred. No code defect blocks them. GATE-1 remains
+(nothing here is claimed on-chain-proven). Operator items (see D15 MAJOR-2):
+- Provision `FSP_SIGN_CALLER_TOKEN` (`clif-fsp-sign` caller → `fsp_permissions`
+  block in fwd; authorizes Leg-1 `/v1/sign-fsp-message`)
+- Provision `FSP_SUBMIT_CALLER_TOKEN` (`clif-fsp-submit` caller → `permissions`
+  block for FlareSystemsManager; authorizes Leg-2 + per-caller-scoped tx poll)
+- Create `FSP_SIGNING_WALLET_NAME` and `FSP_SENDER_WALLET_NAME` in fwd
+- Add `FlareSystemsManager` ABI + FSP policy to fwd (clif never authors fwd policy)
+- Register AP's signing wallet on-chain for the FSP role
+
+Set `CLIF_FSP_LIVE_FWD=1` + env vars to run the live byte-match upgrade in
+`test_fsp_integration_oracle.py::test_live_uptime_byte_match` (uses
+`FSP_SIGN_CALLER_TOKEN` — the Leg-1 sign caller).
