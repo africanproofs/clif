@@ -62,8 +62,15 @@ def collect_reward_claims(
     still range-checked against the on-chain claimable window.
     """
     if only_epoch is not None:
+        # Gate the single-epoch path against the SAME claimable window the auto
+        # path uses (claimable_epoch_ids): refuse an already-claimed, out-of-range
+        # or not-yet-signed epoch, so we never build a silent no-op claim.
+        # (next_claimable advances past an epoch once it is claimed.)
+        start = rpc.next_claimable_reward_epoch_id(settings.net.reward_manager, beneficiary)
         _, end = rpc.reward_epoch_id_range(settings.net.reward_manager)
-        if only_epoch > end:
+        if not (start <= only_epoch <= end):
+            return []
+        if rpc.rewards_hash(settings.net.flare_systems_manager, only_epoch) == ZERO_BYTES32:
             return []
         epochs = [only_epoch]
     else:

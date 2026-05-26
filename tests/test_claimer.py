@@ -5,7 +5,7 @@ import httpx
 import clif.claimer as claimer_mod
 
 from clif.claimer import OutcomeStatus, run_claim, submit_claims
-from clif.config import Settings
+from clif.config import ZERO_BYTES32, Settings
 from clif.fwd_client import (
     FwdClient,
     FwdRetryableError,
@@ -61,6 +61,35 @@ class FakeFwd:
         if self._wait_exc:
             raise self._wait_exc
         return self._wait
+
+
+class FakeRpc:
+    """Keyless-RPC stub: run_claim `-e` pre-flight + submit_claims post-flight."""
+
+    def __init__(
+        self,
+        *,
+        next_claimable=0,
+        end=10**9,
+        rewards_hash="0x" + "11" * 32,
+        receipt_log_addr=None,
+    ):
+        self._nc = next_claimable
+        self._end = end
+        self._rh = rewards_hash
+        self._addr = receipt_log_addr
+
+    def next_claimable_reward_epoch_id(self, _rm, _owner):
+        return self._nc
+
+    def reward_epoch_id_range(self, _rm):
+        return (0, self._end)
+
+    def rewards_hash(self, _fsm, _epoch):
+        return self._rh
+
+    def get_transaction_receipt(self, _tx_hash):
+        return {"logs": [{"address": self._addr}] if self._addr else []}
 
 
 def test_missing_fwd_config_is_terminal():
@@ -153,7 +182,9 @@ def test_run_claim_delegates_to_submit(monkeypatch):
         send=SignAndSendResponse(tx_id="t", hash="0xh", nonce=0),
         wait=TxStatus(status="mined"),
     )
-    o = run_claim(_settings(), object(), fwd, 1, BENEF)
+    s = _settings()
+    rpc = FakeRpc(receipt_log_addr=s.net.reward_manager)
+    o = run_claim(s, rpc, fwd, 1, BENEF)
     assert o.status == OutcomeStatus.SUBMITTED_MINED and o.epochs == [7]
 
 
@@ -209,3 +240,65 @@ def test_down_fwd_yields_retryable_not_raise():
     o = submit_claims(_settings(), fwd, 1, BENEF, _claims(10), wait=False)
     assert o.status == OutcomeStatus.FAILED_RETRYABLE
     assert o.last_epoch == 10
+
+
+# ---- catch + communicate the already-claimed no-op (regression of the
+#      false-success that reported a mined no-op as a successful claim) ----
+
+
+def test_run_claim_e_already_claimed_is_clear_nothing_claimable():
+    """`clif claim -e <claimed epoch>` must NOT submit a no-op; it reports
+    NOTHING_CLAIMABLE with the precise reason (no FakeFwd send happens)."""
+    fwd = FakeFwd(send_exc=AssertionError("must not submit an already-claimed epoch"))
+    rpc = FakeRpc(next_claimable=401, end=410)  # epoch 400 < 401 ⇒ already claimed
+    o = run_claim(_settings(), rpc, fwd, 1, BENEF, only_epoch=400)
+    assert o.status == OutcomeStatus.NOTHING_CLAIMABLE
+    assert "already claimed" in o.detail and "401" in o.detail
+    assert fwd.sent_kwargs is None  # never reached sign-and-send
+
+
+def test_run_claim_e_not_yet_signed_is_clear():
+    rpc = FakeRpc(next_claimable=400, end=410, rewards_hash=ZERO_BYTES32)
+    o = run_claim(_settings(), rpc, FakeFwd(), 1, BENEF, only_epoch=400)
+    assert o.status == OutcomeStatus.NOTHING_CLAIMABLE
+    assert "not yet signed" in o.detail
+
+
+def test_run_claim_e_out_of_range_is_clear():
+    rpc = FakeRpc(next_claimable=0, end=399)  # epoch 400 > 399
+    o = run_claim(_settings(), rpc, FakeFwd(), 1, BENEF, only_epoch=400)
+    assert o.status == OutcomeStatus.NOTHING_CLAIMABLE
+    assert "not in claimable range" in o.detail
+
+
+def test_submit_claims_mined_noop_when_no_reward_event():
+    """status-0x1 mined + NO RewardManager log ⇒ MINED_NOOP, never SUBMITTED_MINED."""
+    fwd = FakeFwd(
+        send=SignAndSendResponse(tx_id="t", hash="0xh", nonce=0),
+        wait=TxStatus(status="mined"),
+    )
+    rpc = FakeRpc(receipt_log_addr=None)  # no logs ⇒ claimed nothing
+    o = submit_claims(_settings(), fwd, 1, BENEF, _claims(10), wait=True, rpc=rpc)
+    assert o.status == OutcomeStatus.MINED_NOOP
+    assert "claimed nothing" in o.detail
+
+
+def test_submit_claims_real_claim_has_reward_event():
+    s = _settings()
+    fwd = FakeFwd(
+        send=SignAndSendResponse(tx_id="t", hash="0xh", nonce=0),
+        wait=TxStatus(status="mined"),
+    )
+    rpc = FakeRpc(receipt_log_addr=s.net.reward_manager)  # RewardClaimed log present
+    o = submit_claims(s, fwd, 1, BENEF, _claims(10), wait=True, rpc=rpc)
+    assert o.status == OutcomeStatus.SUBMITTED_MINED
+
+
+def test_submit_claims_mined_without_rpc_is_legacy_mined():
+    """No rpc supplied ⇒ no post-flight ⇒ legacy SUBMITTED_MINED (back-compat)."""
+    fwd = FakeFwd(
+        send=SignAndSendResponse(tx_id="t", hash="0xh", nonce=0),
+        wait=TxStatus(status="mined"),
+    )
+    o = submit_claims(_settings(), fwd, 1, BENEF, _claims(10), wait=True)
+    assert o.status == OutcomeStatus.SUBMITTED_MINED
