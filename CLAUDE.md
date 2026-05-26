@@ -25,6 +25,25 @@ local-signing dependency (`eth-account`, `eth-keys`, `pycryptodome`, `web3`,
 **fwd**; clif never sees a key. Any change that re-introduces a key is a
 regression — STOP.
 
+## Hard rule — a mined tx is not a successful operation (verify the effect, not the status)
+
+Inviolable, like the keyless rule. **Never report or record an on-chain write
+(claim, FSP submission, transfer, registration) as successful from its mined
+receipt / `status == 0x1`, a tool's "submitted/mined" line, or a balance compared
+against a stale baseline.** Success is proven ONLY by the intended effect of *that
+exact transaction* — its emitted event and/or resulting state change
+(`RewardManager.claim` ⇒ a `RewardClaimed` log with amount > 0; per-tx, never
+aggregate). Contract behaviour is not uniform: `signUptimeVote` / `signRewards`
+**revert** when already done, but `RewardManager.claim` **silently no-ops with
+`status 0x1` and no event** on an already-claimed epoch. clif enforces this in
+`clif/claimer.py` / `clif/discovery.py`: (a) **pre-flight** refuses an
+already-claimed / out-of-range / not-yet-signed `-e` epoch with the precise reason
+(no no-op submitted); (b) **post-flight** reports a mined claim with no
+`RewardManager` event as the distinct `MINED_NOOP` outcome, never `SUBMITTED_MINED`.
+A no-op is never reported as success. See `docs/decisions.md` D16. *Codified
+2026-05-26 after a mined no-op (already-claimed epoch) was briefly mis-reported as a
+successful claim — caught by the operator claiming the epoch manually first.*
+
 ## Knowledge base (authoritative, in-repo)
 
 Read these before non-trivial work; they are the binding references:

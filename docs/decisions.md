@@ -123,3 +123,22 @@
   under the above guard stack; the two MAJOR defects were corrected clif-side,
   surgically and additively, before any on-chain use (GATE-1 remains
   environment-deferred — nothing here is claimed on-chain-proven).*
+- **D16 — A mined tx is not a successful operation; verify the EFFECT (2026-05-26).**
+  Hard rule, paired with D1's keyless invariant. Never assert an on-chain write
+  succeeded from its mined receipt / `status == 0x1`, a tool's "submitted/mined"
+  line, or a balance delta vs a stale baseline — proof is the intended effect of
+  THAT exact tx (its event / state change; `RewardManager.claim` ⇒ a `RewardClaimed`
+  log with amount > 0, per-tx not aggregate). Behaviour is not uniform:
+  `signUptimeVote` / `signRewards` **revert** when already done; `RewardManager.claim`
+  **silently no-ops** (`status 0x1`, no event) on an already-claimed
+  `(rewardOwner, epoch)`. Enforced in `clif/claimer.py` + `clif/discovery.py`:
+  (a) pre-flight on the `-e` path refuses already-claimed / out-of-range /
+  not-yet-signed (NOTHING_CLAIMABLE with the exact reason, no submission);
+  (b) post-flight effect-check ⇒ new `MINED_NOOP` outcome (distinct, never
+  `SUBMITTED_MINED`) when a mined claim emits no `RewardManager` log. Both are
+  distinct, clearly-named outcomes; a no-op is never reported as success.
+  *Why: a mined no-op claim of an already-claimed epoch (Flare epoch-400, claimed
+  manually a minute prior) was briefly mis-reported as successful — `status 0x1` +
+  a stale balance delta looked like a claim. The operator deliberately set the trap.
+  Verify the effect, never the status. Proven on the live already-claimed epoch;
+  tests in `tests/test_claimer.py`.*
