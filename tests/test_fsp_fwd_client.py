@@ -176,7 +176,7 @@ def test_terminal_statuses_fsp(code, err_code):
 
 
 @pytest.mark.parametrize("code,err_code", [
-    (502, "rpc_unreachable"),
+    # fwd v1.1.0a9+: 502 is GONE (fwd no longer does RPC); only 503 is retryable.
     (503, "vault_unavailable"),
 ])
 def test_retryable_statuses_fsp(code, err_code):
@@ -185,6 +185,17 @@ def test_retryable_statuses_fsp(code, err_code):
 
     with _client(h) as fwd:
         with pytest.raises(FwdRetryableError):
+            fwd.sign_fsp_message("w", "UPTIME", 0)
+
+
+def test_502_is_now_terminal_for_sign_fsp_message():
+    """502 is GONE in fwd v1.1.0a9+ (fwd no longer does RPC). Falls through
+    to the terminal catch-all in _raise_for_error."""
+    def h(_req):
+        return httpx.Response(502, json={"error": "old_rpc_unreachable", "message": "gone"})
+
+    with _client(h) as fwd:
+        with pytest.raises(FwdTerminalError):
             fwd.sign_fsp_message("w", "UPTIME", 0)
 
 

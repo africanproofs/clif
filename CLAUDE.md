@@ -108,12 +108,35 @@ against the published root and refuses a claim whose proof doesn't verify (no
 gas-wasting chain-rejected submit). Pure computation via `eth_abi` + the vendored
 `clif/_keccak` — the keyless invariant is intact, no new crypto dep. 156 tests.
 
+## Status (2026-05-27, v0.5.2) — zero-egress fwd migration
+
+fwd v1.1.0a9+ is **sign-only** (it retired `/v1/sign-and-send` for
+`/v1/sign-transaction` and no longer broadcasts). clif is migrated: it now asks
+fwd to SIGN, then **broadcasts the returned `signed_raw_tx` itself** (via `rpc.py`
+`eth_sendRawTransaction`) and **reports the outcome back** to fwd
+(`/v1/transactions/{tx_id}/broadcast-result` → poll `eth_getTransactionReceipt` →
+`/v1/transactions/{tx_id}/receipt`). clif computes its own gas + EIP-1559 fees
+(`rpc.estimate_gas` ×1.25, `rpc.suggest_fees` baseFee×2+1gwei, sanity-capped under
+fwd's `FWD_MAX_GAS`/`FWD_MAX_FEE_PER_GAS`). fwd allocates the nonce; a
+`409 nonce_not_initialized` is terminal and means the (wallet, chain) needs a
+one-time fwd admin `nonce-init` (operator setup). Both the reward-claim path
+(`claimer`) and FSP Leg-2 (`fsp`, the FlareSystemsManager submit) are migrated;
+**FSP Leg-1 (`/v1/sign-fsp-message`) is unchanged**. The mined-≠-success effect
+rule (RewardClaimed event / `MINED_NOOP`) is unchanged. 176 tests, keyless intact
+(broadcasting a fwd-signed blob is not signing). **502 is gone** (fwd no longer does
+RPC; broadcast/RPC errors are clif's own). **Production claim/FSP on-chain
+verification remains operator-gated** (the coordinated cutover) — code + mocked
+tests done; live rehearsal against the running fwd is the operator's gate.
+
 ## fwd in one line
 
-`POST /v1/sign-and-send` (Bearer caller token, deterministic
-`Idempotency-Key`); 401/403/404/400/503 are **terminal** (escalate, do not
-retry), 502 is **retryable**; require `/healthz` `master=="ok"`. Full,
-verified contract: `docs/fwd-contract.md`.
+`POST /v1/sign-transaction` (Bearer caller token, deterministic `Idempotency-Key`)
+→ `{tx_id, hash, signed_raw_tx, nonce}`; clif broadcasts + reports back
+(`/v1/transactions/{tx_id}/broadcast-result`, `/receipt`). 401/403/404/400/409/503
+are **terminal** (409 = nonce-not-initialized → operator runs `nonce-init`); there
+is no 502 from fwd anymore. Require `/healthz` `master=="ok"`. Full contract:
+`docs/fwd-contract.md` (note: that file still documents the retired sign-and-send
+shape — update pending).
 
 ## Stack & layout
 

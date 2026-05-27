@@ -394,7 +394,7 @@ def claim(
 @app.command()
 def rehearse(
     gas: Annotated[
-        int, typer.Option(help="explicit gas — makes fwd skip eth_estimateGas")
+        int, typer.Option(help="explicit gas limit (clif estimates if 0)")
     ] = 500_000,
     no_wait: Annotated[
         bool, typer.Option("--no-wait", help="don't poll to mined")
@@ -415,11 +415,10 @@ def rehearse(
     Builds a REAL-shaped `RewardManager.claim` via the real builder / real ABI
     / anchored selector — real discovery first, empty *real* proofs if nothing
     is genuinely claimable (the least hand-modeled valid shape; never a
-    hand-authored hex string). POSTs it to fwd `/v1/sign-and-send` with an
-    explicit `gas` so fwd skips `eth_estimateGas` (a reverting rehearsal claim
-    would otherwise abort pre-broadcast). Then proves fwd's custody path: the
-    mined tx's on-chain `from` == the fwd-custodied executor wallet. clif holds
-    no key — `from` is recovered from fwd's signature.
+    hand-authored hex string). POSTs it to fwd `/v1/sign-transaction`; clif
+    broadcasts and reports back. Then proves fwd's custody path: the mined
+    tx's on-chain `from` == the fwd-custodied executor wallet. clif holds no
+    key — `from` is recovered from fwd's signature.
 
     Exit: 0 proof captured / submitted; 1 transient; 2 terminal (operator).
     """
@@ -514,14 +513,24 @@ def rehearse(
             + f"-r{tag}"
         )
         log.info("rehearse idempotency-key=%s (tag=%s)", idem, tag)
+
+        # Estimate EIP-1559 fees for sign-transaction request.
         try:
-            resp = fwd.sign_and_send(
+            max_fee, max_priority = rpc.suggest_fees()
+        except Exception as exc:  # noqa: BLE001 — surface any rpc failure
+            err.print(f"[bold red]fee estimation failed: {exc}[/]")
+            raise typer.Exit(2) from exc
+
+        try:
+            resp = fwd.sign_transaction(
                 wallet=s.fwd_wallet_name,
                 chain=s.net.chain_id,
                 to=s.net.reward_manager,
                 data=data,
                 value_wei="0",
                 gas=gas,
+                max_fee_per_gas=max_fee,
+                max_priority_fee_per_gas=max_priority,
                 idempotency_key=idem,
             )
         except FwdTerminalError as exc:
@@ -534,36 +543,64 @@ def rehearse(
             raise typer.Exit(1) from exc
 
         console.print(
-            f"[bold green]fwd accepted[/] tx_id={resp.tx_id} hash={resp.hash} "
+            f"[bold green]fwd signed[/] tx_id={resp.tx_id} hash={resp.hash} "
             f"nonce={resp.nonce}"
         )
         log.info(
-            "fwd sign-and-send OK tx_id=%s hash=%s nonce=%s",
+            "fwd sign-transaction OK tx_id=%s hash=%s nonce=%s",
             resp.tx_id, resp.hash, resp.nonce,
         )
+
+        # Broadcast the signed tx.
+        try:
+            broadcast_hash = rpc.send_raw_transaction(resp.signed_raw_tx)
+        except Exception as exc:  # noqa: BLE001 — node rejection or transport error
+            from clif.claimer import _classify_broadcast_error
+            from clif.rpc import RpcError as _RpcError
+            if isinstance(exc, _RpcError):
+                fwd_outcome, err_class = _classify_broadcast_error(exc)
+                try:
+                    fwd.report_broadcast_result(resp.tx_id, resp.hash, fwd_outcome, err_class)
+                except Exception:  # noqa: BLE001
+                    pass
+            err.print(f"[bold red]broadcast failed: {exc}[/]")
+            raise typer.Exit(2) from exc
+
+        try:
+            fwd.report_broadcast_result(resp.tx_id, broadcast_hash, "accepted")
+        except Exception:  # noqa: BLE001 — best-effort
+            pass
+
+        console.print(f"[bold green]broadcasted[/] hash={broadcast_hash}")
+        log.info("rehearse broadcasted hash=%s", broadcast_hash)
+
         if no_wait:
             console.print("[yellow]--no-wait: not polling to mined[/]")
             return
 
-        try:
-            st = fwd.wait_until_mined(resp.tx_id, timeout=600.0)
-        except (FwdRetryableError, TimeoutError) as exc:
+        receipt_poll = rpc.poll_receipt(broadcast_hash, timeout=600.0)
+        if receipt_poll is None:
             err.print(
-                f"[yellow]submitted; not yet terminal via fwd: {exc} "
-                f"(tx_id={resp.tx_id})[/]"
+                f"[yellow]submitted; receipt poll timed out (tx_id={resp.tx_id})[/]"
             )
-            raise typer.Exit(1) from exc
-        log.info("fwd tx terminal status=%s", st.status)
+            raise typer.Exit(1)
 
-        onchain = rpc.get_transaction_by_hash(resp.hash) or {}
-        receipt = rpc.get_transaction_receipt(resp.hash) or {}
+        block_number = int(str(receipt_poll.get("blockNumber", "0x0")), 16)
+        rstatus = receipt_poll.get("status")
+        mined_ok = int(str(rstatus or "0x0"), 16) == 1
+        receipt_outcome = "mined_success" if mined_ok else "mined_reverted"
+        try:
+            fwd.report_receipt(resp.tx_id, broadcast_hash, receipt_outcome, block_number)
+        except Exception:  # noqa: BLE001 — best-effort
+            pass
+
+        onchain = rpc.get_transaction_by_hash(broadcast_hash) or {}
         ofrom = onchain.get("from")
-        block = receipt.get("blockNumber") or onchain.get("blockNumber")
-        rstatus = receipt.get("status")
+        block = receipt_poll.get("blockNumber") or onchain.get("blockNumber")
         console.print("[bold]── Coston2 fwd-custody proof ──[/]")
         console.print(
-            f"  fwd     : tx_id={resp.tx_id} hash={resp.hash} "
-            f"nonce={resp.nonce} status={st.status}"
+            f"  fwd     : tx_id={resp.tx_id} hash={broadcast_hash} "
+            f"nonce={resp.nonce}"
         )
         console.print(
             f"  chain   : block={block} receipt.status={rstatus} from={ofrom}"
@@ -584,26 +621,24 @@ def rehearse(
         # being the fwd-custodied executor proves fwd signed and clif holds no
         # key. A REVERTED receipt (status 0x0) is EXPECTED and acceptable — the
         # executor is unauthorised / nothing is claimable (the v1.0.0a3
-        # precedent); the proof is `from`, not claim success. fwd's own
-        # `status` (it calls a reverted tx "failed") is informational and must
-        # NOT gate the verdict. The proof is absent only if the tx never landed
-        # (no `from` / no block — e.g. a fwd nonce gap): then fail loud + terminal.
+        # precedent); the proof is `from`, not claim success.
+        # The proof is absent only if the tx never landed (no `from` / no block
+        # — e.g. a fwd nonce gap): then fail loud + terminal.
         mined_on_chain = bool(ofrom) and block is not None
         reverted = str(rstatus).lower() in ("0x0", "0x00")
         if not mined_on_chain:
             err.print(
                 f"[bold red]PROOF NOT CAPTURED — tx not on-chain "
-                f"(from={ofrom!r} block={block!r}); fwd status={st.status!r}. "
+                f"(from={ofrom!r} block={block!r}). "
                 "Escalate (likely fwd-side, e.g. a wallet nonce gap; clif "
                 "holds no key and does not touch fwd).[/]"
             )
             raise typer.Exit(2)
         tail = (
             f"reverted on-chain (receipt.status={rstatus}) — EXPECTED for a "
-            f"rehearsal (fwd status={st.status!r}); the proof is `from`, not "
-            "claim success"
+            "rehearsal; the proof is `from`, not claim success"
             if reverted
-            else f"receipt.status={rstatus} (fwd status={st.status!r})"
+            else f"receipt.status={rstatus}"
         )
         console.print(
             f"[bold green]CUSTODY PROOF CAPTURED[/] — on-chain "

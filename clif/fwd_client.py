@@ -1,40 +1,64 @@
 """HTTP transport for the fwd signing daemon (synchronous httpx).
 
-Contract verified against `fwd/src/fwd/api/sign.py:38-161` this session:
+fwd v1.1.0a9+ is sign-only: it signs and returns a raw tx blob; clif
+broadcasts and reports back. Endpoints used by clif:
 
-  POST /v1/sign-and-send  -> 200 {tx_id,hash,nonce}
-      errors {error,message}: 400 bad-req / bad-idempotency / chain_not_allowed
-      401 unauthorized | 403 policy_denied | 404 wallet_not_found
-      502 rpc_unreachable | 503 vault_unavailable
-  GET  /v1/transactions/{tx_id}  -> {status,hashes,confirmed_at} (caller-gated)
-  GET  /healthz                  -> {master,rpc,fwd}
+  POST /v1/sign-transaction
+      Body: {wallet, chain, to, value_wei, data, gas, max_fee_per_gas,
+             max_priority_fee_per_gas}
+      200 -> {tx_id, hash, signed_raw_tx, nonce}
+      Errors: 400 (tx_params_rejected / bad_idempotency_key)
+              403 policy_denied | 404 wallet_not_found
+              409 nonce_not_initialized (operator must run fwd nonce-init)
+              503 vault_unavailable
 
-Retry policy (fwd v1.0.0 taxonomy — Reviewer-binding):
-  400/401/403/404 and 422 (transaction_rejected — the node deterministically
-    refused, e.g. insufficient funds) are TERMINAL — never retry.
-  502 (rpc_unreachable), 503 (sealed-master) and ANY httpx transport error
+  POST /v1/transactions/{tx_id}/broadcast-result
+      Body: {tx_hash, outcome, error_class|null}
+      outcome ∈ {accepted, rejected_releaseable, rejected_nonce_too_low}
+      200 -> {tx_id, status}
+
+  POST /v1/transactions/{tx_id}/receipt
+      Body: {tx_hash, outcome, block_number}
+      outcome ∈ {mined_success, mined_reverted}
+      200 -> {tx_id, status}
+
+  POST /v1/sign-fsp-message  (Leg-1 — unchanged from v1.0.0)
+  GET  /healthz
+
+Retry policy (fwd v1.1.0a9+ taxonomy):
+  400/401/403/404/409/422 are TERMINAL — never retry.
+  503 (vault_unavailable) and ANY httpx transport error
     (ConnectError/ReadTimeout/PoolTimeout/…) are RETRYABLE — a down or
     restarting fwd must degrade `clif auto`, never crash it.
+  Note: 502 is GONE — fwd no longer does any RPC. Broadcast/receipt errors
+    are now clif's own (from rpc.py), not fwd's.
 
-This module is pure transport. It does not build claim calldata and does not
-decide what to sign — that orchestration is `claimer.py` (Phase 8b step 4,
-post operator gate).
+This module is pure transport. It does not build calldata, broadcast
+transactions, or poll receipts — those are claimer.py / fsp.py / rpc.py.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
-import time
 
 import httpx
 
-from clif.models import Health, SignAndSendResponse, SignFspMessageResponse, TxStatus
+from clif.models import (
+    BroadcastResultResponse,
+    Health,
+    ReceiptResponse,
+    SignFspMessageResponse,
+    SignTransactionResponse,
+    TxStatus,
+)
 
 _REWARDS_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
-_TERMINAL_STATUSES = {400, 401, 403, 404, 422}
-_RETRYABLE_STATUSES = {502, 503}
+# fwd v1.1.0a9+: 502 is removed (fwd no longer does RPC).
+# 409 (nonce_not_initialized) is terminal — operator must seed the nonce.
+_TERMINAL_STATUSES = {400, 401, 403, 404, 409, 422}
+_RETRYABLE_STATUSES = {503}
 _TRANSPORT_ERROR_STATUS = 0  # synthetic: no HTTP response (down/restarting fwd)
 
 
@@ -154,36 +178,105 @@ class FwdClient:
         resp.raise_for_status()
         return Health.model_validate(resp.json())
 
-    def sign_and_send(
+    def sign_transaction(
         self,
         wallet: str,
         chain: int,
         to: str,
+        gas: int,
+        max_fee_per_gas: int,
+        max_priority_fee_per_gas: int,
         data: str = "0x",
         value_wei: str = "0",
-        gas: int | None = None,
         idempotency_key: str | None = None,
-    ) -> SignAndSendResponse:
+    ) -> SignTransactionResponse:
+        """POST /v1/sign-transaction — fwd signs and returns the raw tx blob.
+
+        fwd allocates the nonce. clif supplies gas + EIP-1559 fees computed
+        via rpc.py (estimate_gas + suggest_fees). fwd does NOT broadcast.
+        409 nonce_not_initialized is TERMINAL — operator must run `clifwd
+        nonce-init` for this (wallet, chain) before clif can use it.
+        """
         payload: dict = {
             "wallet": wallet,
             "chain": chain,
             "to": to,
             "value_wei": value_wei,
             "data": data,
+            "gas": gas,
+            "max_fee_per_gas": max_fee_per_gas,
+            "max_priority_fee_per_gas": max_priority_fee_per_gas,
         }
-        if gas is not None:
-            payload["gas"] = gas
         headers = dict(self._auth)
         if idempotency_key is not None:
             headers["Idempotency-Key"] = idempotency_key
         try:
             resp = self._client.post(
-                f"{self._base}/v1/sign-and-send", json=payload, headers=headers
+                f"{self._base}/v1/sign-transaction", json=payload, headers=headers
             )
         except httpx.RequestError as exc:
             raise self._transport_retryable(exc) from exc
         self._raise_for_error(resp)
-        return SignAndSendResponse.model_validate(resp.json())
+        return SignTransactionResponse.model_validate(resp.json())
+
+    def report_broadcast_result(
+        self,
+        tx_id: str,
+        tx_hash: str,
+        outcome: str,
+        error_class: str | None = None,
+    ) -> BroadcastResultResponse:
+        """POST /v1/transactions/{tx_id}/broadcast-result — notify fwd of broadcast outcome.
+
+        outcome ∈ {accepted, rejected_releaseable, rejected_nonce_too_low}.
+        - "accepted": the node accepted the tx into its mempool.
+        - "rejected_releaseable": deterministic node rejection (insufficient
+          funds, etc.) — fwd releases the nonce reservation.
+        - "rejected_nonce_too_low": the nonce fwd issued was already consumed
+          (race/restart) — fwd handles the nonce correction.
+        error_class is optional; set it on rejected_releaseable with the
+        RPC error class name for observability.
+        """
+        payload: dict = {"tx_hash": tx_hash, "outcome": outcome}
+        if error_class is not None:
+            payload["error_class"] = error_class
+        try:
+            resp = self._client.post(
+                f"{self._base}/v1/transactions/{tx_id}/broadcast-result",
+                json=payload,
+                headers=self._auth,
+            )
+        except httpx.RequestError as exc:
+            raise self._transport_retryable(exc) from exc
+        self._raise_for_error(resp)
+        return BroadcastResultResponse.model_validate(resp.json())
+
+    def report_receipt(
+        self,
+        tx_id: str,
+        tx_hash: str,
+        outcome: str,
+        block_number: int,
+    ) -> ReceiptResponse:
+        """POST /v1/transactions/{tx_id}/receipt — notify fwd of on-chain result.
+
+        outcome ∈ {mined_success, mined_reverted}.
+        """
+        payload: dict = {
+            "tx_hash": tx_hash,
+            "outcome": outcome,
+            "block_number": block_number,
+        }
+        try:
+            resp = self._client.post(
+                f"{self._base}/v1/transactions/{tx_id}/receipt",
+                json=payload,
+                headers=self._auth,
+            )
+        except httpx.RequestError as exc:
+            raise self._transport_retryable(exc) from exc
+        self._raise_for_error(resp)
+        return ReceiptResponse.model_validate(resp.json())
 
     def sign_fsp_message(
         self,
@@ -252,6 +345,7 @@ class FwdClient:
         return SignFspMessageResponse.model_validate(resp.json())
 
     def get_transaction(self, tx_id: str) -> TxStatus:
+        """GET /v1/transactions/{tx_id} — fwd tx status (caller-scoped)."""
         try:
             resp = self._client.get(
                 f"{self._base}/v1/transactions/{tx_id}", headers=self._auth
@@ -260,15 +354,3 @@ class FwdClient:
             raise self._transport_retryable(exc) from exc
         self._raise_for_error(resp)
         return TxStatus.model_validate(resp.json())
-
-    def wait_until_mined(
-        self, tx_id: str, timeout: float = 600.0, poll: float = 5.0
-    ) -> TxStatus:
-        deadline = time.monotonic() + timeout
-        while True:
-            st = self.get_transaction(tx_id)
-            if st.status in ("mined", "failed", "replaced", "dropped"):
-                return st
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"tx {tx_id} not terminal after {timeout}s (status={st.status})")
-            time.sleep(poll)

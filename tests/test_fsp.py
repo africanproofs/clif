@@ -1,10 +1,17 @@
-"""FSP orchestrator: outcome mapping, rdd-guard, epoch-bind, config-guard, terminal/retryable paths."""
+"""FSP orchestrator: outcome mapping, rdd-guard, epoch-bind, config-guard, terminal/retryable paths.
+
+Updated for fwd v1.1.0a9+ sign-only API:
+  Leg-2 sign_and_send -> sign_transaction + clif-side broadcast + report-back
+  FakeFwdFsp gains sign_transaction, report_broadcast_result, report_receipt
+  Tests that checked wait_until_mined now go through FakeRpc.poll_receipt
+"""
 
 from clif.claimer import OutcomeStatus
 from clif.config import Settings
 from clif.fsp import FspOutcome, run_sign_rewards, run_sign_uptime
 from clif.fwd_client import FwdRetryableError, FwdTerminalError
-from clif.models import RewardDistributionData, SignAndSendResponse, SignFspMessageResponse
+from clif.models import RewardDistributionData, SignFspMessageResponse, SignTransactionResponse
+from clif.rpc import RpcError
 
 REWARDS_HASH = "0x" + "ab" * 32
 RDD = RewardDistributionData(rewardEpochId=3, merkleRoot=REWARDS_HASH, noOfWeightBasedClaims=56)
@@ -16,7 +23,10 @@ SIG = SignFspMessageResponse(
     s="0x" + "cc" * 32,
     signature="0x" + "dd" * 65,
 )
-SEND_RESP = SignAndSendResponse(tx_id="tx-fsp-1", hash="0x" + "ef" * 32, nonce=5)
+SIGN_TX_RESP = SignTransactionResponse(
+    tx_id="tx-fsp-1", hash="0x" + "ef" * 32, signed_raw_tx="0xf86c", nonce=5
+)
+SIGNED_RAW = "0xf86c"
 
 
 def _settings(**over):
@@ -33,23 +43,25 @@ def _settings(**over):
 
 
 class FakeFwdFsp:
-    """Minimal FwdClient fake supporting sign_fsp_message + sign_and_send + wait_until_mined."""
+    """Minimal FwdClient fake for the new sign-only FSP API."""
 
     def __init__(
         self,
         sign_fsp=None, sign_fsp_exc=None,
-        send=None, send_exc=None,
-        wait=None, wait_exc=None,
+        sign_tx=None, sign_tx_exc=None,
+        broadcast_result_exc=None,
+        receipt_exc=None,
     ):
         self._sign_fsp = sign_fsp
         self._sign_fsp_exc = sign_fsp_exc
-        self._send = send
-        self._send_exc = send_exc
-        self._wait = wait
-        self._wait_exc = wait_exc
+        self._sign_tx = sign_tx
+        self._sign_tx_exc = sign_tx_exc
+        self._broadcast_result_exc = broadcast_result_exc
+        self._receipt_exc = receipt_exc
         self.sign_fsp_kwargs = None
-        self.send_kwargs = None
-        self.wait_calls = 0
+        self.sign_tx_kwargs = None
+        self.broadcast_calls: list[dict] = []
+        self.receipt_calls: list[dict] = []
 
     def sign_fsp_message(self, **kw):
         self.sign_fsp_kwargs = kw
@@ -57,17 +69,25 @@ class FakeFwdFsp:
             raise self._sign_fsp_exc
         return self._sign_fsp
 
-    def sign_and_send(self, **kw):
-        self.send_kwargs = kw
-        if self._send_exc:
-            raise self._send_exc
-        return self._send
+    def sign_transaction(self, **kw):
+        self.sign_tx_kwargs = kw
+        if self._sign_tx_exc:
+            raise self._sign_tx_exc
+        return self._sign_tx
 
-    def wait_until_mined(self, tx_id, timeout=600.0, poll=5.0):
-        self.wait_calls += 1
-        if self._wait_exc:
-            raise self._wait_exc
-        return self._wait
+    def report_broadcast_result(self, tx_id, tx_hash, outcome, error_class=None):
+        self.broadcast_calls.append(
+            {"tx_id": tx_id, "tx_hash": tx_hash, "outcome": outcome}
+        )
+        if self._broadcast_result_exc:
+            raise self._broadcast_result_exc
+
+    def report_receipt(self, tx_id, tx_hash, outcome, block_number):
+        self.receipt_calls.append(
+            {"tx_id": tx_id, "tx_hash": tx_hash, "outcome": outcome, "block_number": block_number}
+        )
+        if self._receipt_exc:
+            raise self._receipt_exc
 
     def close(self):
         pass
@@ -77,6 +97,39 @@ class FakeFwdFsp:
 
     def __exit__(self, *_):
         pass
+
+
+class FakeRpc:
+    """Minimal RpcClient stub for FSP tests: fee estimation + broadcast + receipt."""
+
+    def __init__(
+        self,
+        *,
+        send_raw_raises=None,
+        poll_receipt_result=None,  # None = timeout; dict = the receipt
+    ):
+        self._send_raw_raises = send_raw_raises
+        self._poll_receipt_result = poll_receipt_result
+        self.send_raw_calls: list[str] = []
+
+    def estimate_gas(self, _from, _to, _data, _value_wei=0):
+        return 500_000
+
+    def suggest_fees(self):
+        return 100_000_000_000, 1_000_000_000
+
+    def send_raw_transaction(self, signed_raw_tx: str) -> str:
+        self.send_raw_calls.append(signed_raw_tx)
+        if self._send_raw_raises:
+            raise self._send_raw_raises
+        return "0x" + "bc" * 32
+
+    def poll_receipt(self, tx_hash: str, timeout: float = 600.0, poll: float = 5.0):
+        return self._poll_receipt_result
+
+
+def _ok_receipt() -> dict:
+    return {"status": "0x1", "blockNumber": "0x3e8", "logs": []}
 
 
 def _patch_fwd_factory(monkeypatch, *, sign_fwd, submit_fwd):
@@ -151,8 +204,8 @@ def test_rdd_none_is_terminal(monkeypatch):
 
 def test_rdd_wrong_epoch_is_terminal_no_sign_call(monkeypatch):
     """File rewardEpochId=99 but signing epoch=3 → FAILED_TERMINAL, no Leg-1 call."""
-    sign_fwd = FakeFwdFsp(sign_fsp=SIG, send=SEND_RESP)
-    submit_fwd = FakeFwdFsp(sign_fsp=SIG, send=SEND_RESP)
+    sign_fwd = FakeFwdFsp(sign_fsp=SIG, sign_tx=SIGN_TX_RESP)
+    submit_fwd = FakeFwdFsp(sign_fsp=SIG, sign_tx=SIGN_TX_RESP)
     _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
     wrong_epoch_rdd = RewardDistributionData(
         rewardEpochId=99, merkleRoot=REWARDS_HASH, noOfWeightBasedClaims=56
@@ -163,68 +216,88 @@ def test_rdd_wrong_epoch_is_terminal_no_sign_call(monkeypatch):
     assert "epoch mismatch" in o.detail
     # No sign call must have been made
     assert sign_fwd.sign_fsp_kwargs is None
-    assert submit_fwd.send_kwargs is None
+    assert submit_fwd.sign_tx_kwargs is None
 
 
 def test_rdd_matching_epoch_proceeds(monkeypatch):
-    """File rewardEpochId==signing epoch → proceeds to Leg-1."""
-    from clif.models import TxStatus
+    """File rewardEpochId==signing epoch → proceeds to Leg-1 + Leg-2."""
+    rpc = FakeRpc(poll_receipt_result=_ok_receipt())
     sign_fwd = FakeFwdFsp(sign_fsp=SIG)
-    submit_fwd = FakeFwdFsp(send=SEND_RESP, wait=TxStatus(status="mined"))
+    submit_fwd = FakeFwdFsp(sign_tx=SIGN_TX_RESP)
     _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
     monkeypatch.setattr("clif.fsp.get_reward_distribution_data", lambda *_: RDD)
-    o = run_sign_rewards(_settings(), 3)  # RDD.reward_epoch_id == 3
+    o = run_sign_rewards(_settings(), 3, rpc=rpc)
     assert o.ok
 
 
 def test_rdd_present_proceeds(monkeypatch):
     monkeypatch.setattr("clif.fsp.get_reward_distribution_data", lambda *_: RDD)
-    from clif.models import TxStatus
+    rpc = FakeRpc(poll_receipt_result=_ok_receipt())
     sign_fwd = FakeFwdFsp(sign_fsp=SIG)
-    submit_fwd = FakeFwdFsp(send=SEND_RESP, wait=TxStatus(status="mined"))
+    submit_fwd = FakeFwdFsp(sign_tx=SIGN_TX_RESP)
     _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
-    o = run_sign_rewards(_settings(), 3)
+    o = run_sign_rewards(_settings(), 3, rpc=rpc)
     assert o.ok
 
 
 # ---- UPTIME happy path ----
 
 def test_uptime_mined(monkeypatch):
-    from clif.models import TxStatus
+    rpc = FakeRpc(poll_receipt_result=_ok_receipt())
     sign_fwd = FakeFwdFsp(sign_fsp=SIG)
-    submit_fwd = FakeFwdFsp(send=SEND_RESP, wait=TxStatus(status="mined"))
+    submit_fwd = FakeFwdFsp(sign_tx=SIGN_TX_RESP)
     _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
-    o = run_sign_uptime(_settings(), 0)
+    o = run_sign_uptime(_settings(), 0, rpc=rpc)
     assert o.status == OutcomeStatus.SUBMITTED_MINED
     assert o.message_hash is not None
     assert o.tx_hash is not None
+    # fwd was notified of broadcast + receipt
+    assert len(submit_fwd.broadcast_calls) == 1
+    assert submit_fwd.broadcast_calls[0]["outcome"] == "accepted"
+    assert len(submit_fwd.receipt_calls) == 1
+    assert submit_fwd.receipt_calls[0]["outcome"] == "mined_success"
 
 
 def test_uptime_no_wait(monkeypatch):
+    rpc = FakeRpc()
     sign_fwd = FakeFwdFsp(sign_fsp=SIG)
-    submit_fwd = FakeFwdFsp(send=SEND_RESP)
+    submit_fwd = FakeFwdFsp(sign_tx=SIGN_TX_RESP)
     _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
-    o = run_sign_uptime(_settings(), 0, wait=False)
+    o = run_sign_uptime(_settings(), 0, wait=False, rpc=rpc)
     assert o.status == OutcomeStatus.SUBMITTED_PENDING
+    # No broadcast happened
+    assert len(rpc.send_raw_calls) == 0
+
+
+def test_uptime_no_rpc_returns_pending_signed(monkeypatch):
+    """Without rpc, clif can't broadcast — returns pending after sign."""
+    sign_fwd = FakeFwdFsp(sign_fsp=SIG)
+    submit_fwd = FakeFwdFsp(sign_tx=SIGN_TX_RESP)
+    _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
+    o = run_sign_uptime(_settings(), 0, rpc=None)
+    assert o.status == OutcomeStatus.SUBMITTED_PENDING
+    assert "cannot broadcast" in o.detail
 
 
 # ---- two-caller topology ----
 
-def test_leg1_uses_sign_caller_leg2_and_poll_use_submit_caller(monkeypatch):
-    """Leg-1 sign call goes to sign_fwd; Leg-2 submit + wait_until_mined go to submit_fwd."""
-    from clif.models import TxStatus
+def test_leg1_uses_sign_caller_leg2_uses_submit_caller(monkeypatch):
+    """Leg-1 sign call goes to sign_fwd; Leg-2 sign_transaction goes to submit_fwd."""
+    rpc = FakeRpc(poll_receipt_result=_ok_receipt())
     sign_fwd = FakeFwdFsp(sign_fsp=SIG)
-    submit_fwd = FakeFwdFsp(send=SEND_RESP, wait=TxStatus(status="mined"))
+    submit_fwd = FakeFwdFsp(sign_tx=SIGN_TX_RESP)
     _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
-    o = run_sign_uptime(_settings(), 0)
+    o = run_sign_uptime(_settings(), 0, rpc=rpc)
     assert o.ok
     # Leg-1 went to sign_fwd
     assert sign_fwd.sign_fsp_kwargs is not None
-    assert sign_fwd.send_kwargs is None
-    # Leg-2 + poll went to submit_fwd
-    assert submit_fwd.send_kwargs is not None
-    assert submit_fwd.wait_calls == 1
-    assert sign_fwd.wait_calls == 0
+    assert sign_fwd.sign_tx_kwargs is None
+    # Leg-2 went to submit_fwd
+    assert submit_fwd.sign_tx_kwargs is not None
+    assert submit_fwd.sign_fsp_kwargs is None
+    # broadcast + receipt reported to submit_fwd
+    assert len(submit_fwd.broadcast_calls) == 1
+    assert len(submit_fwd.receipt_calls) == 1
 
 
 # ---- error classification ----
@@ -247,7 +320,7 @@ def test_leg1_403_404_adds_operator_hint(monkeypatch):
 
 
 def test_leg1_retryable_is_failed_retryable(monkeypatch):
-    sign_fwd = FakeFwdFsp(sign_fsp_exc=FwdRetryableError(502, "rpc_unreachable", "down"))
+    sign_fwd = FakeFwdFsp(sign_fsp_exc=FwdRetryableError(503, "vault_unavailable", "down"))
     submit_fwd = FakeFwdFsp()
     _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
     o = run_sign_uptime(_settings(), 0)
@@ -256,7 +329,7 @@ def test_leg1_retryable_is_failed_retryable(monkeypatch):
 
 def test_leg2_terminal_is_failed_terminal(monkeypatch):
     sign_fwd = FakeFwdFsp(sign_fsp=SIG)
-    submit_fwd = FakeFwdFsp(send_exc=FwdTerminalError(403, "policy_denied", "no"))
+    submit_fwd = FakeFwdFsp(sign_tx_exc=FwdTerminalError(403, "policy_denied", "no"))
     _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
     o = run_sign_uptime(_settings(), 0)
     assert o.status == OutcomeStatus.FAILED_TERMINAL
@@ -264,19 +337,55 @@ def test_leg2_terminal_is_failed_terminal(monkeypatch):
 
 def test_leg2_retryable_is_failed_retryable(monkeypatch):
     sign_fwd = FakeFwdFsp(sign_fsp=SIG)
-    submit_fwd = FakeFwdFsp(send_exc=FwdRetryableError(502, "rpc_unreachable", "down"))
+    submit_fwd = FakeFwdFsp(sign_tx_exc=FwdRetryableError(503, "vault_unavailable", "down"))
     _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
     o = run_sign_uptime(_settings(), 0)
     assert o.status == OutcomeStatus.FAILED_RETRYABLE
 
 
-def test_on_chain_failed_is_terminal(monkeypatch):
-    from clif.models import TxStatus
+def test_broadcast_nonce_too_low_is_retryable(monkeypatch):
+    """Broadcast rejection with 'nonce too low' → FAILED_RETRYABLE for FSP Leg-2."""
+    rpc = FakeRpc(send_raw_raises=RpcError("nonce too low: next 5, tx 4"))
     sign_fwd = FakeFwdFsp(sign_fsp=SIG)
-    submit_fwd = FakeFwdFsp(send=SEND_RESP, wait=TxStatus(status="failed"))
+    submit_fwd = FakeFwdFsp(sign_tx=SIGN_TX_RESP)
     _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
-    o = run_sign_uptime(_settings(), 0)
+    o = run_sign_uptime(_settings(), 0, rpc=rpc)
+    assert o.status == OutcomeStatus.FAILED_RETRYABLE
+    assert "nonce too low" in o.detail
+    assert submit_fwd.broadcast_calls[0]["outcome"] == "rejected_nonce_too_low"
+
+
+def test_broadcast_insufficient_funds_is_terminal(monkeypatch):
+    """Broadcast rejection with insufficient funds → FAILED_TERMINAL."""
+    rpc = FakeRpc(send_raw_raises=RpcError("insufficient funds for gas * price + value"))
+    sign_fwd = FakeFwdFsp(sign_fsp=SIG)
+    submit_fwd = FakeFwdFsp(sign_tx=SIGN_TX_RESP)
+    _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
+    o = run_sign_uptime(_settings(), 0, rpc=rpc)
     assert o.status == OutcomeStatus.FAILED_TERMINAL
+    assert submit_fwd.broadcast_calls[0]["outcome"] == "rejected_releaseable"
+
+
+def test_receipt_poll_timeout_is_pending(monkeypatch):
+    """Receipt poll timeout → SUBMITTED_PENDING."""
+    rpc = FakeRpc(poll_receipt_result=None)
+    sign_fwd = FakeFwdFsp(sign_fsp=SIG)
+    submit_fwd = FakeFwdFsp(sign_tx=SIGN_TX_RESP)
+    _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
+    o = run_sign_uptime(_settings(), 0, rpc=rpc)
+    assert o.status == OutcomeStatus.SUBMITTED_PENDING
+    assert "timed out" in o.detail
+
+
+def test_on_chain_reverted_is_terminal(monkeypatch):
+    """status=0x0 in receipt → FAILED_TERMINAL."""
+    rpc = FakeRpc(poll_receipt_result={"status": "0x0", "blockNumber": "0x1", "logs": []})
+    sign_fwd = FakeFwdFsp(sign_fsp=SIG)
+    submit_fwd = FakeFwdFsp(sign_tx=SIGN_TX_RESP)
+    _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
+    o = run_sign_uptime(_settings(), 0, rpc=rpc)
+    assert o.status == OutcomeStatus.FAILED_TERMINAL
+    assert submit_fwd.receipt_calls[0]["outcome"] == "mined_reverted"
 
 
 def test_fsp_outcome_ok_property():

@@ -1,10 +1,19 @@
-"""Claim orchestration: discover → build calldata → fwd sign-and-send → confirm.
+"""Claim orchestration: discover → build calldata → fwd sign → clif broadcasts → confirm.
 
 This is the only path that touches a value operation, and it does so without a
-key: clif builds the `RewardManager.claim` calldata and fwd signs+broadcasts.
-Every fwd failure is classified so the caller (one-shot `clif claim` or the
-`clif auto` daemon) can act correctly — terminal errors are escalated, not
-hot-looped; retryable errors back off.
+key: clif builds the `RewardManager.claim` calldata; fwd signs and returns a raw
+tx blob; clif broadcasts via rpc.py and reports the outcome back to fwd. Every
+fwd failure and every broadcast failure is classified so the caller (one-shot
+`clif claim` or the `clif auto` daemon) can act correctly — terminal errors are
+escalated, not hot-looped; retryable errors back off.
+
+Node broadcast-error classification (for fwd broadcast-result report):
+  "nonce too low" / "nonce too low" substring → "rejected_nonce_too_low"
+  Any other deterministic node rejection (insufficient funds, gas limit, etc.)
+    → "rejected_releaseable" (fwd releases the nonce reservation)
+  Transport/RPC failure (httpx error, node down) → FAILED_RETRYABLE, no report
+    (the nonce remains reserved; operator must inspect and cancel manually or
+    wait for fwd's internal stuck-tx replacement).
 """
 
 from __future__ import annotations
@@ -26,6 +35,9 @@ from clif.fwd_client import (
 from clif.models import ClaimType
 from clif.rpc import RpcClient, RpcError
 
+# Substring match for "nonce too low" node rejection across node implementations.
+_NONCE_TOO_LOW_MARKERS = ("nonce too low", "nonce too small", "tx nonce too low")
+
 log = logging.getLogger("clif")
 
 
@@ -44,6 +56,20 @@ _OK = {
     OutcomeStatus.SUBMITTED_PENDING,
     OutcomeStatus.MINED_NOOP,
 }
+
+
+def _classify_broadcast_error(exc: RpcError) -> tuple[str, str]:
+    """Map a node-rejection RpcError to a (fwd_outcome, error_class) pair.
+
+    Returns:
+      ("rejected_nonce_too_low", <class>) — nonce race/restart, fwd corrects.
+      ("rejected_releaseable", <class>)   — deterministic rejection (insuff.
+        funds, gas limit, etc.); fwd releases the nonce reservation.
+    """
+    msg = str(exc).lower()
+    if any(marker in msg for marker in _NONCE_TOO_LOW_MARKERS):
+        return "rejected_nonce_too_low", type(exc).__name__
+    return "rejected_releaseable", type(exc).__name__
 
 
 def _claim_took_effect(rpc: RpcClient, reward_manager: str, tx_hash: str) -> bool:
@@ -97,7 +123,7 @@ def submit_claims(
     retry: str | None = None,
     rpc: RpcClient | None = None,
 ) -> ClaimOutcome:
-    """The post-discovery half: build calldata → fwd sign-and-send → confirm.
+    """The post-discovery half: build calldata → fwd sign → clif broadcast → confirm.
 
     Split out from `run_claim` so the `clif auto` daemon can discover once
     (keyless), gate the terminal-error cooldown on the prospective last
@@ -107,6 +133,11 @@ def submit_claims(
     this attempt; both default to None ⇒ the legacy deterministic key (a
     same-attempt network retry / crash-rerun still dedups). A new value is a
     deliberate post-on-chain-failure re-attempt → fresh key (fwd D14).
+
+    fwd v1.1.0a9+: fwd signs and returns a raw tx blob; clif broadcasts via
+    rpc.py. `rpc` is therefore required when `wait=True` or when broadcasting
+    is needed. If rpc is None, we can only sign (no broadcast) and return
+    SUBMITTED_PENDING.
     """
     name = ClaimType(claim_type).name
 
@@ -147,13 +178,40 @@ def submit_claims(
         name, beneficiary, epochs, idem, retry_token or "<none>",
     )
 
+    # Step 1: ask fwd to sign. fwd allocates the nonce; gas+fees supplied by
+    # caller (or estimated via rpc below). When rpc is available, estimate gas
+    # on-the-fly; otherwise use settings.fsp_submit_gas as a safe fallback
+    # (non-FSP claim; the fallback is conservative but correct).
+    if rpc is not None:
+        try:
+            gas = rpc.estimate_gas(
+                settings.fwd_wallet_name,
+                settings.net.reward_manager,
+                data,
+            )
+            max_fee, max_priority = rpc.suggest_fees()
+        except RpcError as exc:
+            return out(
+                OutcomeStatus.FAILED_RETRYABLE,
+                f"fee estimation rpc failure: {exc}",
+                epochs=epochs, last_epoch=last_epoch,
+            )
+    else:
+        # No rpc: use conservative defaults.
+        gas = settings.fsp_submit_gas
+        max_fee = 100_000_000_000  # 100 gwei
+        max_priority = 1_000_000_000  # 1 gwei
+
     try:
-        resp = fwd.sign_and_send(
+        resp = fwd.sign_transaction(
             wallet=settings.fwd_wallet_name,
             chain=settings.net.chain_id,
             to=settings.net.reward_manager,
             data=data,
             value_wei="0",
+            gas=gas,
+            max_fee_per_gas=max_fee,
+            max_priority_fee_per_gas=max_priority,
             idempotency_key=idem,
         )
     except FwdTerminalError as exc:
@@ -167,51 +225,96 @@ def submit_claims(
             epochs=epochs, last_epoch=last_epoch,
         )
 
+    # Step 2: broadcast (requires rpc).
+    if rpc is None:
+        # No rpc available — can't broadcast. Return pending so the caller
+        # can decide (e.g. `wait=False` test paths).
+        return out(
+            OutcomeStatus.SUBMITTED_PENDING, "signed (no rpc — cannot broadcast)",
+            epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=resp.hash,
+        )
+
     if not wait:
+        # Caller requested no-wait. We have the signed blob but skip broadcast+poll.
         return out(
             OutcomeStatus.SUBMITTED_PENDING, "submitted (no wait)",
             epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=resp.hash,
         )
 
     try:
-        st = fwd.wait_until_mined(resp.tx_id, timeout=wait_timeout)
-    except (FwdRetryableError, TimeoutError) as exc:
+        broadcast_hash = rpc.send_raw_transaction(resp.signed_raw_tx)
+    except RpcError as exc:
+        # Classify the node rejection and report back to fwd.
+        fwd_outcome, err_class = _classify_broadcast_error(exc)
+        report_hash = resp.hash  # use fwd's locally-computed hash
+        try:
+            fwd.report_broadcast_result(resp.tx_id, report_hash, fwd_outcome, err_class)
+        except (FwdRetryableError, FwdTerminalError, FwdError):
+            pass  # best-effort; the broadcast already failed
+        if fwd_outcome == "rejected_nonce_too_low":
+            # Nonce race — transient, operator should retry.
+            return out(
+                OutcomeStatus.FAILED_RETRYABLE,
+                f"broadcast rejected (nonce too low): {exc}",
+                epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=resp.hash,
+            )
+        # Deterministic node rejection — terminal.
         return out(
-            OutcomeStatus.SUBMITTED_PENDING, f"submitted; not yet mined: {exc}",
-            epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=resp.hash,
-        )
-    except FwdError as exc:  # e.g. tx_id 404 on status poll
-        return out(
-            OutcomeStatus.FAILED_TERMINAL, f"submitted; status poll terminal: {exc}",
+            OutcomeStatus.FAILED_TERMINAL,
+            f"broadcast rejected ({err_class}): {exc}",
             epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=resp.hash,
         )
 
-    if st.status == "mined":
-        # Effect-check: a mined receipt with NO RewardManager log claimed nothing
-        # (the epoch was already claimed — a silent status-0x1 no-op). Never report
-        # such a tx as a successful claim. Only runs when a keyless rpc is supplied.
-        if rpc is not None and resp.hash and not _claim_took_effect(
-            rpc, settings.net.reward_manager, resp.hash
-        ):
-            return out(
-                OutcomeStatus.MINED_NOOP,
-                "mined but claimed nothing — epoch already claimed "
-                "(no RewardManager event in receipt)",
-                epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=resp.hash,
-            )
+    # Step 3: report accepted broadcast to fwd.
+    try:
+        fwd.report_broadcast_result(resp.tx_id, broadcast_hash, "accepted")
+    except (FwdRetryableError, FwdTerminalError, FwdError) as exc:
+        log.warning("fwd broadcast-result report failed (non-fatal): %s", exc)
+
+    log.info(
+        "submit %s broadcasted tx_id=%s hash=%s",
+        name, resp.tx_id, broadcast_hash,
+    )
+
+    # Step 4: poll for receipt.
+    receipt = rpc.poll_receipt(broadcast_hash, timeout=wait_timeout)
+    if receipt is None:
         return out(
-            OutcomeStatus.SUBMITTED_MINED, "mined",
-            epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=resp.hash,
+            OutcomeStatus.SUBMITTED_PENDING, "submitted; receipt poll timed out",
+            epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=broadcast_hash,
         )
-    if st.status == "replaced":
+
+    block_number = int(str(receipt.get("blockNumber", "0x0")), 16)
+    status_hex = str(receipt.get("status", "0x0"))
+    mined_ok = int(status_hex, 16) == 1
+
+    # Step 5: report receipt to fwd.
+    receipt_outcome = "mined_success" if mined_ok else "mined_reverted"
+    try:
+        fwd.report_receipt(resp.tx_id, broadcast_hash, receipt_outcome, block_number)
+    except (FwdRetryableError, FwdTerminalError, FwdError) as exc:
+        log.warning("fwd receipt report failed (non-fatal): %s", exc)
+
+    if not mined_ok:
         return out(
-            OutcomeStatus.SUBMITTED_PENDING, "fwd replacing (gas bump) — still pending",
-            epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=resp.hash,
+            OutcomeStatus.FAILED_TERMINAL, "tx reverted on-chain",
+            epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=broadcast_hash,
         )
-    # failed / dropped — an on-chain revert of a legitimate claim is serious.
+
+    # Step 6: effect verification — a mined receipt with NO RewardManager log
+    # claimed nothing (the epoch was already claimed — a silent status-0x1 no-op).
+    # Never report such a tx as a successful claim.
+    if not _claim_took_effect(rpc, settings.net.reward_manager, broadcast_hash):
+        return out(
+            OutcomeStatus.MINED_NOOP,
+            "mined but claimed nothing — epoch already claimed "
+            "(no RewardManager event in receipt)",
+            epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=broadcast_hash,
+        )
+
     return out(
-        OutcomeStatus.FAILED_TERMINAL, f"tx terminal on-chain status={st.status}",
-        epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=resp.hash,
+        OutcomeStatus.SUBMITTED_MINED, "mined",
+        epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=broadcast_hash,
     )
 
 

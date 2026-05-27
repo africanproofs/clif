@@ -2,9 +2,12 @@
 
 The fsp-rewards schema mirrors the upstream Zod schema in
 `ftso-fee-claimer/src/interfaces.ts`. The fwd request/response models mirror
-`fwd/src/fwd/api/sign.py` (verified against source this session);
-`SignFspMessageResponse` ← `fwd/src/fwd/api/sign_fsp_message.py`; FSP message:
-sign_fsp_message.py.
+the fwd v1.1.0a9+ sign-only API:
+  POST /v1/sign-transaction       -> SignTransactionResponse (signs; clif broadcasts)
+  POST /v1/transactions/{id}/broadcast-result  -> BroadcastResultResponse
+  POST /v1/transactions/{id}/receipt           -> ReceiptResponse
+  GET  /v1/transactions/{id}     -> TxStatus (kept for any future use)
+  POST /v1/sign-fsp-message      -> SignFspMessageResponse (Leg-1 unchanged)
 """
 
 from __future__ import annotations
@@ -58,24 +61,77 @@ class RewardClaimWithProof(BaseModel):
     body: RewardClaimBody
 
 
-# ---- fwd wire contract (verified: fwd/src/fwd/api/sign.py:38-161) ----
+# ---- fwd wire contract (fwd v1.1.0a9+ sign-only API) ----
 
 
-class SignAndSendRequest(BaseModel):
+class SignTransactionRequest(BaseModel):
+    """POST /v1/sign-transaction request body.
+
+    fwd signs the tx and returns the raw signed blob for clif to broadcast.
+    fwd allocates the nonce; clif does NOT supply a nonce.
+    gas, max_fee_per_gas, max_priority_fee_per_gas are computed by clif via
+    rpc.py (estimate_gas + suggest_fees) before calling this endpoint.
+    """
+
     wallet: str
     chain: int
     to: str
     value_wei: str = "0"
     data: str = "0x"
-    gas: int | None = None
+    gas: int
+    max_fee_per_gas: int
+    max_priority_fee_per_gas: int
 
 
-class SignAndSendResponse(BaseModel):
+class SignTransactionResponse(BaseModel):
+    """200 from POST /v1/sign-transaction.
+
+    fwd signed the tx and computed its hash locally; it did NOT broadcast.
+    `signed_raw_tx` is the 0x-prefixed RLP-encoded signed transaction that
+    clif must pass to eth_sendRawTransaction.
+    `hash` is the locally-computed tx hash (used to report back to fwd).
+    """
+
     model_config = ConfigDict(extra="ignore")
 
     tx_id: str
     hash: str
+    signed_raw_tx: str
     nonce: int
+
+
+class BroadcastResultRequest(BaseModel):
+    """POST /v1/transactions/{tx_id}/broadcast-result request body."""
+
+    tx_hash: str
+    outcome: str  # "accepted" | "rejected_releaseable" | "rejected_nonce_too_low"
+    error_class: str | None = None
+
+
+class BroadcastResultResponse(BaseModel):
+    """200 from POST /v1/transactions/{tx_id}/broadcast-result."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    tx_id: str
+    status: str
+
+
+class ReceiptRequest(BaseModel):
+    """POST /v1/transactions/{tx_id}/receipt request body."""
+
+    tx_hash: str
+    outcome: str  # "mined_success" | "mined_reverted"
+    block_number: int
+
+
+class ReceiptResponse(BaseModel):
+    """200 from POST /v1/transactions/{tx_id}/receipt."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    tx_id: str
+    status: str
 
 
 class FwdError(BaseModel):
@@ -86,6 +142,8 @@ class FwdError(BaseModel):
 
 
 class TxStatus(BaseModel):
+    """GET /v1/transactions/{tx_id} response (kept for completeness)."""
+
     model_config = ConfigDict(extra="allow")
 
     status: str

@@ -1,12 +1,16 @@
-"""FSP signing-tool orchestration: Leg-1 (fwd sign-fsp-message) + Leg-2 (fwd sign-and-send).
+"""FSP signing-tool orchestration: Leg-1 (fwd sign-fsp-message) + Leg-2 (fwd sign-transaction).
 
 clif holds zero private keys. Leg-1 calls fwd's /v1/sign-fsp-message using the
 SIGN caller token (fsp_permissions block); fwd signs the protocol message
 (UPTIME or REWARD_DISTRIBUTION) and returns (message_hash, v, r, s). Leg-2 uses
-the SUBMIT caller token (permissions block) and the existing sign_and_send to
-broadcast the resulting signUptimeVote / signRewards calldata to
-FlareSystemsManager. The tx poll (/v1/transactions/{id}) is per-caller-scoped in
-fwd and MUST use the Leg-2 submit caller.
+the SUBMIT caller token (permissions block): fwd signs the tx via
+/v1/sign-transaction; clif broadcasts via rpc.py and reports back via
+/v1/transactions/{id}/broadcast-result + /v1/transactions/{id}/receipt.
+
+fwd v1.1.0a9+: /v1/sign-and-send is retired. Leg-2 uses the new sign-only
+flow (sign-transaction + clif-side broadcast + report-back). The
+/v1/transactions/{id} poll is gone (fwd no longer manages broadcast/receipt);
+clif uses rpc.py to poll eth_getTransactionReceipt instead.
 
 fwd cross-domain rule: the same policy_path key cannot appear in both
 `permissions` and `fsp_permissions` (fwd fail-fast boot). One caller → one
@@ -23,7 +27,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from clif.claimer import OutcomeStatus, _OK
+from clif.claimer import OutcomeStatus, _OK, _classify_broadcast_error
 from clif.config import Settings
 from clif.fsp_calldata import build_sign_rewards_calldata, build_sign_uptime_calldata
 from clif.fwd_client import (
@@ -36,6 +40,7 @@ from clif.fwd_client import (
 from clif.merkle import build_reward_merkle_root
 from clif.models import SignFspMessageResponse
 from clif.reward_data import get_reward_distribution_data
+from clif.rpc import RpcClient, RpcError
 
 log = logging.getLogger("clif")
 
@@ -114,15 +119,16 @@ def run_sign_uptime(
     wait: bool = True,
     wait_timeout: float = 600.0,
     retry: str | None = None,
+    rpc: RpcClient | None = None,
 ) -> FspOutcome:
     """Orchestrate keyless UPTIME signing: Leg-1 (SIGN caller) + Leg-2 (SUBMIT caller).
 
     Leg-1 uses fsp_sign_caller_token (fsp_permissions block in fwd — only
-    /v1/sign-fsp-message). Leg-2 and the tx poll use fsp_submit_caller_token
-    (permissions block — /v1/sign-and-send + /v1/transactions/{id}). The
-    per-caller-scoped tx poll mandates the split (fwd cross-domain rule, D15
-    MAJOR-2). The orchestrator owns both clients; the CLI no longer builds or
-    passes an FSP FwdClient.
+    /v1/sign-fsp-message). Leg-2 uses fsp_submit_caller_token (permissions
+    block — /v1/sign-transaction); clif broadcasts via rpc.py and reports back
+    via broadcast-result + receipt endpoints. The per-caller split is required
+    by the fwd cross-domain policy_path rule (D15 MAJOR-2). The orchestrator
+    owns both clients; the CLI no longer builds or passes an FSP FwdClient.
     """
     mt = "UPTIME"
     net = settings.network
@@ -161,7 +167,7 @@ def run_sign_uptime(
             mt, reward_epoch_id, sig.message_hash, sig.v,
         )
 
-        # Leg 2: build calldata and broadcast via fwd sign-and-send (SUBMIT caller).
+        # Leg 2: build calldata and sign via fwd /v1/sign-transaction (SUBMIT caller).
         data = build_sign_uptime_calldata(reward_epoch_id, sig.v, sig.r, sig.s)
         leg2_key = make_fsp_idempotency_key(net, mt, reward_epoch_id, "submit", retry_token)
         log.info(
@@ -170,14 +176,36 @@ def run_sign_uptime(
             settings.net.flare_systems_manager, leg2_key,
         )
 
+        # Estimate gas + fees if rpc is available; otherwise use config defaults.
+        if rpc is not None:
+            try:
+                gas = rpc.estimate_gas(
+                    settings.fsp_sender_wallet_name,  # type: ignore[arg-type]
+                    settings.net.flare_systems_manager,
+                    data,
+                )
+                max_fee, max_priority = rpc.suggest_fees()
+            except RpcError as exc:
+                return _out(
+                    mt, reward_epoch_id, OutcomeStatus.FAILED_RETRYABLE,
+                    f"fee estimation rpc failure: {exc}",
+                    message_hash=sig.message_hash, leg1_sig=(sig.v, sig.r, sig.s),
+                )
+        else:
+            gas = settings.fsp_submit_gas
+            max_fee = 100_000_000_000  # 100 gwei
+            max_priority = 1_000_000_000  # 1 gwei
+
         try:
-            resp = submit_fwd.sign_and_send(
+            resp = submit_fwd.sign_transaction(
                 wallet=settings.fsp_sender_wallet_name,  # type: ignore[arg-type]
                 chain=settings.net.chain_id,
                 to=settings.net.flare_systems_manager,
                 data=data,
                 value_wei="0",
-                gas=settings.fsp_submit_gas,
+                gas=gas,
+                max_fee_per_gas=max_fee,
+                max_priority_fee_per_gas=max_priority,
                 idempotency_key=leg2_key,
             )
         except FwdTerminalError as exc:
@@ -203,7 +231,10 @@ def run_sign_uptime(
                 tx_id=resp.tx_id, tx_hash=resp.hash,
             )
 
-        return _wait_for_tx(submit_fwd, resp.tx_id, resp.hash, mt, reward_epoch_id, sig, wait_timeout)
+        return _broadcast_and_confirm(
+            submit_fwd, rpc, resp.tx_id, resp.hash, resp.signed_raw_tx,
+            mt, reward_epoch_id, sig, wait_timeout,
+        )
 
 
 def run_sign_rewards(
@@ -213,12 +244,14 @@ def run_sign_rewards(
     wait: bool = True,
     wait_timeout: float = 600.0,
     retry: str | None = None,
+    rpc: RpcClient | None = None,
 ) -> FspOutcome:
     """Orchestrate keyless REWARD_DISTRIBUTION signing: fetch rdd → Leg-1 (SIGN) + Leg-2 (SUBMIT).
 
-    Leg-1 uses fsp_sign_caller_token; Leg-2 and the tx poll use
-    fsp_submit_caller_token. The per-caller-scoped tx poll mandates the split
-    (fwd cross-domain rule, D15 MAJOR-2).
+    Leg-1 uses fsp_sign_caller_token; Leg-2 uses fsp_submit_caller_token with
+    the new sign-transaction + clif-side broadcast + report-back flow. The
+    per-caller split is required by the fwd cross-domain policy_path rule (D15
+    MAJOR-2).
 
     The file's rewardEpochId is asserted == reward_epoch_id BEFORE Leg-1
     (D15 MAJOR-1 epoch-bind). A mismatch is FAILED_TERMINAL with no sign call —
@@ -308,7 +341,7 @@ def run_sign_rewards(
             mt, reward_epoch_id, sig.message_hash, sig.v,
         )
 
-        # Leg 2 (SUBMIT caller).
+        # Leg 2 (SUBMIT caller): sign-transaction + clif-side broadcast + report-back.
         data = build_sign_rewards_calldata(
             reward_epoch_id,
             settings.net.chain_id,
@@ -323,14 +356,36 @@ def run_sign_rewards(
             settings.net.flare_systems_manager, leg2_key,
         )
 
+        # Estimate gas + fees if rpc is available; otherwise use config defaults.
+        if rpc is not None:
+            try:
+                gas = rpc.estimate_gas(
+                    settings.fsp_sender_wallet_name,  # type: ignore[arg-type]
+                    settings.net.flare_systems_manager,
+                    data,
+                )
+                max_fee, max_priority = rpc.suggest_fees()
+            except RpcError as exc:
+                return _out(
+                    mt, reward_epoch_id, OutcomeStatus.FAILED_RETRYABLE,
+                    f"fee estimation rpc failure: {exc}",
+                    message_hash=sig.message_hash, leg1_sig=(sig.v, sig.r, sig.s),
+                )
+        else:
+            gas = settings.fsp_submit_gas
+            max_fee = 100_000_000_000  # 100 gwei
+            max_priority = 1_000_000_000  # 1 gwei
+
         try:
-            resp = submit_fwd.sign_and_send(
+            resp = submit_fwd.sign_transaction(
                 wallet=settings.fsp_sender_wallet_name,  # type: ignore[arg-type]
                 chain=settings.net.chain_id,
                 to=settings.net.flare_systems_manager,
                 data=data,
                 value_wei="0",
-                gas=settings.fsp_submit_gas,
+                gas=gas,
+                max_fee_per_gas=max_fee,
+                max_priority_fee_per_gas=max_priority,
                 idempotency_key=leg2_key,
             )
         except FwdTerminalError as exc:
@@ -356,57 +411,97 @@ def run_sign_rewards(
                 tx_id=resp.tx_id, tx_hash=resp.hash,
             )
 
-        return _wait_for_tx(submit_fwd, resp.tx_id, resp.hash, mt, reward_epoch_id, sig, wait_timeout)
+        return _broadcast_and_confirm(
+            submit_fwd, rpc, resp.tx_id, resp.hash, resp.signed_raw_tx,
+            mt, reward_epoch_id, sig, wait_timeout,
+        )
 
 
-def _wait_for_tx(
+def _broadcast_and_confirm(
     submit_fwd: FwdClient,
+    rpc: RpcClient | None,
     tx_id: str,
-    tx_hash: str,
+    fwd_hash: str,
+    signed_raw_tx: str,
     message_type: str,
     reward_epoch_id: int,
     sig: SignFspMessageResponse,
     wait_timeout: float = 600.0,
 ) -> FspOutcome:
-    """Poll fwd until the tx is terminal; map to FspOutcome.
+    """Broadcast the fwd-signed FSP tx; report-back + poll receipt; map to FspOutcome.
 
-    Polls via the SUBMIT caller `submit_fwd` (fwd's /v1/transactions/{id} is
-    per-caller-scoped — the submit and the poll must share one caller). The
-    orchestrator (run_sign_uptime / run_sign_rewards) passes submit_fwd here;
-    the SIGN caller is closed at this point (its context block has exited).
-    Leg-1=SIGN caller; Leg-2 + poll=SUBMIT caller. The per-caller-scoped poll
-    mandates the split (fwd cross-domain rule, D15 MAJOR-2).
+    fwd signed the tx and returned signed_raw_tx; clif broadcasts via rpc,
+    reports the broadcast result to fwd, polls eth_getTransactionReceipt, and
+    reports the receipt. If rpc is None (test/no-wait paths), return pending.
     """
     mh = sig.message_hash
     l1s = (sig.v, sig.r, sig.s)
-    try:
-        st = submit_fwd.wait_until_mined(tx_id, timeout=wait_timeout)
-    except (FwdRetryableError, TimeoutError) as exc:
+
+    if rpc is None:
+        # No rpc available — can't broadcast.
         return _out(
             message_type, reward_epoch_id, OutcomeStatus.SUBMITTED_PENDING,
-            f"submitted; not yet mined: {exc}",
-            message_hash=mh, leg1_sig=l1s, tx_id=tx_id, tx_hash=tx_hash,
-        )
-    except FwdError as exc:
-        return _out(
-            message_type, reward_epoch_id, OutcomeStatus.FAILED_TERMINAL,
-            f"submitted; status poll terminal: {exc}",
-            message_hash=mh, leg1_sig=l1s, tx_id=tx_id, tx_hash=tx_hash,
+            "signed (no rpc — cannot broadcast)",
+            message_hash=mh, leg1_sig=l1s, tx_id=tx_id, tx_hash=fwd_hash,
         )
 
-    if st.status == "mined":
+    # Broadcast the signed blob.
+    try:
+        broadcast_hash = rpc.send_raw_transaction(signed_raw_tx)
+    except RpcError as exc:
+        fwd_outcome, err_class = _classify_broadcast_error(exc)
+        try:
+            submit_fwd.report_broadcast_result(tx_id, fwd_hash, fwd_outcome, err_class)
+        except (FwdRetryableError, FwdTerminalError, FwdError):
+            pass
+        if fwd_outcome == "rejected_nonce_too_low":
+            return _out(
+                message_type, reward_epoch_id, OutcomeStatus.FAILED_RETRYABLE,
+                f"broadcast rejected (nonce too low): {exc}",
+                message_hash=mh, leg1_sig=l1s, tx_id=tx_id, tx_hash=fwd_hash,
+            )
         return _out(
-            message_type, reward_epoch_id, OutcomeStatus.SUBMITTED_MINED, "mined",
-            message_hash=mh, leg1_sig=l1s, tx_id=tx_id, tx_hash=tx_hash,
+            message_type, reward_epoch_id, OutcomeStatus.FAILED_TERMINAL,
+            f"broadcast rejected ({err_class}): {exc}",
+            message_hash=mh, leg1_sig=l1s, tx_id=tx_id, tx_hash=fwd_hash,
         )
-    if st.status == "replaced":
+
+    # Report accepted broadcast to fwd.
+    try:
+        submit_fwd.report_broadcast_result(tx_id, broadcast_hash, "accepted")
+    except (FwdRetryableError, FwdTerminalError, FwdError) as exc:
+        log.warning("fwd broadcast-result report failed (non-fatal): %s", exc)
+
+    log.info("fsp leg-2 broadcasted tx_id=%s hash=%s", tx_id, broadcast_hash)
+
+    # Poll for receipt.
+    receipt = rpc.poll_receipt(broadcast_hash, timeout=wait_timeout)
+    if receipt is None:
         return _out(
             message_type, reward_epoch_id, OutcomeStatus.SUBMITTED_PENDING,
-            "fwd replacing (gas bump) — still pending",
-            message_hash=mh, leg1_sig=l1s, tx_id=tx_id, tx_hash=tx_hash,
+            "submitted; receipt poll timed out",
+            message_hash=mh, leg1_sig=l1s, tx_id=tx_id, tx_hash=broadcast_hash,
         )
+
+    block_number = int(str(receipt.get("blockNumber", "0x0")), 16)
+    status_hex = str(receipt.get("status", "0x0"))
+    mined_ok = int(status_hex, 16) == 1
+
+    # Report receipt to fwd.
+    receipt_outcome = "mined_success" if mined_ok else "mined_reverted"
+    try:
+        submit_fwd.report_receipt(tx_id, broadcast_hash, receipt_outcome, block_number)
+    except (FwdRetryableError, FwdTerminalError, FwdError) as exc:
+        log.warning("fwd receipt report failed (non-fatal): %s", exc)
+
+    if not mined_ok:
+        return _out(
+            message_type, reward_epoch_id, OutcomeStatus.FAILED_TERMINAL,
+            "tx reverted on-chain",
+            message_hash=mh, leg1_sig=l1s, tx_id=tx_id, tx_hash=broadcast_hash,
+        )
+
     return _out(
-        message_type, reward_epoch_id, OutcomeStatus.FAILED_TERMINAL,
-        f"tx terminal on-chain status={st.status}",
-        message_hash=mh, leg1_sig=l1s, tx_id=tx_id, tx_hash=tx_hash,
+        message_type, reward_epoch_id, OutcomeStatus.SUBMITTED_MINED, "mined",
+        message_hash=mh, leg1_sig=l1s, tx_id=tx_id, tx_hash=broadcast_hash,
     )
