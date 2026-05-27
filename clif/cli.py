@@ -775,14 +775,15 @@ def uptime(
         typer.Option("--retry", help="deliberate post-on-chain-failure retry discriminator"),
     ] = None,
 ) -> None:
-    """Sign an UPTIME vote via fwd (keyless — fwd signs and broadcasts).
+    """Sign an UPTIME vote (keyless — fwd signs; clif broadcasts + reports back).
 
     Exit: 0 = mined/pending; 1 = transient; 2 = terminal (operator action needed).
     """
     s = _settings()
     if not yes:
         typer.confirm(f"Sign UPTIME for epoch {epoch}?", abort=True)
-    o = run_sign_uptime(s, epoch, wait=not no_wait, retry=retry)
+    with RpcClient(s.rpc_url) as rpc:
+        o = run_sign_uptime(s, epoch, wait=not no_wait, retry=retry, rpc=rpc)
     _print_fsp_outcome(o)
     raise typer.Exit(_exit_for(o.status))
 
@@ -797,7 +798,7 @@ def rewards(
         typer.Option("--retry", help="deliberate post-on-chain-failure retry discriminator"),
     ] = None,
 ) -> None:
-    """Sign a REWARD_DISTRIBUTION for an epoch via fwd (keyless — fwd signs and broadcasts).
+    """Sign a REWARD_DISTRIBUTION for an epoch (keyless — fwd signs; clif broadcasts + reports back).
 
     Fetches and validates reward-distribution-data.json first. Never signs an
     unverified rewardsHash. Shows merkle_root + n before prompting.
@@ -818,7 +819,8 @@ def rewards(
     )
     if not yes:
         typer.confirm(f"Sign REWARD_DISTRIBUTION for epoch {epoch} with the above data?", abort=True)
-    o = run_sign_rewards(s, epoch, wait=not no_wait, retry=retry)
+    with RpcClient(s.rpc_url) as rpc:
+        o = run_sign_rewards(s, epoch, wait=not no_wait, retry=retry, rpc=rpc)
     _print_fsp_outcome(o)
     raise typer.Exit(_exit_for(o.status))
 
@@ -926,7 +928,7 @@ def fsp_auto(
                                 state.record_attempt(key, now, "terminal-cooldown")
                                 continue
                             o = (run_sign_uptime if mt == "UPTIME" else run_sign_rewards)(
-                                s, epoch, wait=False,
+                                s, epoch, wait=False, rpc=rpc,
                             )
                             state.record_attempt(key, now, o.status.value)
                             if o.ok:

@@ -176,23 +176,21 @@ def run_sign_uptime(
             settings.net.flare_systems_manager, leg2_key,
         )
 
-        # Estimate gas + fees if rpc is available; otherwise use config defaults.
+        # FSP submit gas is fixed (config): clif holds wallet NAMES, not addresses,
+        # so it cannot eth_estimateGas with a `from`; and estimateGas would revert
+        # on an already-signed epoch anyway. Estimate only the fee market
+        # (eth_feeHistory needs no `from`).
+        gas = settings.fsp_submit_gas
         if rpc is not None:
             try:
-                gas = rpc.estimate_gas(
-                    settings.fsp_sender_wallet_name,  # type: ignore[arg-type]
-                    settings.net.flare_systems_manager,
-                    data,
-                )
                 max_fee, max_priority = rpc.suggest_fees()
             except RpcError as exc:
                 return _out(
                     mt, reward_epoch_id, OutcomeStatus.FAILED_RETRYABLE,
-                    f"fee estimation rpc failure: {exc}",
+                    f"fee suggestion rpc failure: {exc}",
                     message_hash=sig.message_hash, leg1_sig=(sig.v, sig.r, sig.s),
                 )
         else:
-            gas = settings.fsp_submit_gas
             max_fee = 100_000_000_000  # 100 gwei
             max_priority = 1_000_000_000  # 1 gwei
 
@@ -356,23 +354,21 @@ def run_sign_rewards(
             settings.net.flare_systems_manager, leg2_key,
         )
 
-        # Estimate gas + fees if rpc is available; otherwise use config defaults.
+        # FSP submit gas is fixed (config): clif holds wallet NAMES, not addresses,
+        # so it cannot eth_estimateGas with a `from`; and estimateGas would revert
+        # on an already-signed epoch anyway. Estimate only the fee market
+        # (eth_feeHistory needs no `from`).
+        gas = settings.fsp_submit_gas
         if rpc is not None:
             try:
-                gas = rpc.estimate_gas(
-                    settings.fsp_sender_wallet_name,  # type: ignore[arg-type]
-                    settings.net.flare_systems_manager,
-                    data,
-                )
                 max_fee, max_priority = rpc.suggest_fees()
             except RpcError as exc:
                 return _out(
                     mt, reward_epoch_id, OutcomeStatus.FAILED_RETRYABLE,
-                    f"fee estimation rpc failure: {exc}",
+                    f"fee suggestion rpc failure: {exc}",
                     message_hash=sig.message_hash, leg1_sig=(sig.v, sig.r, sig.s),
                 )
         else:
-            gas = settings.fsp_submit_gas
             max_fee = 100_000_000_000  # 100 gwei
             max_priority = 1_000_000_000  # 1 gwei
 

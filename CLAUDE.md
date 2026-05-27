@@ -128,6 +128,25 @@ RPC; broadcast/RPC errors are clif's own). **Production claim/FSP on-chain
 verification remains operator-gated** (the coordinated cutover) — code + mocked
 tests done; live rehearsal against the running fwd is the operator's gate.
 
+## Status (2026-05-27, v0.5.5) — epoch-400 live drill: FSP broadcast path fixed
+
+The epoch-400 mainnet drill (Flare + Songbird, through the migrated zero-egress
+stack) surfaced — and fixed — **two FSP defects invisible to the mocked tests**
+(the "mocks lie" rule, in the wild): (1) the one-shot `clif fsp uptime/rewards`
+commands and the `fsp auto` path called `run_sign_*` **without `rpc=`** → clif
+signed but never broadcast (`no rpc — cannot broadcast`); (2) FSP Leg-2 called
+`rpc.estimate_gas` with the **wallet NAME** (`fsp_sender_wallet_name`) as `from` —
+clif holds names, not addresses — and `estimateGas` reverts on an already-signed
+epoch anyway. Fixes: wire an `RpcClient` into all three FSP call sites; FSP submits
+now use the **configured `fsp_submit_gas`** (no `estimate_gas`; fee market still via
+`eth_feeHistory`, which needs no `from`). **Verified end-to-end on mainnet, all
+expected:** fee claim → `nothing-claimable` (400 already claimed); FSP uptime →
+broadcast `nonce too low` (live ftso automation co-manages the sender nonce); FSP
+rewards → Merkle-root verified → mined → **reverted** (already signed) → reported
+back → honest `failed-terminal` (the mined-≠-success rule held). 176 tests green.
+(Pre-existing mypy debt: 7 errors — typer/rich stubs + `Optional[str]` config args
+— predate this; a separate cleanup.)
+
 ## Status (2026-05-27, v0.5.4) — adopted the shared fwd-client library
 
 clif's fwd transport now comes from the shared **`fwd-client`** package
