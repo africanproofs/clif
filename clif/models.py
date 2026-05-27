@@ -1,13 +1,13 @@
-"""Typed models: fsp-rewards distribution tuples + the fwd wire contract.
+"""Typed models: fsp-rewards distribution tuples + fwd wire contract.
 
 The fsp-rewards schema mirrors the upstream Zod schema in
-`ftso-fee-claimer/src/interfaces.ts`. The fwd request/response models mirror
-the fwd v1.1.0a9+ sign-only API:
-  POST /v1/sign-transaction       -> SignTransactionResponse (signs; clif broadcasts)
-  POST /v1/transactions/{id}/broadcast-result  -> BroadcastResultResponse
-  POST /v1/transactions/{id}/receipt           -> ReceiptResponse
-  GET  /v1/transactions/{id}     -> TxStatus (kept for any future use)
-  POST /v1/sign-fsp-message      -> SignFspMessageResponse (Leg-1 unchanged)
+`ftso-fee-claimer/src/interfaces.ts`.
+
+The fwd request/response models (SignTransaction*, BroadcastResult*, Receipt*,
+SignFspMessageResponse, TxStatus, Health) are now the single source of truth in
+the shared `fwd_client` package (gitlab.com/proofs.africa/fwd-client v0.1.0).
+They are re-exported here so existing callers (`from clif.models import …`)
+continue to work with no change.
 """
 
 from __future__ import annotations
@@ -16,6 +16,21 @@ import re
 from enum import IntEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# Re-export fwd wire contract models from the shared library.
+from fwd_client import (  # noqa: F401
+    BroadcastResultResponse,
+    Health,
+    ReceiptResponse,
+    SignFspMessageResponse,
+    SignTransactionResponse,
+    TxStatus,
+)
+from fwd_client.models import (  # noqa: F401
+    BroadcastResultRequest,
+    ReceiptRequest,
+    SignTransactionRequest,
+)
 
 _MERKLE_ROOT_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
@@ -59,116 +74,6 @@ class RewardClaimWithProof(BaseModel):
 
     merkle_proof: list[str]
     body: RewardClaimBody
-
-
-# ---- fwd wire contract (fwd v1.1.0a9+ sign-only API) ----
-
-
-class SignTransactionRequest(BaseModel):
-    """POST /v1/sign-transaction request body.
-
-    fwd signs the tx and returns the raw signed blob for clif to broadcast.
-    fwd allocates the nonce; clif does NOT supply a nonce.
-    gas, max_fee_per_gas, max_priority_fee_per_gas are computed by clif via
-    rpc.py (estimate_gas + suggest_fees) before calling this endpoint.
-    """
-
-    wallet: str
-    chain: int
-    to: str
-    value_wei: str = "0"
-    data: str = "0x"
-    gas: int
-    max_fee_per_gas: int
-    max_priority_fee_per_gas: int
-
-
-class SignTransactionResponse(BaseModel):
-    """200 from POST /v1/sign-transaction.
-
-    fwd signed the tx and computed its hash locally; it did NOT broadcast.
-    `signed_raw_tx` is the 0x-prefixed RLP-encoded signed transaction that
-    clif must pass to eth_sendRawTransaction.
-    `hash` is the locally-computed tx hash (used to report back to fwd).
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    tx_id: str
-    hash: str
-    signed_raw_tx: str
-    nonce: int
-
-
-class BroadcastResultRequest(BaseModel):
-    """POST /v1/transactions/{tx_id}/broadcast-result request body."""
-
-    tx_hash: str
-    outcome: str  # "accepted" | "rejected_releaseable" | "rejected_nonce_too_low"
-    error_class: str | None = None
-
-
-class BroadcastResultResponse(BaseModel):
-    """200 from POST /v1/transactions/{tx_id}/broadcast-result."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    tx_id: str
-    status: str
-
-
-class ReceiptRequest(BaseModel):
-    """POST /v1/transactions/{tx_id}/receipt request body."""
-
-    tx_hash: str
-    outcome: str  # "mined_success" | "mined_reverted"
-    block_number: int
-
-
-class ReceiptResponse(BaseModel):
-    """200 from POST /v1/transactions/{tx_id}/receipt."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    tx_id: str
-    status: str
-
-
-class FwdError(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    error: str
-    message: str
-
-
-class TxStatus(BaseModel):
-    """GET /v1/transactions/{tx_id} response (kept for completeness)."""
-
-    model_config = ConfigDict(extra="allow")
-
-    status: str
-    hashes: list[dict] = Field(default_factory=list)
-    confirmed_at: str | None = None
-
-
-class Health(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    master: str | None = None
-    rpc: object | None = None
-    fwd: str | None = None
-
-
-class SignFspMessageResponse(BaseModel):
-    """Response from fwd POST /v1/sign-fsp-message."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    message_hash: str
-    v: int
-    r: str
-    s: str
-    signature: str
 
 
 class RewardClaimBodyDict(BaseModel):

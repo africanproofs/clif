@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "clif"
-version = "0.5.3"
+version = "0.5.4"
 description = "Keyless FTSO v2 reward claimer for African Proofs — signs via the fwd daemon, holds no private keys (Phase 8b)"
 authors = ["African Proofs <dev@proofs.africa>"]
 readme = "README.md"
@@ -15,7 +15,7 @@ python = "^3.12"
 typer = {version = "^0.15", extras = ["all"]}
 rich = "^13.9"
 # HTTP — RPC, fwd, fsp-rewards fetch
-httpx = "^0.28"
+httpx = ">=0.27,<0.29"
 # ABI calldata encoding (endorsed by docs/phase8b-spec.md).
 # NOTE: deliberately NO eth-account / eth-keys / pycryptodome / web3 /
 # argon2 — those are local-signing signals and are forbidden for clif
@@ -25,6 +25,8 @@ eth-abi = "^5.0"
 # Data
 pydantic = "^2.10"
 pydantic-settings = "^2.6"
+# Shared fwd HTTP transport (pure httpx+pydantic; no crypto dep).
+fwd-client = {git = "https://gitlab.com/proofs.africa/fwd-client.git", tag = "v0.1.0"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"
@@ -37,3 +39,11 @@ build-backend = "poetry.core.masonry.api"
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+
+[[tool.mypy.overrides]]
+module = "fwd_client"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "fwd_client.*"
+ignore_missing_imports = true

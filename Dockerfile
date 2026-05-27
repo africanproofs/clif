@@ -11,6 +11,8 @@ RUN poetry export --only main --without-hashes -f requirements.txt -o requiremen
  && poetry build -f wheel
 
 FROM python:3.12-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
 RUN useradd --uid 1000 --create-home clif
 COPY --from=builder /src/requirements.txt /tmp/requirements.txt
 COPY --from=builder /src/dist/*.whl /tmp/

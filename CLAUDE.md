@@ -128,6 +128,21 @@ RPC; broadcast/RPC errors are clif's own). **Production claim/FSP on-chain
 verification remains operator-gated** (the coordinated cutover) — code + mocked
 tests done; live rehearsal against the running fwd is the operator's gate.
 
+## Status (2026-05-27, v0.5.4) — adopted the shared fwd-client library
+
+clif's fwd transport now comes from the shared **`fwd-client`** package
+(`gitlab.com/proofs.africa/fwd-client` v0.1.0, public, keyless): `FwdClient`, the
+`FwdError`/`FwdTerminalError`/`FwdRetryableError` taxonomy, `raise_for_fwd_error`,
+and the wire models (`SignTransaction*`, `BroadcastResult*`, `Receipt*`,
+`SignFspMessageResponse`, `TxStatus`, `Health`) are imported from it. `clif/fwd_client.py`
+is now a thin shim re-exporting that surface and keeping clif's **idempotency-key
+composition** (`make_idempotency_key`, `make_fsp_idempotency_key`) which delegates
+hashing to the lib's generic `make_idempotency_key`. clif's business models
+(`RewardsData`, reward claims, Merkle) are unchanged. Dockerfile gained `git` (to
+clone the HTTPS git-dep at build). **Keyless intact** — the lib is httpx+pydantic
+only; no crypto/signing dep added. 176 tests green; `docker compose build clif` ok.
+One canonical impl of the fwd contract now — future consumers depend on the same lib.
+
 ## fwd in one line
 
 `POST /v1/sign-transaction` (Bearer caller token, deterministic `Idempotency-Key`)
