@@ -33,6 +33,7 @@ from clif.fwd_client import (
     FwdTerminalError,
     make_fsp_idempotency_key,
 )
+from clif.merkle import build_reward_merkle_root
 from clif.models import SignFspMessageResponse
 from clif.reward_data import get_reward_distribution_data
 
@@ -249,6 +250,24 @@ def run_sign_rewards(
             f"{rdd.reward_epoch_id} != signing epoch {reward_epoch_id} — "
             "refusing to sign a rewardsHash bound to a different epoch "
             "(stale cache / wrong operator file / wrong-epoch payload)",
+        )
+
+    # Cryptographic Merkle-root verification: recompute the root from the
+    # published claims and assert it equals the file's merkleRoot (= the
+    # rewardsHash we are about to send to fwd for signing). A mismatch means
+    # the file is internally inconsistent — corrupted, tampered, or from a
+    # different epoch family — and we must not sign it (irreversible on-chain).
+    if rdd.reward_claims:
+        recomputed_root = build_reward_merkle_root(c.body for c in rdd.reward_claims)
+        if recomputed_root.lower() != rdd.merkle_root.lower():
+            return _out(
+                mt, reward_epoch_id, OutcomeStatus.FAILED_TERMINAL,
+                f"recomputed merkle root != published merkleRoot — refusing to sign: "
+                f"recomputed={recomputed_root} published={rdd.merkle_root}",
+            )
+        log.info(
+            "fsp merkle-root verified epoch=%s recomputed=%s == published=%s",
+            reward_epoch_id, recomputed_root, rdd.merkle_root,
         )
 
     log.info(

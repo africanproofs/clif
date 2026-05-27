@@ -113,6 +113,26 @@ class SignFspMessageResponse(BaseModel):
     signature: str
 
 
+class RewardClaimBodyDict(BaseModel):
+    """Body sub-object from reward-distribution-data.json (dict / non-tuples variant)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    reward_epoch_id: int = Field(alias="rewardEpochId")
+    beneficiary: str
+    amount: str  # published as a decimal string
+    claim_type: int = Field(alias="claimType")
+
+
+class RewardClaimWithProofDict(BaseModel):
+    """One element of rewardClaims[] in reward-distribution-data.json (dict variant)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    merkle_proof: list[str] = Field(alias="merkleProof")
+    body: RewardClaimBodyDict
+
+
 class RewardDistributionData(BaseModel):
     """reward-distribution-data.json (not tuples variant) — epoch id, merkle root + weight count."""
 
@@ -121,6 +141,7 @@ class RewardDistributionData(BaseModel):
     reward_epoch_id: int = Field(alias="rewardEpochId")
     merkle_root: str = Field(alias="merkleRoot")
     no_of_weight_based_claims: int = Field(alias="noOfWeightBasedClaims")
+    reward_claims: list[RewardClaimWithProofDict] = Field(alias="rewardClaims", default_factory=list)
 
     @field_validator("merkle_root")
     @classmethod

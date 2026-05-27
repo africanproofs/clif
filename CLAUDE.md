@@ -94,6 +94,20 @@ signature over wrong data is irreversible on-chain. GATE-1 (F1/F2) remains
 environment-deferred; nothing here is claimed on-chain-proven. See D15 for the
 full rationale and accepted guard stack.
 
+## Status (2026-05-27, v0.5.1)
+
+Reward-distribution **Merkle verification** added (`clif/merkle.py`). Builds +
+verifies the Flare fsp-rewards tree — leaf `keccak256(abi.encode((uint24,bytes20,
+uint120,uint8)))` (single keccak, not OZ double), sorted-pair internal nodes,
+sorted+deduped leaves; byte-exact vs flare epochs 228/400. Wired in two places:
+`run_sign_rewards` now **recomputes the root from the published claims and refuses
+to sign** (FAILED_TERMINAL, no Leg-1 call) if it ≠ the file's `merkleRoot` — the
+cryptographic upgrade of the "never sign an unverified rewardsHash" rule (was
+epoch-bind only); `discovery.reward_claim_for` **verifies each claim's proof**
+against the published root and refuses a claim whose proof doesn't verify (no
+gas-wasting chain-rejected submit). Pure computation via `eth_abi` + the vendored
+`clif/_keccak` — the keyless invariant is intact, no new crypto dep. 156 tests.
+
 ## fwd in one line
 
 `POST /v1/sign-and-send` (Bearer caller token, deterministic

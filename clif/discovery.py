@@ -8,7 +8,10 @@ sign.
 
 from __future__ import annotations
 
+import sys
+
 from clif.config import ZERO_BYTES32, Settings
+from clif.merkle import compute_leaf, verify_proof
 from clif.models import RewardClaimBody, RewardClaimWithProof
 from clif.reward_data import get_reward_calculation_data
 from clif.rpc import RpcClient
@@ -31,20 +34,37 @@ def claimable_epoch_ids(rpc: RpcClient, settings: Settings, beneficiary: str) ->
 def reward_claim_for(
     settings: Settings, epoch: int, beneficiary: str, claim_type: int
 ) -> RewardClaimWithProof | None:
-    """The `(merkleProof, body)` for this beneficiary+claimType in one epoch."""
+    """The `(merkleProof, body)` for this beneficiary+claimType in one epoch.
+
+    Returns ``None`` if the data file is unavailable, the beneficiary is not
+    found, or the claim's Merkle proof fails to verify against the file's
+    published ``merkleRoot``.  A failed proof is logged to stderr and refused —
+    submitting an unverifiable proof wastes gas and is chain-rejected.
+    """
     data = get_reward_calculation_data(settings, epoch)
     if data is None:
         return None
     for merkle_proof, (epoch_id, address, amount_str, c_type) in data.reward_claims:
         if address.lower() == beneficiary.lower() and c_type == claim_type:
+            body = RewardClaimBody(
+                reward_epoch_id=epoch_id,
+                beneficiary=address,
+                amount=int(amount_str),
+                claim_type=c_type,
+            )
+            leaf = compute_leaf(body.reward_epoch_id, body.beneficiary, body.amount, body.claim_type)
+            if not verify_proof(leaf, merkle_proof, data.merkle_root):
+                print(
+                    f"discovery: proof verification FAILED for epoch={epoch} "
+                    f"beneficiary={beneficiary} claimType={claim_type} — "
+                    "refusing: proof does not verify against published merkleRoot "
+                    "(corrupted data file or wrong epoch)",
+                    file=sys.stderr,
+                )
+                return None
             return RewardClaimWithProof(
                 merkle_proof=merkle_proof,
-                body=RewardClaimBody(
-                    reward_epoch_id=epoch_id,
-                    beneficiary=address,
-                    amount=int(amount_str),
-                    claim_type=c_type,
-                ),
+                body=body,
             )
     return None
 
