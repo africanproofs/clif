@@ -36,7 +36,7 @@ services:
     container_name: clif-auto
     command: ["auto"]
     env_file: [.env]
-    networks: [fwd-net]
+    networks: [fwd-net, egress]
     restart: unless-stopped
     healthcheck:
       # `clif status` exits non-zero when degraded or when the daemon is
@@ -52,7 +52,7 @@ services:
     image: clif:dev
     profiles: ["cli"]
     env_file: [.env]
-    networks: [fwd-net]
+    networks: [fwd-net, egress]
     entrypoint: ["clif"]
     # one-shot, e.g.:  docker compose run --rm clif claim --type fee
     # rehearsal:        docker compose run --rm clif claim --type fee --epoch <N>
@@ -70,7 +70,7 @@ services:
     container_name: clif-auto-coston2
     command: ["auto"]
     env_file: [.env.coston2]
-    networks: [fwd-net]
+    networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
     healthcheck:
@@ -86,7 +86,7 @@ services:
     container_name: clif-fsp-auto-coston2
     command: ["fsp", "auto"]
     env_file: [.env.coston2]
-    networks: [fwd-net]
+    networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
     healthcheck:
@@ -102,7 +102,7 @@ services:
     container_name: clif-auto-songbird
     command: ["auto"]
     env_file: [.env.songbird]
-    networks: [fwd-net]
+    networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
     healthcheck:
@@ -118,7 +118,7 @@ services:
     container_name: clif-fsp-auto-songbird
     command: ["fsp", "auto"]
     env_file: [.env.songbird]
-    networks: [fwd-net]
+    networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
     healthcheck:
@@ -134,7 +134,7 @@ services:
     container_name: clif-auto-flare
     command: ["auto"]
     env_file: [.env.flare]
-    networks: [fwd-net]
+    networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
     healthcheck:
@@ -150,7 +150,7 @@ services:
     container_name: clif-fsp-auto-flare
     command: ["fsp", "auto"]
     env_file: [.env.flare]
-    networks: [fwd-net]
+    networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
     healthcheck:
@@ -164,3 +164,8 @@ networks:
   fwd-net:
     external: true
     name: ${FWD_NETWORK:-fwd_fwd-callers}
+  # Dual-homing (zero-egress fwd, v1.1.0a11+): fwd-net is `internal: true` (no
+  # internet route), so clif ALSO attaches to this normal bridge for its own RPC
+  # egress + broadcast + reward-distribution-data fetch. fwd is NOT on `egress`.
+  egress:
+    driver: bridge
