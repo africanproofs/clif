@@ -23,8 +23,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from clif.calldata import build_claim_calldata
-from clif.config import ZERO_BYTES32, Settings
-from clif.discovery import collect_reward_claims
+from clif.config import Settings
+from clif.discovery import (
+    classify_claim_frontier,
+    collect_reward_claims,
+    unclaimable_reason,
+)
 from clif.fwd_client import (
     FwdClient,
     FwdError,
@@ -184,11 +188,11 @@ def submit_claims(
     # (non-FSP claim; the fallback is conservative but correct).
     if rpc is not None:
         try:
-            gas = rpc.estimate_gas(
-                settings.fwd_wallet_name,
-                settings.net.reward_manager,
-                data,
-            )
+            # clif is keyless: it does NOT know the executor (fwd) wallet's
+            # address, so it cannot supply a valid `from` for eth_estimateGas
+            # (passing the wallet NAME made the node reject the call). Use a
+            # fixed claim gas, mirroring the FSP Leg-2 fix; fees need no `from`.
+            gas = settings.fsp_submit_gas
             max_fee, max_priority = rpc.suggest_fees()
         except RpcError as exc:
             return out(
@@ -346,35 +350,40 @@ def run_claim(
         )
 
     if only_epoch is not None:
-        net = settings.net
+        # Pre-flight gate (reused by the shared classifier): refuse — with the
+        # precise reason — an already-claimed / out-of-range / not-yet-signed
+        # epoch, so clif never builds a silent no-op claim.
         try:
-            nxt = rpc.next_claimable_reward_epoch_id(net.reward_manager, beneficiary)
-            _, end = rpc.reward_epoch_id_range(net.reward_manager)
-            signed = rpc.rewards_hash(net.flare_systems_manager, only_epoch) != ZERO_BYTES32
+            reason = unclaimable_reason(rpc, settings, beneficiary, only_epoch)
         except RpcError as exc:
             return _out(OutcomeStatus.FAILED_RETRYABLE, f"discovery rpc failure: {exc}")
-        if only_epoch < nxt:
-            return _out(
-                OutcomeStatus.NOTHING_CLAIMABLE,
-                f"epoch {only_epoch} already claimed for {beneficiary} "
-                f"(next claimable = {nxt})",
-            )
-        if only_epoch > end:
-            return _out(
-                OutcomeStatus.NOTHING_CLAIMABLE,
-                f"epoch {only_epoch} not in claimable range "
-                f"(max signed-rewards epoch = {end})",
-            )
-        if not signed:
-            return _out(
-                OutcomeStatus.NOTHING_CLAIMABLE,
-                f"epoch {only_epoch} rewards not yet signed (>50% claim gate not reached)",
-            )
+        if reason is not None:
+            return _out(OutcomeStatus.NOTHING_CLAIMABLE, f"epoch {only_epoch} {reason}")
 
     try:
         claims = collect_reward_claims(rpc, settings, beneficiary, claim_type, only_epoch)
     except RpcError as exc:
         return _out(OutcomeStatus.FAILED_RETRYABLE, f"discovery rpc failure: {exc}")
+    if not claims:
+        # Never report a bare 'nothing-claimable' that conflates a DONE state
+        # (already claimed / no accrual) with a PENDING one (not finalized /
+        # not signed). Classify the real reason from the on-chain frontier.
+        if only_epoch is not None:
+            # Passed the on-chain gates above but absent from the merkle tree.
+            return _out(
+                OutcomeStatus.NOTHING_CLAIMABLE,
+                f"epoch {only_epoch} no rewards accrued for this beneficiary",
+            )
+        try:
+            frontier = classify_claim_frontier(rpc, settings, beneficiary, claim_type)
+        except RpcError as exc:
+            return _out(OutcomeStatus.FAILED_RETRYABLE, f"discovery rpc failure: {exc}")
+        detail = (
+            "nothing pending — " + "; ".join(f"epoch {e}: {r}" for e, r in frontier)
+            if frontier
+            else "no claimable rewards"
+        )
+        return _out(OutcomeStatus.NOTHING_CLAIMABLE, detail)
     return submit_claims(
         settings, fwd, claim_type, beneficiary, claims,
         wait=wait, wait_timeout=wait_timeout, retry=retry, rpc=rpc,

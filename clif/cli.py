@@ -37,7 +37,7 @@ from clif.calldata import (
 )
 from clif.claimer import ClaimOutcome, OutcomeStatus, run_claim, submit_claims
 from clif.config import KeylessViolation, Settings, _NETWORKS, load_settings
-from clif.discovery import collect_reward_claims
+from clif.discovery import classify_claim_frontier, collect_reward_claims
 from clif.fwd_client import (
     FwdClient,
     FwdRetryableError,
@@ -146,7 +146,17 @@ def list_claimable(
             )
             claims = collect_reward_claims(rpc, s, beneficiary, int(claim_type))
             if not claims:
-                console.print(f"  No claimable {claim_type.name} rewards found")
+                # Don't print a bare "none found" — show WHY per frontier epoch
+                # (already-claimed vs not-yet-signed vs no-accrual), so a reader
+                # never mistakes a DONE state for a PENDING one.
+                try:
+                    frontier = classify_claim_frontier(rpc, s, beneficiary, int(claim_type))
+                except RpcError as exc:
+                    console.print(f"  [yellow]could not classify state (rpc): {exc}[/]")
+                    continue
+                console.print(f"  No claimable {claim_type.name} rewards — current state:")
+                for epoch, reason in frontier:
+                    console.print(f"    epoch {epoch}: {reason}")
                 continue
             for c in claims:
                 ether = c.body.amount / 1e18
@@ -688,7 +698,16 @@ def auto(
                         state.record_success(key, now)
                         log.info("%s confirmed claimed epochs=%s", key, claimed)
                     if not claims:
-                        state.record_attempt(key, now, "nothing-claimable")
+                        # Record WHY nothing is claimable (already-claimed /
+                        # not-signed / no-accrual), not a bare conflated string.
+                        try:
+                            frontier = classify_claim_frontier(rpc, s, benef, int(ct))
+                            reason = "nothing-claimable: " + "; ".join(
+                                f"{e}:{r}" for e, r in frontier
+                            )
+                        except RpcError:
+                            reason = "nothing-claimable"
+                        state.record_attempt(key, now, reason)
                         continue
                     last = epochs[-1]
                     if state.in_cooldown(key, last, now):

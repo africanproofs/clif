@@ -101,3 +101,76 @@ def collect_reward_claims(
         if rc is not None:
             out.append(rc)
     return out
+
+
+def _reason_from_state(epoch: int, beneficiary: str, nxt: int, end: int, signed: bool) -> str | None:
+    """Why `epoch` fails the on-chain claimability gates, or None if it passes them.
+
+    Pure: takes the already-fetched chain reads. None means epoch is in the
+    finalized, signed, not-yet-claimed window — i.e. claimable iff the
+    beneficiary has an entry in the published merkle tree (a merkle lookup,
+    not an on-chain gate). The three returned strings are the canonical
+    reasons the `clif claim -e` pre-flight has always used; keep them stable
+    (tests assert the substrings 'already claimed' / 'not in claimable range'
+    / 'not yet signed').
+    """
+    if epoch < nxt:
+        return f"already claimed for {beneficiary} (next claimable = {nxt})"
+    if epoch > end:
+        return f"not in claimable range (max signed-rewards epoch = {end})"
+    if not signed:
+        return "rewards not yet signed (>50% claim gate not reached)"
+    return None
+
+
+def unclaimable_reason(
+    rpc: RpcClient, settings: Settings, beneficiary: str, epoch: int
+) -> str | None:
+    """Return why `epoch` is NOT claimable for `beneficiary`, or None if it passes
+    the on-chain gates (→ claimable iff the beneficiary is in the merkle tree).
+
+    Read-only: reuses the exact on-chain views the discovery window already uses
+    (`getNextClaimableRewardEpochId`, `getRewardEpochIdsWithClaimableRewards`,
+    `rewardsHash`). No new RPC. Distinguishes the DONE state (already claimed)
+    from the PENDING states (not finalized / not signed) — the whole point.
+    """
+    net = settings.net
+    nxt = rpc.next_claimable_reward_epoch_id(net.reward_manager, beneficiary)
+    _, end = rpc.reward_epoch_id_range(net.reward_manager)
+    signed = epoch <= end and rpc.rewards_hash(net.flare_systems_manager, epoch) != ZERO_BYTES32
+    return _reason_from_state(epoch, beneficiary, nxt, end, signed)
+
+
+def classify_claim_frontier(
+    rpc: RpcClient, settings: Settings, beneficiary: str, claim_type: int
+) -> list[tuple[int, str]]:
+    """Per-epoch claim state across the frontier, for the empty-discovery report.
+
+    Returns `[(epoch, reason), ...]` for the handful of epochs around the
+    claim frontier — the last-claimed (`next_claimable-1`), the next claimable
+    (`next_claimable`), the latest finalized (`end`) and the next-to-finalize
+    (`end+1`). Each reason distinguishes already-claimed / not-finalized /
+    not-signed / no-accrual / claimable, so `list`/`auto`/`claim` never report a
+    bare 'nothing-claimable' that conflates DONE with PENDING. Bounded to ≤4
+    epochs; reuses existing reads only.
+    """
+    net = settings.net
+    nxt = rpc.next_claimable_reward_epoch_id(net.reward_manager, beneficiary)
+    start, end = rpc.reward_epoch_id_range(net.reward_manager)
+    candidates = sorted({e for e in (nxt - 1, nxt, end, end + 1) if e >= max(start, 0)})
+    out: list[tuple[int, str]] = []
+    for epoch in candidates:
+        signed = epoch <= end and rpc.rewards_hash(net.flare_systems_manager, epoch) != ZERO_BYTES32
+        reason = _reason_from_state(epoch, beneficiary, nxt, end, signed)
+        if reason is None:
+            # Gates pass → claimable iff in the merkle tree. A miss here (the
+            # epoch is finalized + signed but the beneficiary is absent) is a
+            # genuine no-accrual, not a pending state.
+            rc = reward_claim_for(settings, epoch, beneficiary, claim_type)
+            reason = (
+                f"claimable: {rc.body.amount} wei"
+                if rc is not None
+                else "no rewards accrued for this beneficiary"
+            )
+        out.append((epoch, reason))
+    return out

@@ -44,6 +44,28 @@ A no-op is never reported as success. See `docs/decisions.md` D16. *Codified
 2026-05-26 after a mined no-op (already-claimed epoch) was briefly mis-reported as a
 successful claim — caught by the operator claiming the epoch manually first.*
 
+## Hard rule — an empty discovery has a reason; classify it, never assume
+
+Companion to the mined-≠-success rule, at the *discovery* level. **Never report (or
+let an agent/operator read) an empty reward discovery as "not yet claimable" without
+determining why on-chain.** `clif list` / `claim` / `auto` finding no claims has at
+least three distinct causes that must NOT be conflated:
+
+- **already-claimed** (DONE) — `getNextClaimableRewardEpochId(owner)` has advanced past
+  a finalized epoch;
+- **not-yet-claimable** (PENDING) — `rewardsHash(epoch) == 0x00…` or the epoch is beyond
+  `getRewardEpochIdsWithClaimableRewards()`'s end;
+- **no-accrual** (DONE) — the on-chain gates pass but the beneficiary is absent from the
+  published merkle tree.
+
+`clif/discovery.py::unclaimable_reason` / `classify_claim_frontier` compute this from the
+view reads already in use — **no new RPC** (`getUnclaimedRewardState` resets to
+`(False,0,0)` after a claim and cannot discriminate claimed-vs-no-accrual; the reliable
+signal is `next_claimable`). The `-e` path always classified; the auto / `list` / `claim`
+paths now do too (v0.5.6). *Codified 2026-05-29 after an empty Flare discovery (epoch 401
+already claimed manually by the operator) was mis-reported as "not yet claimable" — the
+same done-vs-pending conflation as the rule above, made right after invoking it.*
+
 ## Knowledge base (authoritative, in-repo)
 
 Read these before non-trivial work; they are the binding references:

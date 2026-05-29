@@ -12,6 +12,7 @@ import clif.claimer as claimer_mod
 
 from clif.claimer import OutcomeStatus, run_claim, submit_claims
 from clif.config import ZERO_BYTES32, Settings
+from clif.discovery import classify_claim_frontier, unclaimable_reason
 from clif.fwd_client import (
     FwdClient,
     FwdRetryableError,
@@ -435,6 +436,48 @@ def test_run_claim_e_out_of_range_is_clear():
     o = run_claim(_settings(), rpc, FakeFwd(), 1, BENEF, only_epoch=400)
     assert o.status == OutcomeStatus.NOTHING_CLAIMABLE
     assert "not in claimable range" in o.detail
+
+
+# ---- empty auto-discovery path must classify WHY (not bare nothing-claimable) ----
+
+def test_run_claim_no_epoch_already_claimed_reports_frontier():
+    """`clif claim` (no -e) on a caught-up owner reports the per-epoch reason
+    (already-claimed / not-finalized), not a bare 'nothing-claimable' that a
+    reader could mistake for a still-pending state. No submit happens."""
+    fwd = FakeFwd(sign_exc=AssertionError("must not submit when nothing claimable"))
+    rpc = FakeRpc(next_claimable=402, end=401)  # 401 claimed, 402 not yet finalized
+    o = run_claim(_settings(), rpc, fwd, 1, BENEF, only_epoch=None)
+    assert o.status == OutcomeStatus.NOTHING_CLAIMABLE
+    assert "nothing pending" in o.detail
+    assert "already claimed" in o.detail
+    assert "401" in o.detail and "402" in o.detail
+    assert fwd.signed_kwargs is None
+
+
+def test_unclaimable_reason_classifies_each_state():
+    s = _settings()
+    assert "already claimed" in unclaimable_reason(
+        FakeRpc(next_claimable=402, end=401), s, BENEF, 401
+    )
+    assert "not in claimable range" in unclaimable_reason(
+        FakeRpc(next_claimable=0, end=399), s, BENEF, 400
+    )
+    assert "not yet signed" in unclaimable_reason(
+        FakeRpc(next_claimable=400, end=410, rewards_hash=ZERO_BYTES32), s, BENEF, 400
+    )
+    # Passes the on-chain gates → None (claimable iff present in the merkle tree).
+    assert unclaimable_reason(FakeRpc(next_claimable=400, end=410), s, BENEF, 405) is None
+
+
+def test_classify_frontier_no_accrual(monkeypatch):
+    """A finalized+signed+unclaimed epoch with no merkle entry is reported as
+    'no rewards accrued' (a DONE state), never as pending."""
+    monkeypatch.setattr("clif.discovery.reward_claim_for", lambda *a, **k: None)
+    rpc = FakeRpc(next_claimable=400, end=405)  # 400..405 finalized + signed
+    frontier = classify_claim_frontier(rpc, _settings(), BENEF, 1)
+    reasons = "; ".join(r for _e, r in frontier)
+    assert "no rewards accrued" in reasons
+    assert "already claimed" in reasons  # epoch 399 = next_claimable - 1
 
 
 def test_submit_claims_mined_noop_when_no_reward_event():
