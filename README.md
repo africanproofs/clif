@@ -5,9 +5,11 @@ Songbird, and Coston2. It is the Python successor to the TypeScript
 `ftso-fee-claimer`, with one decisive difference: **clif holds no private
 keys.** All epoch and Merkle-proof discovery is keyless RPC + HTTP; the single
 key operation — `RewardManager.claim(...)` — is performed by calling the
-**fwd** signing daemon's `POST /v1/sign-and-send`. fwd holds the key, gates the
-call by policy, signs, and broadcasts. clif never sees a key. This is **Phase
-8b** of the fwd program: the first deleted `.env PRIVATE_KEY=` line.
+**fwd** signing daemon's `POST /v1/sign-transaction`. fwd (zero-egress,
+sign-only) holds the key, gates the call by policy, signs, and allocates the
+nonce; **clif broadcasts the signed tx itself and reports the outcome back**.
+clif never sees a key. This is **Phase 8b** of the fwd program: the first
+deleted `.env PRIVATE_KEY=` line.
 
 ## What clif does not hold
 
@@ -72,6 +74,30 @@ Copy `.env.example` to `.env`. `NETWORK`, the beneficiary addresses
 `CLAIM_RECIPIENT_ADDRESS`, and the fwd connection (`FWD_ENDPOINT`,
 `FWD_WALLET_NAME`, `FWD_CALLER_TOKEN`) are all keyless.
 
+## Run your own provider stack
+
+clif + fwd are not AP-specific. Any FTSO provider can self-host the same
+keyless stack — clif claims/signs, **their own** fwd custodies the keys.
+
+1. **Stand up fwd.** Follow fwd's `docs/one-command-install.md` (the fwd-core
+   installer, `--with-clif` to build clif from source alongside it). On the fwd
+   side the operator creates the wallets, writes `policy.yaml`, and mints the
+   caller tokens (`clifwd policy init` / `validate`; `clifwd nonce-init` once
+   per wallet+chain) — clif never authors fwd policy.
+2. **Configure clif.** `cp .env.example .env` (or a per-network
+   `.env.<network>` for multichain). Set **your** beneficiary addresses —
+   `IDENTITY_ADDRESS` (FEE), `SIGNING_POLICY_ADDRESS` (DIRECT, if any),
+   `CLAIM_RECIPIENT_ADDRESS`, `WRAP_REWARDS` — and the fwd integration:
+   `FWD_ENDPOINT`, `FWD_WALLET_NAME`, `FWD_CALLER_TOKEN`, plus the FSP `FSP_*`
+   vars (`FSP_SIGN_CALLER_TOKEN`, `FSP_SUBMIT_CALLER_TOKEN`,
+   `FSP_SIGNING_WALLET_NAME`, `FSP_SENDER_WALLET_NAME`) if you sign FSP
+   messages. All operator-provisioned on **your** fwd; the per-var detail is in
+   `.env.example`.
+3. **Verify keyless, then rehearse.** `clif health` (require `master == "ok"`)
+   → `clif list` (your claimable epochs) → `clif rehearse` on **Coston2**
+   first, then Songbird, then Flare. The rehearsal proves the on-chain `from`
+   is your fwd-custodied wallet (clif holds no key). Only then go live.
+
 ## Knowledge base
 
 This repo is self-contained — no external repo or constitution needed.
@@ -89,8 +115,9 @@ This repo is self-contained — no external repo or constitution needed.
 `clif fsp` signs the FTSO FSP protocol messages (`signUptimeVote`,
 `signRewards`) via the **fwd** daemon — clif holds zero keys. Two-leg flow:
 Leg-1 calls `POST /v1/sign-fsp-message` (fwd signs the protocol message,
-returns v/r/s); Leg-2 calls `POST /v1/sign-and-send` with the built
-`FlareSystemsManager` calldata. For `REWARD_DISTRIBUTION`, clif first fetches
+returns v/r/s); Leg-2 calls `POST /v1/sign-transaction` with the built
+`FlareSystemsManager` calldata, then clif broadcasts + reports back. For
+`REWARD_DISTRIBUTION`, clif first fetches
 and validates `reward-distribution-data.json` — it never signs an unverified
 `rewardsHash`. The file's `rewardEpochId` is asserted equal to the signing
 epoch before Leg-1 (D15 MAJOR-1 epoch-bind; `FAILED_TERMINAL` with no sign
@@ -109,9 +136,9 @@ loader forbids the same `policy_path` key appearing in both `permissions` and
 cannot span Leg-1 and Leg-2:
 - `FSP_SIGN_CALLER_TOKEN` — Leg-1 `/v1/sign-fsp-message`; operator provisions
   `clif-fsp-sign` caller in fwd's `fsp_permissions` block
-- `FSP_SUBMIT_CALLER_TOKEN` — Leg-2 `/v1/sign-and-send` + per-caller-scoped
-  tx poll; operator provisions `clif-fsp-submit` caller in fwd's `permissions`
-  block for FlareSystemsManager
+- `FSP_SUBMIT_CALLER_TOKEN` — Leg-2 `/v1/sign-transaction` + client broadcast +
+  per-caller-scoped tx poll; operator provisions `clif-fsp-submit` caller in
+  fwd's `permissions` block for FlareSystemsManager
 
 `clif fsp auto` is **HARD-DISABLED by default**. Set `FSP_AUTO_ENABLED=true`
 explicitly to enable the unattended REWARDS auto-signer (operator-accepted

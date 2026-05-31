@@ -4,6 +4,11 @@
 > each remaining rung. Doctrine: **real-RPC verification is the validation —
 > mocks lie.** A change to the signing path is not "done" until proven against
 > a live fwd + chain.
+>
+> fwd is **zero-egress sign-only**: clif POSTs `/v1/sign-transaction`,
+> **broadcasts the returned `signed_raw_tx` itself**, then reports the outcome
+> back (`/v1/transactions/{tx_id}/broadcast-result` → poll
+> `eth_getTransactionReceipt` → `/receipt`). fwd never broadcasts.
 
 ## Verification ladder
 
@@ -48,12 +53,16 @@ Run with clif-**generated** calldata only (never a hand-built shape):
 
 Per-rung pass criteria:
 
-- `POST /v1/sign-and-send` → 200.
-- `GET /v1/transactions/{tx_id}` polls to `status=mined`.
+- `POST /v1/sign-transaction` → 200 (`{tx_id, hash, signed_raw_tx, nonce}`).
+- clif **broadcasts `signed_raw_tx`** itself (`eth_sendRawTransaction`) and
+  POSTs `/v1/transactions/{tx_id}/broadcast-result` (`accepted`).
+- clif polls `eth_getTransactionReceipt` to mined, then POSTs
+  `/v1/transactions/{tx_id}/receipt` (`mined_success`/`mined_reverted`).
 - On-chain `eth_getTransactionReceipt`: `status=0x1`, `to` == the network's
   RewardManager, **on-chain `from` == the fwd-custodied wallet** (secp256k1
   recovery proves fwd signed — clif holds no key).
-- Idempotency replay of the same key → **same `tx_id`**, no second broadcast.
+- Idempotency replay of the same key (same body) → **same `tx_id`**, no second
+  sign.
 - A policy-denied request → **403, not retried**.
 - Operator runs `clifwd audit verify` inside the fwd container →
   `chain intact: N rows`, exit 0.
@@ -87,7 +96,7 @@ clif rehearse  # rehearsal-ladder fwd-custody proof (needs fwd + caller token)
 | rung | confirms | status | blocker |
 |---|---|---|---|
 | F0 | FSP unit logic: selectors, UPTIME_VOTE_HASH, calldata builders, cross-field validation (merkleRoot regex, n≥0), epoch-bind (`rdd.reward_epoch_id==signing_epoch`), two-caller per-leg mapping, oracle vector parse | ✅ done | — see suite (ruff clean, both selectors anchored `0xdc5a4225`/`0xc00a1a97`) |
-| F1 | clif ↔ fwd FSP transport (Leg-1 `/v1/sign-fsp-message` with `FSP_SIGN_CALLER_TOKEN`; Leg-2 `/v1/sign-and-send` + tx poll with `FSP_SUBMIT_CALLER_TOKEN`) | ⛔ GATE-1 env-deferred | env: `FSP_SIGN_CALLER_TOKEN` / `FSP_SUBMIT_CALLER_TOKEN` / `FSP_SIGNING_WALLET_NAME` / `FSP_SENDER_WALLET_NAME` not provisioned; two fwd FSP callers not created; fwd `/v1/sign-fsp-message` endpoint not confirmed |
+| F1 | clif ↔ fwd FSP transport (Leg-1 `/v1/sign-fsp-message` with `FSP_SIGN_CALLER_TOKEN`; Leg-2 `/v1/sign-transaction` + client broadcast + tx poll with `FSP_SUBMIT_CALLER_TOKEN`) | ⛔ GATE-1 env-deferred | env: `FSP_SIGN_CALLER_TOKEN` / `FSP_SUBMIT_CALLER_TOKEN` / `FSP_SIGNING_WALLET_NAME` / `FSP_SENDER_WALLET_NAME` not provisioned; two fwd FSP callers not created; fwd `/v1/sign-fsp-message` endpoint not confirmed |
 | F2 | end-to-end FSP on Coston2 (mined, correct `from`); live byte-match of oracle vectors | ⛔ GATE-1 env+operator | F1 + operator provisions fwd FSP policy + wallets; on-chain FSP registration |
 
 F1/F2 are environment-deferred. No code defect blocks them. GATE-1 remains

@@ -71,7 +71,7 @@ production Flare claim without explicit operator approval.
 | **FSP signing wallet** | fwd-custodied wallet holding the signing-policy key for `signUptimeVote` / `signRewards` (Leg-1) | held by fwd; fwd admin provisions (`POST /v1/admin/wallets`); never in clif |
 | **FSP sender wallet** | fwd-custodied wallet that sends the on-chain `FlareSystemsManager` tx (Leg-2) | held by fwd; needs gas; distinct from signing wallet |
 | **FSP sign caller** (`clif-fsp-sign`) | clif's Leg-1 identity in fwd; receives `FSP_SIGN_CALLER_TOKEN` | `FSP_SIGN_CALLER_TOKEN` is keyless in clif (a Bearer token, not a signing key); authorized in fwd's `fsp_permissions` block only |
-| **FSP submit caller** (`clif-fsp-submit`) | clif's Leg-2 + tx-poll identity in fwd; receives `FSP_SUBMIT_CALLER_TOKEN` | `FSP_SUBMIT_CALLER_TOKEN` is keyless in clif; authorized in fwd's `permissions` block for FlareSystemsManager; used for `/v1/sign-and-send` and the per-caller-scoped `/v1/transactions/{id}` poll |
+| **FSP submit caller** (`clif-fsp-submit`) | clif's Leg-2 + tx-poll identity in fwd; receives `FSP_SUBMIT_CALLER_TOKEN` | `FSP_SUBMIT_CALLER_TOKEN` is keyless in clif; authorized in fwd's `permissions` block for FlareSystemsManager; used for `/v1/sign-transaction` (clif then broadcasts + reports back) and the per-caller-scoped `/v1/transactions/{id}` poll |
 
 **Two distinct callers are required (D15 MAJOR-2):** fwd's policy loader forbids
 the same `policy_path` key appearing in both `permissions` and `fsp_permissions`

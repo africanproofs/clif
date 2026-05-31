@@ -184,6 +184,18 @@ clone the HTTPS git-dep at build). **Keyless intact** — the lib is httpx+pydan
 only; no crypto/signing dep added. 176 tests green; `docker compose build clif` ok.
 One canonical impl of the fwd contract now — future consumers depend on the same lib.
 
+## Status (2026-05-31, v0.5.7) — doc cleanup + provider-onboarding
+
+Docs-only: retired the stale `/v1/sign-and-send` references in the
+current-reference docs and aligned them to the zero-egress `/v1/sign-transaction`
++ client-broadcast + report-back contract (`docs/fwd-contract.md` rewritten to
+fwd v1.1.0a32; `docs/verification.md` updated; `docs/onchain-migration.md` Leg-2
+row corrected; the historical binding specs `docs/phase8b-spec.md` and
+`docs/fsp-signing-tool-spec.md` carry a SUPERSEDED banner, body preserved).
+Added a "Run your own provider stack" section to `README.md` for third-party
+FTSO providers (their own fwd + clif). No `*.py` logic changed; keyless invariant
+intact (no dep change).
+
 ## fwd in one line
 
 `POST /v1/sign-transaction` (Bearer caller token, deterministic `Idempotency-Key`)
@@ -191,8 +203,7 @@ One canonical impl of the fwd contract now — future consumers depend on the sa
 (`/v1/transactions/{tx_id}/broadcast-result`, `/receipt`). 401/403/404/400/409/503
 are **terminal** (409 = nonce-not-initialized → operator runs `nonce-init`); there
 is no 502 from fwd anymore. Require `/healthz` `master=="ok"`. Full contract:
-`docs/fwd-contract.md` (note: that file still documents the retired sign-and-send
-shape — update pending).
+`docs/fwd-contract.md`.
 
 ## Stack & layout
 

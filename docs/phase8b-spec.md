@@ -1,5 +1,11 @@
 # Phase 8b binding spec (in-repo authoritative copy)
 
+> **⚠️ Superseded (as of clif v0.5.2, fwd zero-egress migration):** this document
+> describes the original `/v1/sign-and-send` design. The current contract is
+> `/v1/sign-transaction` + client-side broadcast + report-back — see
+> `docs/fwd-contract.md` and `CLAUDE.md` §Status. The body below is preserved as
+> the original design record.
+
 > Authored by the fwd Reviewer (Opus) as the canonical prompt for building
 > clif. Vendored here so clif stands alone: this file — not any
 > `~/.claude/plans/*` path — is the authoritative spec for this repo.
