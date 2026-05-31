@@ -12,27 +12,30 @@
 
 ## Verification ladder
 
-| rung | confirms | status (2026-05-18) | blocker |
+| rung | confirms | status | blocker |
 |---|---|---|---|
-| 0 | unit logic (encode, classify, selector) | ✅ done | — 38 tests, ruff clean, selector anchored `0x8e33aba5` |
+| 0 | unit logic (encode, classify, selector) | ✅ done | — ruff clean, selector anchored `0x8e33aba5` |
 | 1 | keyless discovery vs live chain, empty case | ✅ done | — `list`/`spec` ran vs live Flare |
-| 2 | keyless discovery with a **real reward** (fsp-rewards fetch + real proofs + real calldata) | ⛔ unproven | timing/data: AP has nothing claimable now; needs a live claimable epoch |
-| 3 | clif ↔ fwd transport (health/auth/sign/deny) | ⛔ unproven | env: no fwd reachable; + operator: fwd not provisioned |
-| 4 | end-to-end on Coston2 (mined, `from`==fwd wallet) | ⛔ unproven | rung 3 + on-chain `setClaimExecutors` |
-| 5 | real Flare claim | ⛔ unproven | all above + operator approval (Core inv #15) |
-| 6 | daemon/Docker/healthcheck in situ | ⛔ unproven | env: no Docker host here |
+| 2 | keyless discovery with a **real reward** (fsp-rewards fetch + real proofs + real calldata) | ⛔ unproven | timing/data: needs a live claimable Flare epoch — the `docs/fwd-integration-spec.md §3` sample is still pending |
+| 3 | clif ↔ fwd transport (health/auth/sign/deny) | ✅ done | — proven in the epoch-400 mainnet drill |
+| 4 | end-to-end claim, mined, on-chain `from` == fwd wallet | ⛔ unproven | on-chain `setClaimExecutors` (operator) + a claimable epoch |
+| 5 | real Flare production claim | ⛔ unproven | rung 4 + operator approval (Core inv #15) |
+| 6 | daemon/Docker/healthcheck in situ | ✅ done | — fwd daemon reached over its Docker network in the drill |
 
-None of the open rungs is a clif **code** defect. Blockers are: this
-environment (no fwd, no Docker), the deliberate operator gate, and a
-~3.5-day reward-epoch cadence we don't control.
+The open rungs are not clif **code** defects. Rung 2 waits on a live claimable
+Flare epoch; rungs 4–5 wait on the on-chain `setClaimExecutors` authorization,
+the deliberate operator gate (Core inv #15), and a ~3.5-day reward-epoch cadence
+outside clif's control. The epoch-400/401 mainnet drills proved the transport,
+the client-broadcast, the report-back, and the daemon-in-situ paths against live
+fwd + chain.
 
 ## The one lever available without the operator gate
 
 Rung 2: catch a window when AP actually has a claimable Flare epoch and run
 `clif spec` — this exercises `reward_data` + real proof fetch + real calldata
-build and fills `docs/fwd-integration-spec.md`'s pending real sample. Can be
-poll-driven (e.g. `/loop`). Everything past rung 2 needs the operator + a host
-running fwd + Docker.
+build and fills the pending real sample in `docs/fwd-integration-spec.md §3`.
+Can be poll-driven (e.g. `/loop`). Everything past rung 2 needs the operator
+plus a host running fwd + Docker.
 
 ## Rehearsal ladder (operator-gated; the binding control)
 
@@ -69,10 +72,9 @@ Per-rung pass criteria:
 
 ## Pre-flight traps
 
-- **fwd `policy.example.yaml`** — was wrong for `claim`, now **fixed upstream**
-  (fwd v1.0.0 fold-in; line 56 is canonical). Still write the policy from the
-  signature in `docs/fwd-contract.md` / `docs/fwd-integration-spec.md §2`
-  (which now matches the fwd example).
+- **`claim` policy signature** — write the policy from the canonical signature
+  in `docs/fwd-contract.md` / `docs/fwd-integration-spec.md §2`; it matches
+  `fwd/docs/policy.example.yaml`.
 - **No `setClaimExecutors` yet** → a perfect clif→fwd→sign still reverts
   on-chain until the offline identity key authorizes the fwd wallet
   (`docs/onchain-migration.md` step 3).
@@ -91,16 +93,15 @@ clif status    # exit 3 with no daemon (correct)
 clif rehearse  # rehearsal-ladder fwd-custody proof (needs fwd + caller token)
 ```
 
-## FSP verification ladder (2026-05-19)
+## FSP verification ladder
 
 | rung | confirms | status | blocker |
 |---|---|---|---|
-| F0 | FSP unit logic: selectors, UPTIME_VOTE_HASH, calldata builders, cross-field validation (merkleRoot regex, n≥0), epoch-bind (`rdd.reward_epoch_id==signing_epoch`), two-caller per-leg mapping, oracle vector parse | ✅ done | — see suite (ruff clean, both selectors anchored `0xdc5a4225`/`0xc00a1a97`) |
-| F1 | clif ↔ fwd FSP transport (Leg-1 `/v1/sign-fsp-message` with `FSP_SIGN_CALLER_TOKEN`; Leg-2 `/v1/sign-transaction` + client broadcast + tx poll with `FSP_SUBMIT_CALLER_TOKEN`) | ⛔ GATE-1 env-deferred | env: `FSP_SIGN_CALLER_TOKEN` / `FSP_SUBMIT_CALLER_TOKEN` / `FSP_SIGNING_WALLET_NAME` / `FSP_SENDER_WALLET_NAME` not provisioned; two fwd FSP callers not created; fwd `/v1/sign-fsp-message` endpoint not confirmed |
-| F2 | end-to-end FSP on Coston2 (mined, correct `from`); live byte-match of oracle vectors | ⛔ GATE-1 env+operator | F1 + operator provisions fwd FSP policy + wallets; on-chain FSP registration |
+| F0 | FSP unit logic: selectors, UPTIME_VOTE_HASH, calldata builders, cross-field validation (merkleRoot regex, n≥0), epoch-bind (`rdd.reward_epoch_id==signing_epoch`), two-caller per-leg mapping, oracle vector parse | ✅ done | — both selectors anchored `0xdc5a4225`/`0xc00a1a97` |
+| F1 | clif ↔ fwd FSP transport (Leg-1 `/v1/sign-fsp-message` with `FSP_SIGN_CALLER_TOKEN`; Leg-2 `/v1/sign-transaction` + client broadcast + tx poll with `FSP_SUBMIT_CALLER_TOKEN`) | ✅ done | — both legs exercised in the epoch-400 mainnet drill (uptime + rewards signed, broadcast, reported back) |
+| F2 | end-to-end FSP accepted on-chain (mined, correct `from`, no revert) | ⛔ unproven | on-chain FSP registration of the signing wallet; a sole-submitter sender wallet (the live drill hit `nonce too low` on a co-managed sender and a mined-but-reverted rewards submit) |
 
-F1/F2 are environment-deferred. No code defect blocks them. GATE-1 remains
-(nothing here is claimed on-chain-proven). Operator items (see D15 MAJOR-2):
+F2 is blocked on-chain, not in code. Operator items (see D15 MAJOR-2):
 - Provision `FSP_SIGN_CALLER_TOKEN` (`clif-fsp-sign` caller → `fsp_permissions`
   block in fwd; authorizes Leg-1 `/v1/sign-fsp-message`)
 - Provision `FSP_SUBMIT_CALLER_TOKEN` (`clif-fsp-submit` caller → `permissions`

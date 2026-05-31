@@ -34,16 +34,16 @@ Merkle root. clif's keyless discovery (`clif/discovery.py`) already gates on
 exactly this (`rewards_hash(...) != ZERO_BYTES32`). **Automation is a poll of
 this flip + submit via fwd — no new chain logic.**
 
-## Doctrine drift to know (do not "fix" — fwd-side)
+## Rotation note: executor, not recipient (fwd-side — clif does not "fix" it)
 
-The fwd roadmap phrases Phase 8 rotation as "on-chain via `setClaimRecipient`".
+Some fwd roadmap text phrases the rotation as "on-chain via `setClaimRecipient`".
 The producing code shows the **keyed entity is the executor**
 (`CLAIM_EXECUTOR_PRIVATE_KEY` in the TS tool), authorized by the
 identity/signing-policy address via **`ClaimSetupManager.setClaimExecutors`**.
 The recipient is a keyless arg, separately allow-listed via
 `setAllowedClaimRecipient`. So the real rotation authorizes fwd's new wallet as
-**executor**, not a recipient swap. Surfaced for the operator/Reviewer;
-clif does not edit fwd (`docs/phase8b-spec.md` constraint 2).
+**executor**, not a recipient swap. Surfaced for the operator/Reviewer; clif
+does not edit fwd (`docs/phase8b-spec.md` constraint 2).
 
 ## Operator-gated rotation sequence (Core invariant #15)
 
@@ -59,17 +59,17 @@ clif does not edit fwd (`docs/phase8b-spec.md` constraint 2).
    any real claim **reverts on-chain** even if clif→fwd→sign is perfect.
 4. Rehearsal ladder (`docs/verification.md`): Coston2 → Songbird → Flare.
 5. **Irreversible:** delete the `.env PRIVATE_KEY=` line from the fee-claimer
-   path — the Phase-8b deliverable; lifts fwd's doctrine-ship freeze.
+   path — the Phase-8b deliverable.
 
 clif builds + rehearses freely; it never performs steps 2–3, 5 and never the
 production Flare claim without explicit operator approval.
 
-## FSP actors (2026-05-19)
+## FSP actors
 
 | role | who | keyed? |
 |---|---|---|
 | **FSP signing wallet** | fwd-custodied wallet holding the signing-policy key for `signUptimeVote` / `signRewards` (Leg-1) | held by fwd; fwd admin provisions (`POST /v1/admin/wallets`); never in clif |
-| **FSP sender wallet** | fwd-custodied wallet that sends the on-chain `FlareSystemsManager` tx (Leg-2) | held by fwd; needs gas; distinct from signing wallet |
+| **FSP sender wallet** | fwd-custodied wallet that sends the on-chain `FlareSystemsManager` tx (Leg-2) | held by fwd; needs gas; distinct from signing wallet. Must be a **sole-submitter** account — fwd cannot co-manage a nonce on a sender another system also submits from (the live drill hit `nonce too low` on a co-managed sender) |
 | **FSP sign caller** (`clif-fsp-sign`) | clif's Leg-1 identity in fwd; receives `FSP_SIGN_CALLER_TOKEN` | `FSP_SIGN_CALLER_TOKEN` is keyless in clif (a Bearer token, not a signing key); authorized in fwd's `fsp_permissions` block only |
 | **FSP submit caller** (`clif-fsp-submit`) | clif's Leg-2 + tx-poll identity in fwd; receives `FSP_SUBMIT_CALLER_TOKEN` | `FSP_SUBMIT_CALLER_TOKEN` is keyless in clif; authorized in fwd's `permissions` block for FlareSystemsManager; used for `/v1/sign-transaction` (clif then broadcasts + reports back) and the per-caller-scoped `/v1/transactions/{id}` poll |
 
@@ -80,17 +80,17 @@ Leg-1 sign caller and the Leg-2 submit caller must be different. Both are distin
 from `FWD_CALLER_TOKEN` (the claim caller). clif never authors fwd policy.
 
 The FSP signing wallet address must be registered on-chain as the FSP provider
-for AP's identity address (chain-side operator step — offline key; clif does
-not perform this registration). Until done, Leg-2 may revert on-chain even if
-Leg-1 is successful.
+for AP's identity address — a chain-side operator step with the offline key;
+clif does not perform this registration.
 
-**Operator provisioning items (all GATE-1 — not yet done; see D15):**
+**Operator provisioning items (see D15):**
 - Provision `FSP_SIGN_CALLER_TOKEN`: create `clif-fsp-sign` caller in fwd admin,
   authorize in `fsp_permissions` block (Leg-1 `/v1/sign-fsp-message`)
 - Provision `FSP_SUBMIT_CALLER_TOKEN`: create `clif-fsp-submit` caller in fwd
   admin, authorize in `permissions` block for FlareSystemsManager (Leg-2 +
   per-caller-scoped tx poll)
 - Create `FSP_SIGNING_WALLET_NAME` in fwd with the signing-policy key
-- Create `FSP_SENDER_WALLET_NAME` in fwd with gas
+- Create `FSP_SENDER_WALLET_NAME` in fwd with gas — a sole-submitter account
 - Add `FlareSystemsManager` ABI + FSP policy to fwd (clif never authors this)
-- Register the FSP signing wallet address on-chain for AP's FSP role
+- Register the FSP signing wallet address on-chain for AP's FSP role (until done,
+  Leg-2 may revert on-chain even when Leg-1 is successful)

@@ -73,128 +73,93 @@ Read these before non-trivial work; they are the binding references:
 | file | what |
 |---|---|
 | `docs/phase8b-spec.md` | **Binding spec** (vendored canonical prompt). Authoritative; decisions adjudicated. |
-| `docs/decisions.md` | Settled decisions — **do not relitigate** (D1–D10). |
+| `docs/decisions.md` | Settled decisions — **do not relitigate** (D1–D16). |
 | `docs/fwd-contract.md` | Verified fwd HTTP + ABI contract; the policy block; the `policy.example.yaml` trap. |
 | `docs/onchain-migration.md` | Networks/addresses, actors, the >50% trigger, the operator-gated rotation, the `setClaimExecutors` drift. |
 | `docs/verification.md` | Verification ladder (proven vs blocked), rehearsal ladder, pre-flight traps, local checks. |
-| `docs/fwd-integration-spec.md` | Deliverable 2 — the operator handshake artifact (regenerate with `clif spec`). |
+| `docs/fwd-integration-spec.md` | The operator handshake artifact (regenerate with `clif spec`). |
 
-## Status (2026-05-18)
+## Status — current: v0.5.8 (2026-05-31)
 
-Keyless half + Deliverable 2 shipped; AP-registered; on private
-`github.com/africanproofs/clif`. Claim + automation **code complete**
-(`claimer`/`autostate`, `claim`/`auto`/`status` CLI, Dockerfile + compose; 38
-tests, ruff clean). Production Flare automation and the on-chain/`.env` steps
-remain **operator-gated** (fwd must be provisioned and the new wallet
-authorized on-chain as executor first). See `docs/verification.md` for the
-exact rung-by-rung state.
+clif is on the public `github.com/africanproofs/clif` (build-from-source). The
+reward-claim and FSP signing paths are code complete, keyless, and mainnet-verified
+through the zero-egress fwd stack. Production claim/FSP on-chain operations and the
+on-chain/`.env` cutover steps remain **operator-gated** (fwd provisioned, the new
+wallet authorized on-chain as executor, FSP caller tokens + FlareSystemsManager
+policy in fwd). See `docs/verification.md` for the rung-by-rung state.
 
-## Status (2026-05-19)
+Current contract: clif asks fwd to SIGN (`/v1/sign-transaction`), then **broadcasts
+the returned `signed_raw_tx` itself** and **reports the outcome back** to fwd. 179
+tests green. Build via `fwd-client` (shared keyless transport lib).
 
-Keyless FSP signing-tool added. `fsp_calldata`, `fsp`, `fsp_autostate` modules
-code complete; `fsp uptime|rewards|status|auto` CLI commands added; 6 new test
-files (124 tests total), ruff clean, v0.4.0. Production FSP signing and the
-fwd provisioning steps remain **operator-gated** (FSP caller token, signing +
-sender wallet names, FlareSystemsManager ABI + policy in fwd — see
-`docs/verification.md` F1/F2 rungs and `docs/fsp-signing-tool-spec.md`).
+**Changelog (condensed):**
 
-**Corrective pass (2026-05-19, D15, v0.5.0):** Two MAJOR defects corrected
-clif-side, surgically and additively (nothing committed — operator gates
-commits). (a) **Epoch-bind (MAJOR-1):** `reward-distribution-data.json` carries
-a top-level `rewardEpochId`; `RewardDistributionData` now requires it,
-validates `merkleRoot` `^0x[0-9a-fA-F]{64}$` and `noOfWeightBasedClaims` ≥ 0,
-and `run_sign_rewards` asserts `rdd.reward_epoch_id == reward_epoch_id` BEFORE
-Leg-1 (FAILED_TERMINAL with no sign call on mismatch — stale cache / wrong
-file). (b) **Two FSP caller tokens (MAJOR-2):** fwd forbids one `policy_path`
-key in both `permissions` and `fsp_permissions`, so one caller cannot span
-Leg-1 and Leg-2. `fsp_caller_token` replaced by `fsp_sign_caller_token`
-(Leg-1, `fsp_permissions`) and `fsp_submit_caller_token` (Leg-2 + tx poll,
-`permissions`). The orchestrator owns both clients; CLI no longer builds/passes
-an FSP `FwdClient`. (c) **`FSP_AUTO_ENABLED` hard-off:** `clif fsp auto`
-refuses loudly (exit 2, D15 message) unless `FSP_AUTO_ENABLED=true` — a valid
-signature over wrong data is irreversible on-chain. GATE-1 (F1/F2) remains
-environment-deferred; nothing here is claimed on-chain-proven. See D15 for the
-full rationale and accepted guard stack.
-
-## Status (2026-05-27, v0.5.1)
-
-Reward-distribution **Merkle verification** added (`clif/merkle.py`). Builds +
-verifies the Flare fsp-rewards tree — leaf `keccak256(abi.encode((uint24,bytes20,
-uint120,uint8)))` (single keccak, not OZ double), sorted-pair internal nodes,
-sorted+deduped leaves; byte-exact vs flare epochs 228/400. Wired in two places:
-`run_sign_rewards` now **recomputes the root from the published claims and refuses
-to sign** (FAILED_TERMINAL, no Leg-1 call) if it ≠ the file's `merkleRoot` — the
-cryptographic upgrade of the "never sign an unverified rewardsHash" rule (was
-epoch-bind only); `discovery.reward_claim_for` **verifies each claim's proof**
-against the published root and refuses a claim whose proof doesn't verify (no
-gas-wasting chain-rejected submit). Pure computation via `eth_abi` + the vendored
-`clif/_keccak` — the keyless invariant is intact, no new crypto dep. 156 tests.
-
-## Status (2026-05-27, v0.5.2) — zero-egress fwd migration
-
-fwd v1.1.0a9+ is **sign-only** (it retired `/v1/sign-and-send` for
-`/v1/sign-transaction` and no longer broadcasts). clif is migrated: it now asks
-fwd to SIGN, then **broadcasts the returned `signed_raw_tx` itself** (via `rpc.py`
-`eth_sendRawTransaction`) and **reports the outcome back** to fwd
-(`/v1/transactions/{tx_id}/broadcast-result` → poll `eth_getTransactionReceipt` →
-`/v1/transactions/{tx_id}/receipt`). clif computes its own gas + EIP-1559 fees
-(`rpc.estimate_gas` ×1.25, `rpc.suggest_fees` baseFee×2+1gwei, sanity-capped under
-fwd's `FWD_MAX_GAS`/`FWD_MAX_FEE_PER_GAS`). fwd allocates the nonce; a
-`409 nonce_not_initialized` is terminal and means the (wallet, chain) needs a
-one-time fwd admin `nonce-init` (operator setup). Both the reward-claim path
-(`claimer`) and FSP Leg-2 (`fsp`, the FlareSystemsManager submit) are migrated;
-**FSP Leg-1 (`/v1/sign-fsp-message`) is unchanged**. The mined-≠-success effect
-rule (RewardClaimed event / `MINED_NOOP`) is unchanged. 176 tests, keyless intact
-(broadcasting a fwd-signed blob is not signing). **502 is gone** (fwd no longer does
-RPC; broadcast/RPC errors are clif's own). **Production claim/FSP on-chain
-verification remains operator-gated** (the coordinated cutover) — code + mocked
-tests done; live rehearsal against the running fwd is the operator's gate.
-
-## Status (2026-05-27, v0.5.5) — epoch-400 live drill: FSP broadcast path fixed
-
-The epoch-400 mainnet drill (Flare + Songbird, through the migrated zero-egress
-stack) surfaced — and fixed — **two FSP defects invisible to the mocked tests**
-(the "mocks lie" rule, in the wild): (1) the one-shot `clif fsp uptime/rewards`
-commands and the `fsp auto` path called `run_sign_*` **without `rpc=`** → clif
-signed but never broadcast (`no rpc — cannot broadcast`); (2) FSP Leg-2 called
-`rpc.estimate_gas` with the **wallet NAME** (`fsp_sender_wallet_name`) as `from` —
-clif holds names, not addresses — and `estimateGas` reverts on an already-signed
-epoch anyway. Fixes: wire an `RpcClient` into all three FSP call sites; FSP submits
-now use the **configured `fsp_submit_gas`** (no `estimate_gas`; fee market still via
-`eth_feeHistory`, which needs no `from`). **Verified end-to-end on mainnet, all
-expected:** fee claim → `nothing-claimable` (400 already claimed); FSP uptime →
-broadcast `nonce too low` (live ftso automation co-manages the sender nonce); FSP
-rewards → Merkle-root verified → mined → **reverted** (already signed) → reported
-back → honest `failed-terminal` (the mined-≠-success rule held). 176 tests green.
-(Pre-existing mypy debt: 7 errors — typer/rich stubs + `Optional[str]` config args
-— predate this; a separate cleanup.)
-
-## Status (2026-05-27, v0.5.4) — adopted the shared fwd-client library
-
-clif's fwd transport now comes from the shared **`fwd-client`** package
-(`gitlab.com/proofs.africa/fwd-client` v0.1.0, public, keyless): `FwdClient`, the
-`FwdError`/`FwdTerminalError`/`FwdRetryableError` taxonomy, `raise_for_fwd_error`,
-and the wire models (`SignTransaction*`, `BroadcastResult*`, `Receipt*`,
-`SignFspMessageResponse`, `TxStatus`, `Health`) are imported from it. `clif/fwd_client.py`
-is now a thin shim re-exporting that surface and keeping clif's **idempotency-key
-composition** (`make_idempotency_key`, `make_fsp_idempotency_key`) which delegates
-hashing to the lib's generic `make_idempotency_key`. clif's business models
-(`RewardsData`, reward claims, Merkle) are unchanged. Dockerfile gained `git` (to
-clone the HTTPS git-dep at build). **Keyless intact** — the lib is httpx+pydantic
-only; no crypto/signing dep added. 176 tests green; `docker compose build clif` ok.
-One canonical impl of the fwd contract now — future consumers depend on the same lib.
-
-## Status (2026-05-31, v0.5.7) — doc cleanup + provider-onboarding
-
-Docs-only: retired the stale `/v1/sign-and-send` references in the
-current-reference docs and aligned them to the zero-egress `/v1/sign-transaction`
-+ client-broadcast + report-back contract (`docs/fwd-contract.md` rewritten to
-fwd v1.1.0a32; `docs/verification.md` updated; `docs/onchain-migration.md` Leg-2
-row corrected; the historical binding specs `docs/phase8b-spec.md` and
-`docs/fsp-signing-tool-spec.md` carry a SUPERSEDED banner, body preserved).
-Added a "Run your own provider stack" section to `README.md` for third-party
-FTSO providers (their own fwd + clif). No `*.py` logic changed; keyless invariant
-intact (no dep change).
+- **v0.5.8 (2026-05-31)** — docs-only professionalization (cross-repo pass with fwd):
+  corrected "What clif is NOT" to the present (FSP signing is live + keyless via
+  fwd's `/v1/sign-fsp-message` + `/v1/sign-transaction` — not "deferred"; dropped the
+  retired `sign_and_send` wording), fixed the `decisions.md` range (D1–D16), and
+  professionalized README + `docs/*` (current, consistent, github canonical-public).
+- **v0.5.7 (2026-05-31)** — docs-only: retired stale `/v1/sign-and-send` references
+  in the current-reference docs, aligned to the zero-egress `/v1/sign-transaction` +
+  client-broadcast + report-back contract (`docs/fwd-contract.md`, `docs/verification.md`,
+  `docs/onchain-migration.md`); historical binding specs `docs/phase8b-spec.md` and
+  `docs/fsp-signing-tool-spec.md` carry a SUPERSEDED banner (body preserved). Added a
+  "Run your own provider stack" section to `README.md` for third-party FTSO providers.
+  No `*.py` logic changed.
+- **v0.5.5 (2026-05-27) — epoch-400 live drill, FSP broadcast path fixed.** The Flare +
+  Songbird mainnet drill surfaced two FSP defects invisible to the mocked tests ("mocks
+  lie"): (1) the one-shot `clif fsp uptime/rewards` and `fsp auto` paths called `run_sign_*`
+  **without `rpc=`** → clif signed but never broadcast; (2) FSP Leg-2 called `rpc.estimate_gas`
+  with the **wallet NAME** as `from` (clif holds names, not addresses). Fixes: wire an
+  `RpcClient` into all three FSP call sites; FSP submits use the **configured `fsp_submit_gas`**
+  (no `estimate_gas`; fee market via `eth_feeHistory`, which needs no `from`). Verified
+  end-to-end on mainnet: fee claim → `nothing-claimable`; FSP uptime → `nonce too low` (live
+  ftso automation co-manages the sender nonce); FSP rewards → Merkle-root verified → mined →
+  **reverted** (already signed) → honest `failed-terminal` (the mined-≠-success rule held).
+- **v0.5.4 (2026-05-27) — adopted the shared `fwd-client` library.** clif's fwd transport now
+  comes from the public, keyless `fwd-client` package: `FwdClient`, the
+  `FwdError`/`FwdTerminalError`/`FwdRetryableError` taxonomy, `raise_for_fwd_error`, and the wire
+  models. `clif/fwd_client.py` is a thin shim re-exporting that surface and keeping clif's
+  **idempotency-key composition** (`make_idempotency_key`, `make_fsp_idempotency_key`). Keyless
+  intact — the lib is httpx+pydantic only. One canonical impl of the fwd contract; future
+  consumers depend on the same lib.
+- **v0.5.2 (2026-05-27) — zero-egress fwd migration.** fwd is now **sign-only** (retired
+  `/v1/sign-and-send` for `/v1/sign-transaction`; no longer broadcasts). clif asks fwd to SIGN,
+  **broadcasts the returned `signed_raw_tx` itself** (`rpc.py` `eth_sendRawTransaction`), and
+  **reports the outcome back** (`/v1/transactions/{tx_id}/broadcast-result` → poll
+  `eth_getTransactionReceipt` → `/receipt`). clif computes its own gas + EIP-1559 fees
+  (`rpc.estimate_gas` ×1.25, `rpc.suggest_fees` baseFee×2+1gwei, sanity-capped under fwd's
+  `FWD_MAX_GAS`/`FWD_MAX_FEE_PER_GAS`). fwd allocates the nonce; `409 nonce_not_initialized` is
+  terminal and means the (wallet, chain) needs a one-time fwd admin `nonce-init`. Both the
+  reward-claim path (`claimer`) and FSP Leg-2 are migrated; **FSP Leg-1 (`/v1/sign-fsp-message`)
+  is unchanged**. **502 is gone** (broadcast/RPC errors are clif's own). Keyless intact
+  (broadcasting a fwd-signed blob is not signing).
+- **v0.5.1 (2026-05-27) — reward-distribution Merkle verification** (`clif/merkle.py`). Builds +
+  verifies the Flare fsp-rewards tree — leaf `keccak256(abi.encode((uint24,bytes20,uint120,uint8)))`
+  (single keccak, not OZ double), sorted-pair internal nodes, sorted+deduped leaves; byte-exact vs
+  flare epochs 228/400. Wired twice: `run_sign_rewards` **recomputes the root from the published
+  claims and refuses to sign** if it ≠ the file's `merkleRoot` (FAILED_TERMINAL, no Leg-1 call) —
+  the cryptographic upgrade of "never sign an unverified rewardsHash"; `discovery.reward_claim_for`
+  **verifies each claim's proof** against the published root and refuses a claim whose proof doesn't
+  verify. Pure computation via `eth_abi` + vendored `clif/_keccak`; keyless intact, no new crypto dep.
+- **v0.5.0 (2026-05-19, D15) — corrective pass, two MAJOR defects.** (a) **Epoch-bind:**
+  `reward-distribution-data.json` carries a top-level `rewardEpochId`; `RewardDistributionData` now
+  requires it, validates `merkleRoot` `^0x[0-9a-fA-F]{64}$` and `noOfWeightBasedClaims` ≥ 0, and
+  `run_sign_rewards` asserts `rdd.reward_epoch_id == reward_epoch_id` BEFORE Leg-1 (FAILED_TERMINAL,
+  no sign call on mismatch). (b) **Two FSP caller tokens:** fwd forbids one `policy_path` key in both
+  `permissions` and `fsp_permissions`, so one caller cannot span Leg-1 and Leg-2. `fsp_caller_token`
+  replaced by `fsp_sign_caller_token` (Leg-1, `fsp_permissions`) and `fsp_submit_caller_token` (Leg-2 +
+  tx poll, `permissions`); the orchestrator owns both clients. (c) **`FSP_AUTO_ENABLED` hard-off:**
+  `clif fsp auto` refuses loudly (exit 2) unless `FSP_AUTO_ENABLED=true` — a valid signature over wrong
+  data is irreversible on-chain. See D15 for the full rationale.
+- **v0.4.0 (2026-05-19) — keyless FSP signing-tool added.** `fsp_calldata`, `fsp`, `fsp_autostate`
+  modules; `fsp uptime|rewards|status|auto` CLI commands. Production FSP signing remains operator-gated
+  (FSP caller token, signing + sender wallet names, FlareSystemsManager ABI + policy in fwd — see
+  `docs/verification.md` F1/F2 and `docs/fsp-signing-tool-spec.md`).
+- **2026-05-18 — keyless reward-claim half + Deliverable 2 shipped; AP-registered.** Claim + automation
+  code complete (`claimer`/`autostate`, `claim`/`auto`/`status` CLI, Dockerfile + compose). Production
+  Flare automation and the on-chain/`.env` steps operator-gated (fwd provisioned, new wallet authorized
+  on-chain as executor first).
 
 ## fwd in one line
 
@@ -246,15 +211,14 @@ sole author. Do not push if a remote block exists — ask the operator.
 ## What clif is NOT
 
 Not a signer, key store, or wallet. Not multi-chain beyond
-Flare/Songbird/Coston2. No raw-digest signing. The flare-foundation
-signing-tool / `SIGNING_POLICY_PRIVATE_KEY` is out of scope — deferred to fwd
-Phase 9 (a structured protocol-message signer), never a local key.
+Flare/Songbird/Coston2. No raw-digest signing. clif never holds a
+`SIGNING_POLICY_PRIVATE_KEY` or any local key.
 
-RESOLVED 2026-05-19: D7 ("signing-tool deferred") is resolved for the
-`signUptimeVote` / `signRewards` FSP protocol messages via
-`POST /v1/sign-fsp-message` (Leg-1) + `sign_and_send` to FlareSystemsManager
-(Leg-2). Raw-digest signing and `SIGNING_POLICY_PRIVATE_KEY` as a local key
-remain out of scope and forbidden.
+FSP protocol signing is live and keyless: `signUptimeVote` / `signRewards` are
+signed via fwd's structured `POST /v1/sign-fsp-message` (Leg-1), then submitted
+to `FlareSystemsManager` via `POST /v1/sign-transaction` + client broadcast
+(Leg-2). Raw-digest signing and a local `SIGNING_POLICY_PRIVATE_KEY` remain out
+of scope and forbidden — the signing key lives only in fwd's sealed master.
 
 ## Origin (provenance — not a dependency)
 

@@ -67,7 +67,7 @@ address via **`ClaimSetupManager.setClaimExecutors`** (Flare
 `ClaimSetupManager.setAllowedClaimRecipient`. So the Phase 8b rotation is:
 authorize fwd's new wallet as **executor** via `setClaimExecutors` from the
 offline identity key (operator-only — fwd does not custody identity keys;
-clif does not touch this). clif does **not** edit fwd; this drift note is
-surfaced for the operator/Reviewer to close fwd-side (canonical prompt
-constraint 2). fwd's `docs/policy.example.yaml` has been corrected upstream
-(line 56 now carries the canonical signature in §2) — safe to rely on.
+clif does not touch this). clif does **not** edit fwd; this note is surfaced
+for the operator/Reviewer to close fwd-side (canonical prompt constraint 2).
+fwd's `docs/policy.example.yaml` carries the canonical signature shown in §2 —
+safe to rely on.

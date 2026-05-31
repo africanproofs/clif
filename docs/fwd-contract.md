@@ -1,4 +1,4 @@
-# fwd integration contract (verified — in-repo reference)
+# fwd integration contract (in-repo reference)
 
 > Verified against the live fwd contract (fwd **v1.1.0a32**, zero-egress
 > sign-only) on **2026-05-31**. Vendored so clif needs no access to the fwd
@@ -9,8 +9,8 @@
 fwd is **zero-egress and sign-only**: it signs, allocates the nonce, and makes
 **no outbound connection** — it never broadcasts. The flow is **sign →
 client-broadcast → report-back**: clif POSTs the intent, fwd returns a signed
-raw tx, clif broadcasts it itself (`clif/rpc.py` `eth_sendRawTransaction`) and
-reports the outcome back so fwd can confirm/release the nonce.
+raw tx, clif broadcasts it itself (`clif/rpc.py`, `eth_sendRawTransaction`),
+then reports the outcome back so fwd can confirm or release the nonce.
 
 ## Auth
 
@@ -39,19 +39,19 @@ Request JSON:
 
 Optional header `Idempotency-Key` (≤128 chars). Replay of the same key with the
 **same body** returns the **same `tx_id`** (no second sign) — safe across
-retries/restarts; the same key with a *different* body is a **409
-`idempotency_conflict`** (fwd v1.1.0a29). **fwd replay is status-blind by
-design:** a cached tx is replayed for its `(caller, key)` regardless of
-on-chain outcome — including a tx that broadcast then reverted/dropped/failed.
-That is correct at-least-once dedup (it is exactly what stops a double-claim on
-a client retry). The consumer owns the consequence: a key bound only to logical
-identity pins a failed claim forever. clif's production key is therefore
-deterministic by default (same logical attempt ⇒ same key ⇒ fwd dedups)
-**plus** an explicit operator-controlled discriminator (`clif claim --retry …`
-/ `IDEMPOTENCY_RETRY` for `auto`) for a **deliberate** post-on-chain-failure
-re-attempt. clif never auto-randomises (that would reintroduce double-claim
-risk). The `rehearse` harness uses its own separate `-r<tag>` discriminator —
-walled off from the production money path.
+retries and restarts; the same key with a *different* body is a **409
+`idempotency_conflict`**. **fwd replay is status-blind by design:** a cached tx
+is replayed for its `(caller, key)` regardless of on-chain outcome — including a
+tx that broadcast then reverted, dropped, or failed. That is correct
+at-least-once dedup, and exactly what stops a double-claim on a client retry.
+The consumer owns the consequence: a key bound only to logical identity pins a
+failed claim forever. clif's production key is therefore deterministic by
+default (same logical attempt ⇒ same key ⇒ fwd dedups) **plus** an explicit
+operator-controlled discriminator (`clif claim --retry …` / `IDEMPOTENCY_RETRY`
+for `auto`) for a **deliberate** re-attempt after an on-chain failure. clif
+never auto-randomises (that would reintroduce double-claim risk). The `rehearse`
+harness uses its own separate `-r<tag>` discriminator, walled off from the
+production money path.
 
 Success **200**: `{ "tx_id": str, "hash": str, "signed_raw_tx": str, "nonce": int }`.
 clif broadcasts `signed_raw_tx` via `eth_sendRawTransaction`.
@@ -160,12 +160,10 @@ array). So fwd policy bounds this method via `max_value_wei: "0"` + a
 These are fwd-side operator config (the operator runs `clifwd policy init` /
 `validate` on the fwd side); clif only consumes the resulting caller tokens:
 
-- The `claim` ordering trap is fixed upstream — `fwd/docs/policy.example.yaml`
-  now carries the canonical
-  `claim(address,address,uint24,bool,(bytes32[],(uint24,bytes20,uint120,uint8))[])`.
-  Write the policy from the signature above (it matches the fwd example and the
-  live one in `docs/fwd-integration-spec.md §2`).
-- fwd v1.1.0a29 requires `chains: [...]` on every contract rule and
+- Write the policy from the canonical `claim` signature above — it matches
+  `fwd/docs/policy.example.yaml` and the live one in
+  `docs/fwd-integration-spec.md §2`.
+- fwd requires `chains: [...]` on every contract rule and
   `allow_unconstrained_args: true` on methods with array/tuple args (`claim`,
   `signUptimeVote`, `signRewards`).
 
