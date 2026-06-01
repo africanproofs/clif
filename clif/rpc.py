@@ -171,6 +171,16 @@ class RpcClient:
         result = self._call("eth_getTransactionByHash", [tx_hash])
         return cast(dict, result) if result else None  # null until propagated
 
+    def get_transaction_count(self, address: str, block_tag: str = "latest") -> int:
+        """eth_getTransactionCount(address, block_tag) → next nonce (int).
+
+        block_tag "latest" = mined count; "pending" = incl. mempool. Keyless read
+        (address is public; no signing). Raises RpcError on transport/JSON-RPC error
+        (same as the other read methods).
+        """
+        result = self._call("eth_getTransactionCount", [address, block_tag])
+        return int(str(result), 16)
+
     # ---- typed view helpers (keyless) ----
 
     def rewards_hash(self, flare_systems_manager: str, epoch_id: int) -> str:

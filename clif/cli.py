@@ -12,6 +12,7 @@ FSP signing-tool (keyless — fwd signs protocol messages): `fsp uptime`,
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
@@ -71,11 +72,17 @@ app = typer.Typer(
 fsp_app = typer.Typer(
     add_completion=False,
     help=(
-        "Keyless FSP signing-tool — fwd signs the message AND broadcasts; "
-        "clif holds zero keys."
+        "Keyless FSP signing-tool — fwd signs the FSP message/tx; clif broadcasts "
+        "and reports back. clif holds zero keys."
     ),
 )
 app.add_typer(fsp_app, name="fsp")
+
+chain_app = typer.Typer(
+    add_completion=False,
+    help="Keyless chain reads (nonce, ...). No keys; public RPC reads only.",
+)
+app.add_typer(chain_app, name="chain")
 console = Console()
 err = Console(stderr=True)
 
@@ -980,6 +987,46 @@ def fsp_auto(
             time.sleep(iv)
     except KeyboardInterrupt:
         log.info("fsp auto stopped")
+
+
+@chain_app.command()
+def nonce(
+    network: Annotated[str, typer.Option("--network", help="Network: flare|songbird|coston2")],
+    address: Annotated[str, typer.Option("--address", help="Account address (0x...)")],
+    json_out: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON to stdout")] = False,
+) -> None:
+    """Read an address's on-chain transaction count (next nonce), keyless.
+
+    Returns latest (mined) + pending (incl. mempool). Used by fwd onboarding to
+    seed nonces without fwd touching the chain. Exit: 0 ok; 1 RPC error; 2 keyless.
+    """
+    s = _settings()
+    s.network = network  # type: ignore[assignment]
+    if not address.startswith("0x"):
+        err.print("[bold red]--address must be a 0x-prefixed address[/]")
+        raise typer.Exit(2)
+    with RpcClient(s.rpc_url) as rpc:
+        try:
+            latest = rpc.get_transaction_count(address, "latest")
+            pending = rpc.get_transaction_count(address, "pending")
+        except RpcError as exc:
+            err.print(f"[bold red]RPC error: {exc}[/]")
+            raise typer.Exit(1) from exc
+    out = {
+        "network": network,
+        "chain_id": s.net.chain_id,
+        "address": address,
+        "latest": latest,
+        "pending": pending,
+    }
+    if json_out:
+        # Raw stdout — NOT rich/console — so the host can capture byte-clean JSON.
+        print(json.dumps(out))
+    else:
+        console.print(
+            f"{network} chain_id={out['chain_id']} {address} "
+            f"latest={latest} pending={pending}"
+        )
 
 
 if __name__ == "__main__":
