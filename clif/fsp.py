@@ -28,7 +28,7 @@ import logging
 from dataclasses import dataclass
 
 from clif.claimer import OutcomeStatus, _OK, _classify_broadcast_error
-from clif.config import Settings
+from clif.config import ZERO_BYTES32, Settings
 from clif.fsp_calldata import build_sign_rewards_calldata, build_sign_uptime_calldata
 from clif.fwd_client import (
     FwdClient,
@@ -43,6 +43,34 @@ from clif.reward_data import get_reward_distribution_data
 from clif.rpc import RpcClient, RpcError
 
 log = logging.getLogger("clif")
+
+# Known FSP finalization-guard revert strings.  These are benign: the network
+# finalized the epoch (>50% signing-weight threshold) before our signature landed.
+# REWARD_DISTRIBUTION: confirmed live on Songbird epoch 402 (2026-06-01) by
+#   replaying reverted tx 0x097d48c4… via eth_call.
+# UPTIME: "uptime vote hash already signed" is the expected string by analogy with
+#   the REWARD_DISTRIBUTION path; NOT yet live-confirmed.
+#   TODO: confirm the exact uptime revert string against a live revert or the
+#   FlareSystemsManager source before treating this as confirmed.
+_FSP_FINALIZATION_REVERTS: dict[str, str] = {
+    "REWARD_DISTRIBUTION": "rewards hash already signed",
+    "UPTIME": "uptime vote hash already signed",  # best-effort — see TODO above
+}
+
+
+def _is_finalization_revert(message_type: str, reason: str | None) -> bool:
+    """Return True iff the revert reason matches the known FSP finalization guard.
+
+    Matches the specific known string only — any unmatched revert stays
+    FAILED_TERMINAL (safe default: escalate the unknown).
+    """
+    if reason is None:
+        return False
+    expected = _FSP_FINALIZATION_REVERTS.get(message_type)
+    if expected is None:
+        return False
+    return expected.lower() in reason.lower()
+
 
 # fwd cross-domain rule (D15 MAJOR-2): the same policy_path key cannot appear
 # in both `permissions` and `fsp_permissions`. Operator provisions TWO callers:
@@ -136,6 +164,29 @@ def run_sign_uptime(
     cfg_err = _check_fsp_config(settings, mt, reward_epoch_id)
     if cfg_err is not None:
         return cfg_err
+
+    # Pre-flight finalization skip (mirrors the claim-side unclaimable_reason gate).
+    # If the uptime vote for this epoch has already finalized on-chain (the >50%
+    # signing-weight threshold was reached), skip leg-1/leg-2 entirely — a doomed
+    # attempt would revert on-chain (consuming the nonce + the idempotency key) with
+    # no benefit.
+    # uptimeVoteHash(epoch) != ZERO_BYTES32 means finalized; == ZERO_BYTES32 = not yet.
+    # TODO: verify the analogous FSM revert string for signUptimeVote finalization
+    # guard (post-revert classification below uses best-effort "uptime vote hash already
+    # signed" — not live-confirmed unlike the REWARD_DISTRIBUTION string).
+    if rpc is not None:
+        try:
+            uv_hash = rpc.uptime_vote_hash(settings.net.flare_systems_manager, reward_epoch_id)
+            if uv_hash != ZERO_BYTES32:
+                return _out(
+                    mt, reward_epoch_id, OutcomeStatus.ALREADY_FINALIZED,
+                    f"epoch {reward_epoch_id} uptime already finalized by the network "
+                    "(>threshold) — nothing to sign this round",
+                )
+        except RpcError as exc:
+            log.warning(
+                "fsp uptime pre-flight finalization check failed (proceeding): %s", exc
+            )
 
     retry_token = retry if retry is not None else settings.fsp_idempotency_retry
 
@@ -306,6 +357,26 @@ def run_sign_rewards(
         "merkle_root=%s n=%s",
         reward_epoch_id, rdd.merkle_root, rdd.no_of_weight_based_claims,
     )
+
+    # Pre-flight finalization skip (mirrors the claim-side unclaimable_reason gate).
+    # rewardsHash(epoch) != ZERO_BYTES32 means the >50% signing-weight threshold
+    # was already reached and the epoch's rewards are finalized on-chain.  Signing
+    # a finalized epoch produces the on-chain "rewards hash already signed" revert,
+    # consumes the nonce, and leaves a cached idempotency key — both are avoided by
+    # skipping leg-1/leg-2 entirely here.
+    if rpc is not None:
+        try:
+            rh = rpc.rewards_hash(settings.net.flare_systems_manager, reward_epoch_id)
+            if rh != ZERO_BYTES32:
+                return _out(
+                    mt, reward_epoch_id, OutcomeStatus.ALREADY_FINALIZED,
+                    f"epoch {reward_epoch_id} rewards already finalized by the network "
+                    "(>threshold) — nothing to sign this round",
+                )
+        except RpcError as exc:
+            log.warning(
+                "fsp rewards pre-flight finalization check failed (proceeding): %s", exc
+            )
 
     retry_token = retry if retry is not None else settings.fsp_idempotency_retry
 
@@ -491,9 +562,30 @@ def _broadcast_and_confirm(
         log.warning("fwd receipt report failed (non-fatal): %s", exc)
 
     if not mined_ok:
+        # Attempt to decode the revert reason and classify benign finalization reverts.
+        reason = rpc.get_revert_reason(broadcast_hash)
+        if _is_finalization_revert(message_type, reason):
+            # The network finalized the epoch (>50% threshold reached) before our
+            # signature landed — too late this round, not a fault.
+            if message_type == "REWARD_DISTRIBUTION":
+                detail = (
+                    f"epoch {reward_epoch_id} rewards finalized by the network "
+                    "(>threshold) before our signature — too late this round (not a fault)"
+                )
+            else:
+                # UPTIME — best-effort string match (see TODO in run_sign_uptime pre-flight).
+                detail = (
+                    f"epoch {reward_epoch_id} uptime finalized by the network "
+                    "(>threshold) before our signature — too late this round (not a fault)"
+                )
+            return _out(
+                message_type, reward_epoch_id, OutcomeStatus.ALREADY_FINALIZED, detail,
+                message_hash=mh, leg1_sig=l1s, tx_id=tx_id, tx_hash=broadcast_hash,
+            )
+        # Unknown revert or a real fault — escalate with the decoded reason appended.
         return _out(
             message_type, reward_epoch_id, OutcomeStatus.FAILED_TERMINAL,
-            "tx reverted on-chain",
+            f"tx reverted on-chain: {reason or 'unknown'}",
             message_hash=mh, leg1_sig=l1s, tx_id=tx_id, tx_hash=broadcast_hash,
         )
 

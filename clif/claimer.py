@@ -50,6 +50,8 @@ class OutcomeStatus(str, Enum):
     SUBMITTED_MINED = "submitted-mined"
     SUBMITTED_PENDING = "submitted-pending"
     MINED_NOOP = "mined-noop"  # tx mined (status 0x1) but claimed nothing — epoch already claimed
+    ALREADY_FINALIZED = "already-finalized"  # FSP: epoch reached the >50% signing-weight threshold
+    # + finalized before our signature landed — too late this round, not a fault
     FAILED_RETRYABLE = "failed-retryable"  # transient — retry next cycle
     FAILED_TERMINAL = "failed-terminal"  # operator action needed — escalate
 
@@ -59,6 +61,7 @@ _OK = {
     OutcomeStatus.SUBMITTED_MINED,
     OutcomeStatus.SUBMITTED_PENDING,
     OutcomeStatus.MINED_NOOP,
+    OutcomeStatus.ALREADY_FINALIZED,
 }
 
 

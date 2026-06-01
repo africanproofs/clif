@@ -198,3 +198,106 @@ class RpcClient:
         data = "0x" + selector("getCurrentRewardEpochId()").hex()
         (out,) = abi_decode(["uint24"], self.eth_call(flare_systems_manager, data))
         return int(out)
+
+    def uptime_vote_hash(self, flare_systems_manager: str, epoch_id: int) -> str:
+        """Read uptimeVoteHash(uint256) → bytes32 from FlareSystemsManager.
+
+        Returns the 0x-prefixed bytes32.  Zero (ZERO_BYTES32) = the uptime vote
+        for this epoch has NOT yet been finalized (the >50% threshold not reached).
+        Non-zero = uptime voting has finalized for this epoch (analogous to
+        rewardsHash for REWARD_DISTRIBUTION).
+        """
+        data = "0x" + selector("uptimeVoteHash(uint256)").hex() + abi_encode(
+            ["uint256"], [epoch_id]
+        ).hex()
+        (out,) = abi_decode(["bytes32"], self.eth_call(flare_systems_manager, data))
+        return "0x" + out.hex()
+
+    def get_revert_reason(self, tx_hash: str) -> str | None:
+        """Attempt to decode the revert reason for a mined-reverted tx by replaying it.
+
+        Fetches the tx (from/to/input/value) and receipt (blockNumber), then
+        replays via eth_call at that block.  The node returns an error whose
+        ``data`` (or ``message``) carries the ABI-encoded revert; we decode
+        ``Error(string)`` when ``data`` starts with selector ``0x08c379a0``
+        (after that 4-byte selector: 32-byte offset, 32-byte length, then the
+        UTF-8 reason string).
+
+        Returns the reason string on success, or ``None`` if it cannot be
+        determined (non-archival node, empty data, unexpected encoding, any RPC
+        failure).  Never raises — callers fall back to generic terminal
+        classification on ``None``.
+        """
+        try:
+            tx = self.get_transaction_by_hash(tx_hash)
+            if tx is None:
+                return None
+            receipt = self.get_transaction_receipt(tx_hash)
+            if receipt is None:
+                return None
+            block_number = receipt.get("blockNumber")
+            if block_number is None:
+                return None
+            # Build eth_call params mirroring the original tx.
+            call_obj: dict = {
+                "to": tx.get("to") or "",
+                "data": tx.get("input") or "0x",
+            }
+            if tx.get("from"):
+                call_obj["from"] = tx["from"]
+            value = tx.get("value")
+            if value and value not in ("0x0", "0x", "0"):
+                call_obj["value"] = value
+            # Replay at the mined block — requires an archival node.
+            self._id += 1
+            try:
+                resp = self._client.post(
+                    self._url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": self._id,
+                        "method": "eth_call",
+                        "params": [call_obj, block_number],
+                    },
+                )
+                resp.raise_for_status()
+                body = resp.json()
+            except (httpx.HTTPError, ValueError):
+                return None
+            # The node may surface the revert in the error object or in the result.
+            raw_data: str | None = None
+            if "error" in body:
+                err = body["error"]
+                if isinstance(err, dict):
+                    raw_data = err.get("data") or err.get("message") or ""
+                elif isinstance(err, str):
+                    raw_data = err
+            elif "result" in body:
+                # Some nodes return the revert data as the result of eth_call.
+                raw_data = str(body.get("result") or "")
+            if not raw_data:
+                return None
+            # Decode Error(string): selector 0x08c379a0 + abi.encode(string).
+            # Strip optional "Reverted " / "execution reverted: " prefixes.
+            prefix = ""
+            for pfx in ("Reverted 0x", "execution reverted: 0x", "0x"):
+                if raw_data.startswith(pfx) or raw_data.lower().startswith(pfx.lower()):
+                    prefix = pfx
+                    break
+            hex_data = raw_data[len(prefix):].strip()
+            if not hex_data.startswith("08c379a0"):
+                # Some nodes embed the plain text in the message field.
+                for pfx in ("execution reverted: ", "Reverted "):
+                    if raw_data.startswith(pfx):
+                        return raw_data[len(pfx):].strip()
+                return None
+            data_bytes = bytes.fromhex(hex_data)
+            # data_bytes = selector(4) + abi.encode(string)
+            # abi.encode(string) = 32-byte offset + 32-byte length + padded utf-8
+            if len(data_bytes) < 4 + 32 + 32:
+                return None
+            payload = data_bytes[4:]  # strip selector
+            (reason,) = abi_decode(["string"], payload)
+            return str(reason)
+        except Exception:  # noqa: BLE001
+            return None

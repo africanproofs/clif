@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "clif"
-version = "0.5.8"
+version = "0.5.9"
 description = "Keyless FTSO v2 reward claimer for African Proofs — signs via the fwd daemon, holds no private keys (Phase 8b)"
 authors = ["African Proofs <dev@proofs.africa>"]
 readme = "README.md"
