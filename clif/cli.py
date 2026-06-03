@@ -991,17 +991,23 @@ def fsp_auto(
 
 @chain_app.command()
 def nonce(
-    network: Annotated[str, typer.Option("--network", help="Network: flare|songbird|coston2")],
     address: Annotated[str, typer.Option("--address", help="Account address (0x...)")],
+    network: Annotated[
+        Optional[str],
+        typer.Option("--network", help="Network override (default: NETWORK env / selected .env)"),
+    ] = None,
     json_out: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON to stdout")] = False,
 ) -> None:
     """Read an address's on-chain transaction count (next nonce), keyless.
 
     Returns latest (mined) + pending (incl. mempool). Used by fwd onboarding to
-    seed nonces without fwd touching the chain. Exit: 0 ok; 1 RPC error; 2 keyless.
+    seed nonces without fwd touching the chain. --network defaults from the NETWORK
+    env (so the `clif` wrapper's leading --network env-selector form works); an
+    explicit --network overrides it. Exit: 0 ok; 1 RPC error; 2 keyless.
     """
     s = _settings()
-    s.network = network  # type: ignore[assignment]
+    if network:
+        s.network = network  # type: ignore[assignment]
     if not address.startswith("0x"):
         err.print("[bold red]--address must be a 0x-prefixed address[/]")
         raise typer.Exit(2)
@@ -1013,7 +1019,7 @@ def nonce(
             err.print(f"[bold red]RPC error: {exc}[/]")
             raise typer.Exit(1) from exc
     out = {
-        "network": network,
+        "network": s.network,
         "chain_id": s.net.chain_id,
         "address": address,
         "latest": latest,
@@ -1024,7 +1030,7 @@ def nonce(
         print(json.dumps(out))
     else:
         console.print(
-            f"{network} chain_id={out['chain_id']} {address} "
+            f"{s.network} chain_id={out['chain_id']} {address} "
             f"latest={latest} pending={pending}"
         )
 

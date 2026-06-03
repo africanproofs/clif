@@ -113,6 +113,43 @@ def test_chain_nonce_json_output(monkeypatch):
     assert "[bold" not in result.output
 
 
+def test_chain_nonce_network_defaults_from_env(monkeypatch):
+    """chain nonce WITHOUT --network resolves the network from settings (NETWORK env).
+
+    This is the regression this change exists to enable: the `clif` host wrapper
+    strips a leading `--network <N>` (env-selector) and runs `clif chain nonce
+    --address 0x.. --json` with no command-level --network. The command must
+    succeed and report the env-resolved network (here songbird), not error on a
+    missing required option.
+    """
+    from typer.testing import CliRunner
+    from clif.cli import app
+    from clif.config import Settings
+
+    addr = "0x" + "ef" * 20
+
+    # Settings loaded as if NETWORK=songbird were in the env / selected .env.
+    monkeypatch.setattr(
+        "clif.cli.load_settings",
+        lambda: Settings(_env_file=None, network="songbird"),
+    )
+    monkeypatch.setattr("clif.cli.RpcClient", _make_rpc_class(3, 4))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["chain", "nonce", "--address", addr, "--json"],  # NO --network
+    )
+    assert result.exit_code == 0, result.output
+    parsed = json.loads(result.output)
+    assert parsed["network"] == "songbird"  # defaulted from settings, not a flag
+    assert parsed["chain_id"] == 19  # songbird chain_id
+    assert parsed["address"] == addr
+    assert parsed["latest"] == 3
+    assert parsed["pending"] == 4
+    assert "[bold" not in result.output
+
+
 def test_chain_nonce_human_output(monkeypatch):
     """chain nonce without --json prints human-readable line."""
     from typer.testing import CliRunner
