@@ -1,10 +1,9 @@
 # fwd integration contract (in-repo reference)
 
-> Verified against the live fwd contract (fwd **v1.1.0a32**, zero-egress
-> sign-only) on **2026-05-31**. Vendored so clif needs no access to the fwd
-> repo. fwd code is the ultimate source of truth; before relying in production,
-> re-confirm against the live daemon (`clif health` + a Coston2 rehearsal —
-> mocks lie).
+> Verified against the fwd **v1.1.0a69** contract (zero-egress sign-only) on
+> **2026-06-04**. Vendored so clif needs no access to the fwd repo. fwd code is
+> the ultimate source of truth; before relying in production, re-confirm against
+> the live daemon (`clif health` + a Coston2 rehearsal — mocks lie).
 
 fwd is **zero-egress and sign-only**: it signs, allocates the nonce, and makes
 **no outbound connection** — it never broadcasts. The flow is **sign →
@@ -33,7 +32,7 @@ Request JSON:
 | `to` | str | `0x` + 40 hex (the RewardManager / FlareSystemsManager) |
 | `value_wei` | str | decimal string, non-negative; default `"0"` |
 | `data` | str | `0x` or `0x`+even-hex; the claim/submit calldata |
-| `gas` | int | the gas limit clif computed (`rpc.estimate_gas` ×1.25, sanity-capped) |
+| `gas` | int | a FIXED gas limit clif supplies (`fsp_submit_gas`, default 500000) — clif is keyless and cannot supply a `from` for `eth_estimateGas`, so it sends a fixed value for both the claim and the FSP Leg-2 submit |
 | `max_fee_per_gas` | str | decimal-string EIP-1559 cap clif computed |
 | `max_priority_fee_per_gas` | str | decimal-string tip clif computed |
 
@@ -128,12 +127,13 @@ Envelope `{ "error": str, "message": str }`.
 | 403 | `policy_denied` | **terminal** |
 | 404 | `wallet_not_found` / cross-caller tx | **terminal** |
 | 409 | `nonce_not_initialized` (operator runs admin `nonce-init`) / `idempotency_conflict` / `tx_hash_mismatch` / `illegal_transition` | **terminal** |
+| 422 | `/v1/sign-fsp-message` body cannot be reconstructed into a messageHash (bad / unknown FSP fields) | **terminal** |
 | 503 | `vault_unavailable` (sealed master not loaded) | **retryable** |
 | — | any httpx transport error (ConnectError/ReadTimeout/PoolTimeout/…) — a down/restarting fwd | **retryable** |
 
 **There is no `502` from fwd anymore** — fwd does no RPC, so broadcast/RPC
 errors are clif's **own** (raised by `clif/rpc.py`, not by fwd). Rule:
-**400/401/403/404/409 → do not retry (escalate); 503/transport-error →
+**400/401/403/404/409/422 → do not retry (escalate); 503/transport-error →
 backoff + retry.** A down fwd MUST degrade `clif auto`, never crash it (clif
 converts transport errors to `FwdRetryableError` via the shared `fwd-client`
 lib, never propagated raw).

@@ -46,13 +46,21 @@ _No real sample captured in this run._
 
 ## 4. fwd provisioning handshake (operator action)
 
-1. Install a least-privilege `policy.yaml` permitting the clif caller to call
+fwd runs with **no host port** (an `internal: true` compose network), so the
+operator drives admin through the `clifwd` host wrapper (`docker exec fwd
+clifwd …`), not raw HTTP. `fwd onboard rewards` provisions all of the below in
+one operator-gated step.
+
+1. Install a least-privilege policy permitting the clif caller to call
    `RewardManager.claim` on the chosen network's `to` address, with
-   `_recipient` pinned to `0x7c3579aB3E647395c96a1EfC98aF9A31C5Ecc294`, `max_value_wei: "0"`, and a sane rate.
-2. `POST /v1/admin/wallets` → create the claim wallet (admin-keyed). Note its
+   `_recipient` pinned to `0x7c3579aB3E647395c96a1EfC98aF9A31C5Ecc294`,
+   `max_value_wei: "0"`, `allow_unconstrained_args: true`, and a sane rate
+   (`clifwd policy init` / `validate`).
+2. Create the claim wallet (`clifwd wallets create`, admin-keyed). Note its
    address — that becomes the new on-chain **executor**.
-3. `POST /v1/admin/callers` → mint the clif caller token (returned once).
-   Inject it into clif as `FWD_CALLER_TOKEN`; set `FWD_WALLET_NAME`.
+3. Mint the clif caller token (`clifwd callers create`, returned once). Inject
+   it into clif as `FWD_CALLER_TOKEN`; set `FWD_WALLET_NAME`.
+4. Seed the (wallet, chain) nonce (`clifwd nonce init`) before the first claim.
 
 ## 5. On-chain rotation note (doctrine vs code — for the operator/Reviewer)
 

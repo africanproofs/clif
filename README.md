@@ -20,8 +20,9 @@ first consumer in the fwd program to delete its `.env PRIVATE_KEY=` line.
 
 clif carries no `.env PRIVATE_KEY=` and no local-signing dependency
 (`eth-account`, `eth-keys`, `pycryptodome`, `web3`, `argon2`). keccak-256 is
-vendored (`clif/_keccak.py`) solely to derive the `claim` selector from the ABI
-at runtime — it is not a signing primitive. clif refuses to start if any
+vendored (`clif/_keccak.py`) to derive ABI function selectors (the `claim` and
+FSP `signUptimeVote`/`signRewards` selectors) and to hash Merkle leaves/nodes for
+client-side reward-proof verification — it is not a signing primitive. clif refuses to start if any
 `*PRIVATE_KEY*` variable is present in its environment.
 
 ## Install
@@ -42,9 +43,10 @@ poetry install
 Read-only (no fwd provisioning needed):
 
 ```
-clif health      # probe fwd /healthz (require master == "ok")
-clif list        # enumerate claimable FEE/DIRECT epochs + amounts
-clif spec        # emit docs/fwd-integration-spec.md from real captured calldata
+clif health                       # probe fwd /healthz (require master == "ok")
+clif list                         # enumerate claimable FEE/DIRECT epochs + amounts
+clif spec                         # emit docs/fwd-integration-spec.md from real captured calldata
+clif chain nonce --address 0x...  # read an address's on-chain nonce (used by fwd onboarding)
 ```
 
 Claim + automation (needs fwd provisioned and the signing wallet authorized
@@ -104,10 +106,14 @@ keyless stack — clif claims/signs, **their own** fwd custodies the keys.
 
 1. **Stand up fwd.** Follow fwd's
    [`docs/one-command-install.md`](https://github.com/africanproofs/fwd) — the
-   installer clones and builds fwd from source, and `--with-clif` builds clif
-   alongside it. On the fwd side the operator creates the wallets, writes
-   `policy.yaml`, and mints the caller tokens (`clifwd policy init` / `validate`;
-   `clifwd nonce-init` once per wallet+chain) — clif never authors fwd policy.
+   `curl | sh` installer clones and builds fwd from source and brings up an
+   inert default-deny daemon, and `--with-clif` overlays the clif claim/FSP
+   layer. On the fwd side the operator runs `fwd onboard rewards` (the canonical
+   onboarding wizard; `clifwd onboard` is a compat alias), which provisions the
+   policy, wallets, caller tokens, and nonces for the reward classes —
+   `--import-existing` imports operator-supplied keys. fwd's `clifwd` admin CLI
+   (`clifwd policy init` / `validate`, `clifwd nonce init`) is available for
+   manual provisioning. clif never authors fwd policy.
 2. **Configure clif.** `cp .env.example .env` (or a per-network
    `.env.<network>` for multichain). Set **your** beneficiary addresses —
    `IDENTITY_ADDRESS` (FEE), `SIGNING_POLICY_ADDRESS` (DIRECT, if any),

@@ -42,12 +42,13 @@ plus a host running fwd + Docker.
 `clif rehearse` is the binding command: it builds the claim via the real
 `build_claim_calldata` (real discovery first, empty *real* proofs if nothing
 is genuinely claimable — the least hand-modeled valid shape) and POSTs it to
-fwd with an explicit `gas` so fwd skips `eth_estimateGas` (a reverting
-rehearsal claim would otherwise abort pre-broadcast). The mined tx's on-chain
+fwd with an explicit `gas` (clif's fixed `fsp_submit_gas`) — clif is keyless and
+broadcasts itself, so the explicit gas avoids a revert aborting pre-broadcast
+(fwd itself never estimates gas; it is zero-egress). The mined tx's on-chain
 `from` == the fwd-custodied wallet is the custody proof. Each `clif rehearse`
 attempt uses a rehearsal-only idempotency discriminator (`-r<tag>`, default
 unix ts) so fwd cannot replay a stale prior outcome when the reward epoch has
-not rolled; the production claim/auto path keeps the deterministic key (D10).
+not rolled; the production claim/auto path keeps the deterministic key (D12).
 
 Run with clif-**generated** calldata only (never a hand-built shape):
 
@@ -98,8 +99,21 @@ clif rehearse  # rehearsal-ladder fwd-custody proof (needs fwd + caller token)
 | rung | confirms | status | blocker |
 |---|---|---|---|
 | F0 | FSP unit logic: selectors, UPTIME_VOTE_HASH, calldata builders, cross-field validation (merkleRoot regex, n≥0), epoch-bind (`rdd.reward_epoch_id==signing_epoch`), two-caller per-leg mapping, oracle vector parse | ✅ done | — both selectors anchored `0xdc5a4225`/`0xc00a1a97` |
-| F1 | clif ↔ fwd FSP transport (Leg-1 `/v1/sign-fsp-message` with `FSP_SIGN_CALLER_TOKEN`; Leg-2 `/v1/sign-transaction` + client broadcast + tx poll with `FSP_SUBMIT_CALLER_TOKEN`) | ✅ done | — both legs exercised in the epoch-400 mainnet drill (uptime + rewards signed, broadcast, reported back) |
-| F2 | end-to-end FSP accepted on-chain (mined, correct `from`, no revert) | ⛔ unproven | on-chain FSP registration of the signing wallet; a sole-submitter sender wallet (the live drill hit `nonce too low` on a co-managed sender and a mined-but-reverted rewards submit) |
+| F1 | clif ↔ fwd FSP transport (Leg-1 `/v1/sign-fsp-message` with `FSP_SIGN_CALLER_TOKEN`; Leg-2 `/v1/sign-transaction` + client broadcast + client-side `eth_getTransactionReceipt` poll + report-back, with `FSP_SUBMIT_CALLER_TOKEN`) | ✅ done | — both legs exercised in the epoch-400 mainnet drill (uptime + rewards signed, broadcast, reported back) |
+| F2 | end-to-end FSP **accepted** on-chain by the `FlareSystemsManager` (mined, correct `from`, no revert, signature recovered to a registered voter) | ⛔ deferred | a clean **ended-but-not-yet-signed** reward epoch to submit into; AP's signing wallet registered on-chain as the FSP voter; a sole-submitter sender wallet for Leg-2 |
+
+The clif ↔ fwd ↔ chain **integration** is proven (F1): fwd produces valid EIP-191
+`v,r,s` the `FlareSystemsManager` recovers, clif broadcasts the Leg-2 submission,
+and the receipt drives the report-back. On-chain **protocol acceptance** is not
+independently demonstrated end-to-end: the last live submit hit the FSM window
+guard (`epoch not ended yet`), which fires **before** the signer-registration
+check — so it does not prove fwd's signer is an accepted, registered voter.
+Acceptance is **inferred** (the FSP signing-policy key `0xfB021c…` is the
+registered voter) but stays **deferred** until a clean ended-but-not-yet-signed
+epoch lets a submit pass the window guard and reach the registration check. A
+`rewards hash already signed` revert means the epoch finalized (>50% aggregate
+weight) before our signature landed — benign, and **not** proof our key was
+accepted.
 
 F2 is blocked on-chain, not in code. Operator items (see D15 MAJOR-2):
 - Provision `FSP_SIGN_CALLER_TOKEN` (`clif-fsp-sign` caller → `fsp_permissions`

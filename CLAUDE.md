@@ -79,17 +79,23 @@ Read these before non-trivial work; they are the binding references:
 | `docs/verification.md` | Verification ladder (proven vs blocked), rehearsal ladder, pre-flight traps, local checks. |
 | `docs/fwd-integration-spec.md` | The operator handshake artifact (regenerate with `clif spec`). |
 
-## Status — current: v0.5.8 (2026-05-31)
+## Status — current: v0.5.11
 
 clif is on the public `github.com/africanproofs/clif` (build-from-source). The
-reward-claim and FSP signing paths are code complete, keyless, and mainnet-verified
-through the zero-egress fwd stack. Production claim/FSP on-chain operations and the
-on-chain/`.env` cutover steps remain **operator-gated** (fwd provisioned, the new
-wallet authorized on-chain as executor, FSP caller tokens + FlareSystemsManager
-policy in fwd). See `docs/verification.md` for the rung-by-rung state.
+reward-claim and FSP signing paths are code complete and keyless. The clif ↔ fwd ↔
+chain **integration** is proven on Songbird mainnet: fwd signs both legs, clif
+broadcasts the signed payload and reports the outcome back, and the nonce confirms
+on a mined receipt / releases on a revert. End-to-end on-chain claim execution and
+FSP on-chain protocol acceptance by the `FlareSystemsManager` remain **deferred** and
+**operator-gated**: the claim path needs the new wallet authorized on-chain as
+executor (`setClaimExecutors`) and a claimable epoch; FSP acceptance needs a clean
+ended-but-not-yet-signed epoch to submit into (the last live submit hit the FSM
+window guard, which fires before the signer-registration check, so acceptance is
+inferred via the registered `0xfB021c…` voter key, not demonstrated). See
+`docs/verification.md` for the rung-by-rung state.
 
 Current contract: clif asks fwd to SIGN (`/v1/sign-transaction`), then **broadcasts
-the returned `signed_raw_tx` itself** and **reports the outcome back** to fwd. 179
+the returned `signed_raw_tx` itself** and **reports the outcome back** to fwd. 186
 tests green. Build via `fwd-client` (shared keyless transport lib).
 
 **Changelog (condensed):**
