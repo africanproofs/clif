@@ -2,7 +2,7 @@
 # Multi-stage, non-root, lockfile-honored.
 
 FROM python:3.12-slim AS builder
-RUN pip install --no-cache-dir poetry==1.8.5
+RUN pip install --no-cache-dir --timeout 120 --retries 5 poetry==1.8.5
 WORKDIR /src
 COPY pyproject.toml poetry.lock README.md ./
 COPY clif ./clif
@@ -16,8 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 RUN useradd --uid 1000 --create-home clif
 COPY --from=builder /src/requirements.txt /tmp/requirements.txt
 COPY --from=builder /src/dist/*.whl /tmp/
-RUN pip install --no-cache-dir -r /tmp/requirements.txt \
- && pip install --no-cache-dir --no-deps /tmp/*.whl \
+# --timeout/--retries: pip defaults (15s, 0 retries) are too tight for a
+# build-from-source provider on a variable link — a single slow wheel from the
+# PyPI CDN otherwise fails the whole image build (ReadTimeout / "from versions: none").
+RUN pip install --no-cache-dir --timeout 120 --retries 5 -r /tmp/requirements.txt \
+ && pip install --no-cache-dir --timeout 120 --retries 5 --no-deps /tmp/*.whl \
  && rm -rf /tmp/requirements.txt /tmp/*.whl
 USER clif
 WORKDIR /home/clif
