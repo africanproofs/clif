@@ -31,6 +31,24 @@ from eth_abi import encode as abi_encode
 
 from clif.calldata import selector
 
+_CB58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def _bytes20_to_cb58(b: bytes) -> str:
+    """Encode 20-byte node ID as Avalanche CB58 (sha256[-4:] checksum, base58)."""
+    import hashlib
+    checksum = hashlib.sha256(b).digest()[-4:]
+    payload = b + checksum
+    n = int.from_bytes(payload, "big")
+    result: list[bytes] = []
+    while n > 0:
+        n, r = divmod(n, 58)
+        result.append(_CB58_ALPHABET[r : r + 1])
+    leading = sum(1 for byte in payload if byte == 0)
+    result.extend([b"1"] * leading)
+    return b"".join(reversed(result)).decode()
+
+
 # Gas estimation buffer: 25% over the eth_estimateGas result.
 _GAS_BUFFER = 1.25
 # Tip: 1 gwei (in wei) — conservative default.
@@ -239,10 +257,10 @@ class RpcClient:
         return str(da)
 
     def get_node_ids(self, entity_manager: str, voter: str) -> list[str]:
-        """getNodeIdsOf(address) → bytes20[] as 0x-prefixed hex strings."""
+        """getNodeIdsOf(address) → bytes20[] as 'NodeID-<CB58>' strings."""
         data = "0x" + selector("getNodeIdsOf(address)").hex() + abi_encode(["address"], [voter]).hex()
         (ids,) = abi_decode(["bytes20[]"], self.eth_call(entity_manager, data))
-        return ["0x" + b.hex() for b in ids]
+        return [f"NodeID-{_bytes20_to_cb58(bytes(b))}" for b in ids]
 
     def uptime_vote_hash(self, flare_systems_manager: str, epoch_id: int) -> str:
         """Read uptimeVoteHash(uint256) → bytes32 from FlareSystemsManager.

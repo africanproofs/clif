@@ -371,6 +371,7 @@ def preflight(
     signing_policy: Annotated[Optional[str], typer.Option("--signing-policy", help="Registered FSP signing-policy address")] = None,
     network: Annotated[Optional[str], typer.Option(help="Override NETWORK env")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Machine-readable JSON output (exits 0 on RPC error with empty arrays)")] = False,
+    fast_updates_address: Annotated[Optional[list[str]], typer.Option("--fast-updates-address", help="Fast Updates gas wallet (repeatable; not on-chain registered)")] = None,
 ) -> None:
     """On-chain pre-flight: registered identity + executor/recipient state (keyless)."""
     import os
@@ -388,6 +389,7 @@ def preflight(
     submit_addr = submit_sig_addr = signing_policy_addr = delegation_addr = ""
     node_ids: list[str] = []
     balances: dict[str, int] = {}
+    fu_addrs: list[str] = [a for a in (fast_updates_address or []) if a]
 
     try:
         with RpcClient(netcfg.default_rpc) as rpc:
@@ -400,6 +402,8 @@ def preflight(
                 for addr in [identity, delegation_addr, submit_addr, submit_sig_addr, signing_policy_addr]:
                     if addr:
                         balances[addr.lower()] = rpc.get_balance(addr)
+                for addr in fu_addrs:
+                    balances[addr.lower()] = rpc.get_balance(addr)
             if netcfg.claim_setup_manager:
                 executors = rpc.claim_executors(netcfg.claim_setup_manager, identity)
                 recipients_on_chain = rpc.allowed_claim_recipients(netcfg.claim_setup_manager, identity)
@@ -408,6 +412,7 @@ def preflight(
             print(json.dumps({
                 "network": net, "chain_id": netcfg.chain_id, "identity": identity,
                 "executors": [], "allowed_recipients": [],
+                "fast_updates_addresses": fu_addrs,
             }))
             return
         err.print(f"[bold red]  RPC error: {exc}[/]")
@@ -423,6 +428,7 @@ def preflight(
             "submit_signatures_address": submit_sig_addr,
             "signing_policy_address": signing_policy_addr or signing_policy or "",
             "node_ids": node_ids,
+            "fast_updates_addresses": fu_addrs,
             "executors": executors,
             "allowed_recipients": recipients_on_chain,
         }
@@ -446,6 +452,9 @@ def preflight(
             console.print(f"  {'Submit Sigs (SSA):':<22} {submit_sig_addr}   {_bal(submit_sig_addr)}")
         if signing_policy_addr:
             console.print(f"  {'Signing Policy (SPA):':<22} {signing_policy_addr}   {_bal(signing_policy_addr)}")
+        for i, addr in enumerate(fu_addrs, 1):
+            label = f"Fast Updates ({i}):"
+            console.print(f"  {label:<22} {addr}   {_bal(addr)}")
         for nid in node_ids:
             console.print(f"  {'Node ID:':<22} {nid}")
     else:
