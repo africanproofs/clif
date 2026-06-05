@@ -370,15 +370,48 @@ def preflight(
     recipient: Annotated[Optional[str], typer.Option("--recipient", "-r", help="Intended claim recipient")] = None,
     signing_policy: Annotated[Optional[str], typer.Option("--signing-policy", help="Registered FSP signing-policy address")] = None,
     network: Annotated[Optional[str], typer.Option(help="Override NETWORK env")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Machine-readable JSON output (exits 0 on RPC error with empty arrays)")] = False,
 ) -> None:
     """On-chain pre-flight: show executor/recipient/FSP state for an identity (keyless)."""
     import os
 
     net = network or os.environ.get("NETWORK") or "flare"
     if net not in _NETWORKS:
-        err.print(f"[bold red]--network must be one of: {', '.join(_NETWORKS)}[/]")
+        if not json_output:
+            err.print(f"[bold red]--network must be one of: {', '.join(_NETWORKS)}[/]")
         raise typer.Exit(2)
     netcfg = _NETWORKS[net]
+
+    executors: list[str] = []
+    recipients_on_chain: list[str] = []
+
+    if netcfg.claim_setup_manager:
+        try:
+            with RpcClient(netcfg.default_rpc) as rpc:
+                executors = rpc.claim_executors(netcfg.claim_setup_manager, identity)
+                recipients_on_chain = rpc.allowed_claim_recipients(netcfg.claim_setup_manager, identity)
+        except RpcError as exc:
+            if json_output:
+                print(json.dumps({
+                    "network": net, "chain_id": netcfg.chain_id, "identity": identity,
+                    "executors": [], "allowed_recipients": [],
+                }))
+                return
+            err.print(f"[bold red]  RPC error reading ClaimSetupManager: {exc}[/]")
+            raise typer.Exit(1)
+
+    if json_output:
+        out: dict = {
+            "network": net,
+            "chain_id": netcfg.chain_id,
+            "identity": identity,
+            "executors": executors,
+            "allowed_recipients": recipients_on_chain,
+        }
+        if signing_policy:
+            out["signing_policy"] = signing_policy
+        print(json.dumps(out))
+        return
 
     native = "SGB" if net == "songbird" else ("C2FLR" if net == "coston2" else "FLR")
     console.print(f"\n[bold cyan]Preflight — {net} (chain {netcfg.chain_id})[/]")
@@ -392,14 +425,6 @@ def preflight(
         console.print(f"[yellow]  claim setup manager address unknown for {net} — skipping executor/recipient checks[/]")
     else:
         console.print(f"\n[bold]Claim Setup[/] (ClaimSetupManager {netcfg.claim_setup_manager})")
-        try:
-            with RpcClient(netcfg.default_rpc) as rpc:
-                executors = rpc.claim_executors(netcfg.claim_setup_manager, identity)
-                recipients_on_chain = rpc.allowed_claim_recipients(netcfg.claim_setup_manager, identity)
-        except RpcError as exc:
-            err.print(f"[bold red]  RPC error reading ClaimSetupManager: {exc}[/]")
-            raise typer.Exit(1)
-
         if executors:
             for ex in executors:
                 console.print(f"  executor  : {ex} [dim](authorized)[/]")
