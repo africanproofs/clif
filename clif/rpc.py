@@ -226,6 +226,24 @@ class RpcClient:
         result = self._call("eth_getBalance", [address, "latest"])
         return int(str(result), 16)
 
+    def get_voter_addresses(self, entity_manager: str, voter: str) -> tuple[str, str, str]:
+        """getVoterAddresses(address) → (submitAddress, submitSignaturesAddress, signingPolicyAddress)."""
+        data = "0x" + selector("getVoterAddresses(address)").hex() + abi_encode(["address"], [voter]).hex()
+        sa, ssa, spa = abi_decode(["address", "address", "address"], self.eth_call(entity_manager, data))
+        return str(sa), str(ssa), str(spa)
+
+    def get_delegation_address(self, entity_manager: str, voter: str) -> str:
+        """getDelegationAddressOf(address) → address."""
+        data = "0x" + selector("getDelegationAddressOf(address)").hex() + abi_encode(["address"], [voter]).hex()
+        (da,) = abi_decode(["address"], self.eth_call(entity_manager, data))
+        return str(da)
+
+    def get_node_ids(self, entity_manager: str, voter: str) -> list[str]:
+        """getNodeIdsOf(address) → bytes20[] as 0x-prefixed hex strings."""
+        data = "0x" + selector("getNodeIdsOf(address)").hex() + abi_encode(["address"], [voter]).hex()
+        (ids,) = abi_decode(["bytes20[]"], self.eth_call(entity_manager, data))
+        return ["0x" + b.hex() for b in ids]
+
     def uptime_vote_hash(self, flare_systems_manager: str, epoch_id: int) -> str:
         """Read uptimeVoteHash(uint256) → bytes32 from FlareSystemsManager.
 

@@ -26,6 +26,7 @@ class NetworkConfig:
     reward_manager: str
     flare_systems_manager: str
     claim_setup_manager: str
+    entity_manager: str
     default_rpc: str
     # `{epoch}` is substituted with the reward epoch id.
     reward_data_url_template: str
@@ -38,6 +39,7 @@ _NETWORKS: dict[str, NetworkConfig] = {
         reward_manager="0xC8f55c5aA2C752eE285Bd872855C749f4ee6239B",
         flare_systems_manager="0x89e50DC0380e597ecE79c8494bAAFD84537AD0D4",
         claim_setup_manager="0xD56c0Ea37B848939B59e6F5Cda119b3fA473b5eB",
+        entity_manager="0x134b3311C6BdeD895556807a30C7f047D99DfdC2",
         default_rpc="https://flare-api.flare.network/ext/bc/C/rpc",
         reward_data_url_template=(
             "https://raw.githubusercontent.com/flare-foundation/fsp-rewards/"
@@ -50,6 +52,7 @@ _NETWORKS: dict[str, NetworkConfig] = {
         reward_manager="0xE26AD68b17224951b5740F33926Cc438764eB9a7",
         flare_systems_manager="0x421c69E22f48e14Fc2d2Ee3812c59bfb81c38516",
         claim_setup_manager="0xDD138B38d87b0F95F6c3e13e78FFDF2588F1732d",
+        entity_manager="0x46C417D0760198E94fee455CE0e223262a3D0049",
         default_rpc="https://songbird-api.flare.network/ext/bc/C/rpc",
         reward_data_url_template=(
             "https://raw.githubusercontent.com/flare-foundation/fsp-rewards/"
@@ -62,6 +65,7 @@ _NETWORKS: dict[str, NetworkConfig] = {
         reward_manager="0xB4f43E342c5c77e6fe060c0481Fe313Ff2503454",
         flare_systems_manager="0xbC1F76CEB521Eb5484b8943B5462D08ea96617A1",
         claim_setup_manager="",  # not needed for testnet onboarding; verify before use
+        entity_manager="",  # not yet known
         default_rpc="https://coston2-api.flare.network/ext/bc/C/rpc",
         reward_data_url_template=(
             "https://gitlab.com/timivesel/ftsov2-testnet-rewards/-/raw/main/"

@@ -372,7 +372,7 @@ def preflight(
     network: Annotated[Optional[str], typer.Option(help="Override NETWORK env")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Machine-readable JSON output (exits 0 on RPC error with empty arrays)")] = False,
 ) -> None:
-    """On-chain pre-flight: show executor/recipient/FSP state for an identity (keyless)."""
+    """On-chain pre-flight: registered identity + executor/recipient state (keyless)."""
     import os
 
     net = network or os.environ.get("NETWORK") or "flare"
@@ -381,48 +381,82 @@ def preflight(
             err.print(f"[bold red]--network must be one of: {', '.join(_NETWORKS)}[/]")
         raise typer.Exit(2)
     netcfg = _NETWORKS[net]
+    native = "SGB" if net == "songbird" else ("C2FLR" if net == "coston2" else "FLR")
 
     executors: list[str] = []
     recipients_on_chain: list[str] = []
+    submit_addr = submit_sig_addr = signing_policy_addr = delegation_addr = ""
+    node_ids: list[str] = []
+    balances: dict[str, int] = {}
 
-    if netcfg.claim_setup_manager:
-        try:
-            with RpcClient(netcfg.default_rpc) as rpc:
+    try:
+        with RpcClient(netcfg.default_rpc) as rpc:
+            if netcfg.entity_manager:
+                submit_addr, submit_sig_addr, signing_policy_addr = rpc.get_voter_addresses(
+                    netcfg.entity_manager, identity
+                )
+                delegation_addr = rpc.get_delegation_address(netcfg.entity_manager, identity)
+                node_ids = rpc.get_node_ids(netcfg.entity_manager, identity)
+                for addr in [identity, delegation_addr, submit_addr, submit_sig_addr, signing_policy_addr]:
+                    if addr:
+                        balances[addr.lower()] = rpc.get_balance(addr)
+            if netcfg.claim_setup_manager:
                 executors = rpc.claim_executors(netcfg.claim_setup_manager, identity)
                 recipients_on_chain = rpc.allowed_claim_recipients(netcfg.claim_setup_manager, identity)
-        except RpcError as exc:
-            if json_output:
-                print(json.dumps({
-                    "network": net, "chain_id": netcfg.chain_id, "identity": identity,
-                    "executors": [], "allowed_recipients": [],
-                }))
-                return
-            err.print(f"[bold red]  RPC error reading ClaimSetupManager: {exc}[/]")
-            raise typer.Exit(1)
+    except RpcError as exc:
+        if json_output:
+            print(json.dumps({
+                "network": net, "chain_id": netcfg.chain_id, "identity": identity,
+                "executors": [], "allowed_recipients": [],
+            }))
+            return
+        err.print(f"[bold red]  RPC error: {exc}[/]")
+        raise typer.Exit(1)
 
     if json_output:
         out: dict = {
             "network": net,
             "chain_id": netcfg.chain_id,
             "identity": identity,
+            "delegation_address": delegation_addr,
+            "submit_address": submit_addr,
+            "submit_signatures_address": submit_sig_addr,
+            "signing_policy_address": signing_policy_addr or signing_policy or "",
+            "node_ids": node_ids,
             "executors": executors,
             "allowed_recipients": recipients_on_chain,
         }
-        if signing_policy:
-            out["signing_policy"] = signing_policy
         print(json.dumps(out))
         return
 
-    native = "SGB" if net == "songbird" else ("C2FLR" if net == "coston2" else "FLR")
+    def _bal(addr: str) -> str:
+        wei = balances.get(addr.lower(), 0)
+        return f"{wei / 10**18:.2f} {native}"
+
     console.print(f"\n[bold cyan]Preflight — {net} (chain {netcfg.chain_id})[/]")
-    console.print(f"  identity  : {identity}")
-    if recipient:
-        console.print(f"  recipient : {recipient}")
-    if signing_policy:
-        console.print(f"  FSP signer: {signing_policy}")
+
+    if netcfg.entity_manager:
+        console.print(f"\n[bold]Registered identity[/] (EntityManager {netcfg.entity_manager})")
+        console.print(f"  {'Identity (IA):':<22} {identity}   {_bal(identity)}")
+        if delegation_addr:
+            console.print(f"  {'Delegation (DA):':<22} {delegation_addr}   {_bal(delegation_addr)}")
+        if submit_addr:
+            console.print(f"  {'Submit (SA):':<22} {submit_addr}   {_bal(submit_addr)}")
+        if submit_sig_addr:
+            console.print(f"  {'Submit Sigs (SSA):':<22} {submit_sig_addr}   {_bal(submit_sig_addr)}")
+        if signing_policy_addr:
+            console.print(f"  {'Signing Policy (SPA):':<22} {signing_policy_addr}   {_bal(signing_policy_addr)}")
+        for nid in node_ids:
+            console.print(f"  {'Node ID:':<22} {nid}")
+    else:
+        console.print(f"  identity  : {identity}")
+        if recipient:
+            console.print(f"  recipient : {recipient}")
+        if signing_policy:
+            console.print(f"  FSP signer: {signing_policy}")
 
     if not netcfg.claim_setup_manager:
-        console.print(f"[yellow]  claim setup manager address unknown for {net} — skipping executor/recipient checks[/]")
+        console.print(f"\n[yellow]  claim setup manager address unknown for {net} — skipping executor/recipient checks[/]")
     else:
         console.print(f"\n[bold]Claim Setup[/] (ClaimSetupManager {netcfg.claim_setup_manager})")
         if executors:
@@ -443,9 +477,10 @@ def preflight(
             if recipient:
                 console.print(f"  [yellow]  → {recipient} will not be able to receive claims until added[/]")
 
-    if signing_policy:
+    effective_spa = signing_policy_addr or signing_policy
+    if effective_spa:
         console.print(f"\n[bold]FSP Signing[/]")
-        console.print(f"  key       : {signing_policy}")
+        console.print(f"  key       : {effective_spa}")
         console.print(f"  [dim]use `clif fsp status` to verify voter registration and recent signing activity[/]")
 
     console.print(f"\n[bold]Gas Wallets[/]")
