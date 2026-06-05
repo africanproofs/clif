@@ -369,6 +369,7 @@ def claim(
     type: Annotated[Optional[str], typer.Option("--type", "-t", help="fee|direct")] = None,
     epoch: Annotated[Optional[int], typer.Option("--epoch", "-e")] = None,
     no_wait: Annotated[bool, typer.Option("--no-wait", help="don't poll to mined")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="skip confirmation prompt")] = False,
     retry: Annotated[
         Optional[str],
         typer.Option(
@@ -396,15 +397,44 @@ def claim(
             "claim: DELIBERATE retry discriminator=%r (fresh idempotency key — "
             "operator-intended post-failure re-attempt)", retry,
         )
+    recipient = s.claim_recipient_address or "[CLAIM_RECIPIENT_ADDRESS not set]"
+    native = "SGB" if str(s.network).lower() == "songbird" else "FLR"
     worst = 0
-    with RpcClient(s.rpc_url) as rpc, FwdClient(s.fwd_endpoint, s.fwd_caller_token) as fwd:
+    with RpcClient(s.rpc_url) as rpc:
+        confirmed_pairs: list[tuple[ClaimType, str]] = []
         for ct, benef in pairs:
-            o = run_claim(
-                s, rpc, fwd, int(ct), benef,
-                only_epoch=epoch, wait=not no_wait, retry=retry,
+            try:
+                preview = collect_reward_claims(rpc, s, benef, int(ct), epoch)
+            except RpcError as exc:
+                err.print(f"[yellow]{ct.name} discovery failed: {exc} (skipping)[/]")
+                continue
+            if not preview:
+                console.print(f"{ct.name} {benef}: nothing claimable")
+                continue
+            total_wei = sum(c.body.amount for c in preview)
+            epochs_list = [c.body.reward_epoch_id for c in preview]
+            console.print(f"\n[bold]{ct.name} claim[/]")
+            console.print(f"  beneficiary : {benef}")
+            console.print(f"  recipient   : [bold green]{recipient}[/]")
+            console.print(f"  epochs      : {epochs_list}")
+            console.print(
+                f"  amount      : {total_wei} wei (~{total_wei / 1e18:.6f} {native})"
             )
-            _print_outcome(o)
-            worst = max(worst, _exit_for(o.status))
+            console.print(f"  wrap        : {s.wrap_rewards}")
+            console.print(f"  network     : {s.network}")
+            if not yes:
+                typer.confirm("Proceed with claim?", abort=True)
+            confirmed_pairs.append((ct, benef))
+        if not confirmed_pairs:
+            raise typer.Exit(0)
+        with FwdClient(s.fwd_endpoint, s.fwd_caller_token) as fwd:
+            for ct, benef in confirmed_pairs:
+                o = run_claim(
+                    s, rpc, fwd, int(ct), benef,
+                    only_epoch=epoch, wait=not no_wait, retry=retry,
+                )
+                _print_outcome(o)
+                worst = max(worst, _exit_for(o.status))
     raise typer.Exit(worst)
 
 
