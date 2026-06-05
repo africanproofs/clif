@@ -365,6 +365,70 @@ def _print_outcome(o: ClaimOutcome) -> None:
 
 
 @app.command()
+def preflight(
+    identity: Annotated[str, typer.Option("--identity", "-i", help="Provider identity / reward owner address")],
+    recipient: Annotated[Optional[str], typer.Option("--recipient", "-r", help="Intended claim recipient")] = None,
+    signing_policy: Annotated[Optional[str], typer.Option("--signing-policy", help="Registered FSP signing-policy address")] = None,
+    network: Annotated[Optional[str], typer.Option(help="Override NETWORK env")] = None,
+) -> None:
+    """On-chain pre-flight: show executor/recipient/FSP state for an identity (keyless)."""
+    import os
+
+    net = network or os.environ.get("NETWORK") or "flare"
+    if net not in _NETWORKS:
+        err.print(f"[bold red]--network must be one of: {', '.join(_NETWORKS)}[/]")
+        raise typer.Exit(2)
+    netcfg = _NETWORKS[net]
+
+    native = "SGB" if net == "songbird" else ("C2FLR" if net == "coston2" else "FLR")
+    console.print(f"\n[bold cyan]Preflight — {net} (chain {netcfg.chain_id})[/]")
+    console.print(f"  identity  : {identity}")
+    if recipient:
+        console.print(f"  recipient : {recipient}")
+    if signing_policy:
+        console.print(f"  FSP signer: {signing_policy}")
+
+    if not netcfg.claim_setup_manager:
+        console.print(f"[yellow]  claim setup manager address unknown for {net} — skipping executor/recipient checks[/]")
+    else:
+        console.print(f"\n[bold]Claim Setup[/] (ClaimSetupManager {netcfg.claim_setup_manager})")
+        try:
+            with RpcClient(netcfg.default_rpc) as rpc:
+                executors = rpc.claim_executors(netcfg.claim_setup_manager, identity)
+                recipients_on_chain = rpc.allowed_claim_recipients(netcfg.claim_setup_manager, identity)
+        except RpcError as exc:
+            err.print(f"[bold red]  RPC error reading ClaimSetupManager: {exc}[/]")
+            raise typer.Exit(1)
+
+        if executors:
+            for ex in executors:
+                console.print(f"  executor  : {ex} [dim](authorized)[/]")
+        else:
+            console.print("  executor  : [yellow]none set — run ClaimSetupManager.setClaimExecutors([new_wallet]) after onboarding[/]")
+
+        if recipients_on_chain:
+            for rc in recipients_on_chain:
+                match = recipient and rc.lower() == recipient.lower()
+                tag = " [bold green]✓ matches --recipient[/]" if match else ""
+                console.print(f"  recipient : {rc}{tag}")
+            if recipient and recipient.lower() not in [r.lower() for r in recipients_on_chain]:
+                console.print(f"  [yellow]WARNING: {recipient} is NOT in the allowed recipients list — run setAllowedClaimRecipients after onboarding[/]")
+        else:
+            console.print("  recipients: [yellow]none set — run ClaimSetupManager.setAllowedClaimRecipients([recipient]) after onboarding[/]")
+            if recipient:
+                console.print(f"  [yellow]  → {recipient} will not be able to receive claims until added[/]")
+
+    if signing_policy:
+        console.print(f"\n[bold]FSP Signing[/]")
+        console.print(f"  key       : {signing_policy}")
+        console.print(f"  [dim]use `clif fsp status` to verify voter registration and recent signing activity[/]")
+
+    console.print(f"\n[bold]Gas Wallets[/]")
+    console.print(f"  [dim]wallet balances available after onboarding via `clifwd wallets list`[/]")
+    console.print()
+
+
+@app.command()
 def claim(
     type: Annotated[Optional[str], typer.Option("--type", "-t", help="fee|direct")] = None,
     epoch: Annotated[Optional[int], typer.Option("--epoch", "-e")] = None,

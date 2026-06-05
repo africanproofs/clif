@@ -209,6 +209,23 @@ class RpcClient:
         (out,) = abi_decode(["uint24"], self.eth_call(flare_systems_manager, data))
         return int(out)
 
+    def claim_executors(self, claim_setup_manager: str, owner: str) -> list[str]:
+        """claimExecutors(address) → address[] — who can claim on behalf of owner."""
+        data = "0x" + selector("claimExecutors(address)").hex() + abi_encode(["address"], [owner]).hex()
+        (out,) = abi_decode(["address[]"], self.eth_call(claim_setup_manager, data))
+        return [str(a) for a in out]
+
+    def allowed_claim_recipients(self, claim_setup_manager: str, owner: str) -> list[str]:
+        """allowedClaimRecipients(address) → address[] — allow-listed recipient addresses."""
+        data = "0x" + selector("allowedClaimRecipients(address)").hex() + abi_encode(["address"], [owner]).hex()
+        (out,) = abi_decode(["address[]"], self.eth_call(claim_setup_manager, data))
+        return [str(a) for a in out]
+
+    def get_balance(self, address: str) -> int:
+        """eth_getBalance(address) → wei (int)."""
+        result = self._call("eth_getBalance", [address, "latest"])
+        return int(str(result), 16)
+
     def uptime_vote_hash(self, flare_systems_manager: str, epoch_id: int) -> str:
         """Read uptimeVoteHash(uint256) → bytes32 from FlareSystemsManager.
 
