@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Annotated, Optional
@@ -375,6 +376,13 @@ def preflight(
 ) -> None:
     """On-chain pre-flight: registered identity + executor/recipient state (keyless)."""
     import os
+
+    _HEX_ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+    _addrs_to_check = ([identity] if identity else []) + list(fast_updates_address or [])
+    for _addr in _addrs_to_check:
+        if not _HEX_ADDR_RE.match(_addr):
+            typer.echo(f"error: invalid address format: {_addr!r} (expected 0x + 40 hex chars)", err=True)
+            raise typer.Exit(1)
 
     net = network or os.environ.get("NETWORK") or "flare"
     if net not in _NETWORKS:
@@ -1087,8 +1095,7 @@ def fsp_auto(
                 watermark = rpc.get_current_reward_epoch_id(s.net.flare_systems_manager)
                 log.info("fsp auto watermark from chain current_epoch=%s", watermark)
         except Exception as exc:  # noqa: BLE001
-            log.warning("fsp auto: could not read current epoch (%s); watermark=0", exc)
-            watermark = 0
+            log.warning("fsp auto: could not read current epoch (%s); watermark=None (will init from chain on first poll)", exc)
 
     log.info(
         "fsp auto start network=%s interval=%ss watermark=%s state=%s",
@@ -1102,6 +1109,9 @@ def fsp_auto(
             try:
                 with RpcClient(s.rpc_url) as rpc:
                     current_epoch = rpc.get_current_reward_epoch_id(s.net.flare_systems_manager)
+                    if watermark is None:
+                        watermark = current_epoch
+                        log.info("fsp auto: watermark initialized to current_epoch=%s (startup read had failed)", watermark)
                     # Act on closed epochs (< current) that are >= watermark.
                     closed_epochs = list(range(watermark, current_epoch))
                     for mt in message_types:

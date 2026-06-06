@@ -1,5 +1,7 @@
 """fsp-rewards tuple parsing + the beneficiary/claimType find filter."""
 
+from unittest.mock import MagicMock
+
 import clif.discovery as discovery
 from clif.config import Settings
 from clif.models import RewardsData
@@ -40,16 +42,20 @@ def test_reward_claim_for_filters_by_beneficiary_and_type(monkeypatch):
         lambda _s, _e: RewardsData.model_validate(_FIXTURE),
     )
     s = Settings()
+    # Mock rpc: rewards_hash returns the fixture's merkleRoot so the cross-check passes
+    rpc = MagicMock()
+    rpc.rewards_hash.return_value = _ROOT
+
     # case-insensitive beneficiary match, FEE (type 1)
-    rc = discovery.reward_claim_for(s, 300, "0x" + "11" * 20, 1)
+    rc = discovery.reward_claim_for(rpc, s, 300, "0x" + "11" * 20, 1)
     assert rc is not None
     assert rc.body.amount == 123456789
     assert rc.body.claim_type == 1
     assert rc.merkle_proof == _PROOF_B1
 
     # DIRECT (type 0) for the other address
-    rc0 = discovery.reward_claim_for(s, 300, "0X" + "22" * 20, 0)
+    rc0 = discovery.reward_claim_for(rpc, s, 300, "0X" + "22" * 20, 0)
     assert rc0 is not None and rc0.body.amount == 999
 
     # wrong claim type -> no match
-    assert discovery.reward_claim_for(s, 300, "0x" + "11" * 20, 0) is None
+    assert discovery.reward_claim_for(rpc, s, 300, "0x" + "11" * 20, 0) is None

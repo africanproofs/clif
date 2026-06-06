@@ -7,7 +7,7 @@ WORKDIR /src
 COPY pyproject.toml poetry.lock README.md ./
 COPY clif ./clif
 # Pin runtime deps from the committed lock, then build the clif wheel.
-RUN poetry export --only main --without-hashes -f requirements.txt -o requirements.txt \
+RUN poetry export --only main -f requirements.txt -o requirements.txt \
  && poetry build -f wheel
 
 FROM python:3.12-slim AS runtime
@@ -19,7 +19,7 @@ COPY --from=builder /src/dist/*.whl /tmp/
 # --timeout/--retries: pip defaults (15s, 0 retries) are too tight for a
 # build-from-source provider on a variable link — a single slow wheel from the
 # PyPI CDN otherwise fails the whole image build (ReadTimeout / "from versions: none").
-RUN pip install --no-cache-dir --timeout 120 --retries 5 -r /tmp/requirements.txt \
+RUN pip install --no-cache-dir --timeout 120 --retries 5 --require-hashes -r /tmp/requirements.txt \
  && pip install --no-cache-dir --timeout 120 --retries 5 --no-deps /tmp/*.whl \
  && rm -rf /tmp/requirements.txt /tmp/*.whl
 USER clif

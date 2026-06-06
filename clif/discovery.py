@@ -32,6 +32,7 @@ def claimable_epoch_ids(rpc: RpcClient, settings: Settings, beneficiary: str) ->
 
 
 def reward_claim_for(
+    rpc: RpcClient,
     settings: Settings, epoch: int, beneficiary: str, claim_type: int
 ) -> RewardClaimWithProof | None:
     """The `(merkleProof, body)` for this beneficiary+claimType in one epoch.
@@ -43,6 +44,15 @@ def reward_claim_for(
     """
     data = get_reward_calculation_data(settings, epoch)
     if data is None:
+        return None
+    # Cross-check data file's merkle_root against on-chain rewardsHash (CLIF-003)
+    on_chain_hash = rpc.rewards_hash(settings.net.flare_systems_manager, epoch)
+    if data.merkle_root.lower() != on_chain_hash.lower():
+        print(
+            f"discovery: merkle_root mismatch epoch={epoch}: "
+            f"data={data.merkle_root!r} on-chain={on_chain_hash!r} — refusing",
+            file=sys.stderr,
+        )
         return None
     for merkle_proof, (epoch_id, address, amount_str, c_type) in data.reward_claims:
         if address.lower() == beneficiary.lower() and c_type == claim_type:
@@ -97,7 +107,7 @@ def collect_reward_claims(
         epochs = claimable_epoch_ids(rpc, settings, beneficiary)
     out: list[RewardClaimWithProof] = []
     for epoch in epochs:
-        rc = reward_claim_for(settings, epoch, beneficiary, claim_type)
+        rc = reward_claim_for(rpc, settings, epoch, beneficiary, claim_type)
         if rc is not None:
             out.append(rc)
     return out
@@ -166,7 +176,7 @@ def classify_claim_frontier(
             # Gates pass → claimable iff in the merkle tree. A miss here (the
             # epoch is finalized + signed but the beneficiary is absent) is a
             # genuine no-accrual, not a pending state.
-            rc = reward_claim_for(settings, epoch, beneficiary, claim_type)
+            rc = reward_claim_for(rpc, settings, epoch, beneficiary, claim_type)
             reason = (
                 f"claimable: {rc.body.amount} wei"
                 if rc is not None

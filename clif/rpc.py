@@ -78,6 +78,12 @@ class RpcClient:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
+    def _abi_decode(self, types: list, data: bytes) -> tuple:
+        try:
+            return abi_decode(types, data)
+        except Exception as exc:
+            raise RpcError(f"abi decode failed {types}: {exc}") from exc
+
     def _call(self, method: str, params: list) -> object:
         self._id += 1
         try:
@@ -205,38 +211,38 @@ class RpcClient:
         data = "0x" + selector("rewardsHash(uint256)").hex() + abi_encode(
             ["uint256"], [epoch_id]
         ).hex()
-        (out,) = abi_decode(["bytes32"], self.eth_call(flare_systems_manager, data))
+        (out,) = self._abi_decode(["bytes32"], self.eth_call(flare_systems_manager, data))
         return "0x" + out.hex()
 
     def next_claimable_reward_epoch_id(self, reward_manager: str, owner: str) -> int:
         data = "0x" + selector("getNextClaimableRewardEpochId(address)").hex() + abi_encode(
             ["address"], [owner]
         ).hex()
-        (out,) = abi_decode(["uint256"], self.eth_call(reward_manager, data))
+        (out,) = self._abi_decode(["uint256"], self.eth_call(reward_manager, data))
         return int(out)
 
     def reward_epoch_id_range(self, reward_manager: str) -> tuple[int, int]:
         data = "0x" + selector("getRewardEpochIdsWithClaimableRewards()").hex()
-        start, end = abi_decode(["uint24", "uint24"], self.eth_call(reward_manager, data))
+        start, end = self._abi_decode(["uint24", "uint24"], self.eth_call(reward_manager, data))
         return int(start), int(end)
 
     def get_current_reward_epoch_id(self, flare_systems_manager: str) -> int:
         """Read getCurrentRewardEpochId() → uint24 from FlareSystemsManager (keyless)."""
         # Selector: keccak256("getCurrentRewardEpochId()")[:4] = 0x70562697 (verified anchor)
         data = "0x" + selector("getCurrentRewardEpochId()").hex()
-        (out,) = abi_decode(["uint24"], self.eth_call(flare_systems_manager, data))
+        (out,) = self._abi_decode(["uint24"], self.eth_call(flare_systems_manager, data))
         return int(out)
 
     def claim_executors(self, claim_setup_manager: str, owner: str) -> list[str]:
         """claimExecutors(address) → address[] — who can claim on behalf of owner."""
         data = "0x" + selector("claimExecutors(address)").hex() + abi_encode(["address"], [owner]).hex()
-        (out,) = abi_decode(["address[]"], self.eth_call(claim_setup_manager, data))
+        (out,) = self._abi_decode(["address[]"], self.eth_call(claim_setup_manager, data))
         return [str(a) for a in out]
 
     def allowed_claim_recipients(self, claim_setup_manager: str, owner: str) -> list[str]:
         """allowedClaimRecipients(address) → address[] — allow-listed recipient addresses."""
         data = "0x" + selector("allowedClaimRecipients(address)").hex() + abi_encode(["address"], [owner]).hex()
-        (out,) = abi_decode(["address[]"], self.eth_call(claim_setup_manager, data))
+        (out,) = self._abi_decode(["address[]"], self.eth_call(claim_setup_manager, data))
         return [str(a) for a in out]
 
     def get_balance(self, address: str) -> int:
@@ -247,19 +253,19 @@ class RpcClient:
     def get_voter_addresses(self, entity_manager: str, voter: str) -> tuple[str, str, str]:
         """getVoterAddresses(address) → (submitAddress, submitSignaturesAddress, signingPolicyAddress)."""
         data = "0x" + selector("getVoterAddresses(address)").hex() + abi_encode(["address"], [voter]).hex()
-        sa, ssa, spa = abi_decode(["address", "address", "address"], self.eth_call(entity_manager, data))
+        sa, ssa, spa = self._abi_decode(["address", "address", "address"], self.eth_call(entity_manager, data))
         return str(sa), str(ssa), str(spa)
 
     def get_delegation_address(self, entity_manager: str, voter: str) -> str:
         """getDelegationAddressOf(address) → address."""
         data = "0x" + selector("getDelegationAddressOf(address)").hex() + abi_encode(["address"], [voter]).hex()
-        (da,) = abi_decode(["address"], self.eth_call(entity_manager, data))
+        (da,) = self._abi_decode(["address"], self.eth_call(entity_manager, data))
         return str(da)
 
     def get_node_ids(self, entity_manager: str, voter: str) -> list[str]:
         """getNodeIdsOf(address) → bytes20[] as 'NodeID-<CB58>' strings."""
         data = "0x" + selector("getNodeIdsOf(address)").hex() + abi_encode(["address"], [voter]).hex()
-        (ids,) = abi_decode(["bytes20[]"], self.eth_call(entity_manager, data))
+        (ids,) = self._abi_decode(["bytes20[]"], self.eth_call(entity_manager, data))
         return [f"NodeID-{_bytes20_to_cb58(bytes(b))}" for b in ids]
 
     def uptime_vote_hash(self, flare_systems_manager: str, epoch_id: int) -> str:
@@ -273,7 +279,7 @@ class RpcClient:
         data = "0x" + selector("uptimeVoteHash(uint256)").hex() + abi_encode(
             ["uint256"], [epoch_id]
         ).hex()
-        (out,) = abi_decode(["bytes32"], self.eth_call(flare_systems_manager, data))
+        (out,) = self._abi_decode(["bytes32"], self.eth_call(flare_systems_manager, data))
         return "0x" + out.hex()
 
     def get_revert_reason(self, tx_hash: str) -> str | None:
