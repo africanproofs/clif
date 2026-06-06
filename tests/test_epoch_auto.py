@@ -10,7 +10,14 @@ from __future__ import annotations
 import clif.epoch_auto as ea
 from clif.claimer import ClaimOutcome, OutcomeStatus
 from clif.config import ZERO_BYTES32, Settings
-from clif.epoch_auto import EpochObs, Phase, drive_epoch, run_cycle
+from clif.epoch_auto import (
+    EpochObs,
+    Phase,
+    drive_epoch,
+    make_epoch_end_ts,
+    next_sleep_seconds,
+    run_cycle,
+)
 from clif.fsp import FspOutcome
 
 NONZERO = "0x" + "ab" * 32
@@ -78,6 +85,7 @@ def _drive(rpc, **kw):
         _settings(), rpc, object(), VOTER, CLAIMERS, 5, kw.pop("now", 10_000),
         uptime_enabled=kw.pop("uptime_enabled", False),
         initial_delay=kw.pop("initial_delay", 3600),
+        epoch_end_ts=kw.pop("epoch_end_ts", lambda _e: rpc.end_ts),
     )
 
 
@@ -188,6 +196,7 @@ def test_run_cycle_advances_contiguously(monkeypatch):
     new_last, current, obs = run_cycle(
         _settings(), rpc, object(), VOTER, CLAIMERS, ea.AutoState(), 6, 100.0,
         uptime_enabled=False, initial_delay=3600, terminal_cooldown=3600,
+        epoch_end_ts=lambda _e: 0,
     )
     assert current == 9 and seen == [7, 8] and new_last == 8
     assert all(o.done for o in obs)
@@ -209,6 +218,48 @@ def test_run_cycle_stops_advance_on_stuck(monkeypatch):
     new_last, _current, _obs = run_cycle(
         _settings(), rpc, object(), VOTER, CLAIMERS, ea.AutoState(), 6, 100.0,
         uptime_enabled=False, initial_delay=3600, terminal_cooldown=3600,
+        epoch_end_ts=lambda _e: 0,
     )
     assert seen == [7, 8]  # newer epoch still processed
     assert new_last == 6  # watermark did NOT advance past the stuck 7
+
+
+# --- apgateway-informed timing + smart sleep --------------------------------
+
+def test_make_epoch_end_ts_math():
+    end = make_epoch_end_ts(1_000_000, 302_400)
+    assert end(0) == 1_302_400  # first + 1*duration
+    assert end(5) == 1_000_000 + 6 * 302_400
+
+
+def test_sleep_all_done_waits_for_next_window():
+    # caught up → wake at current epoch's end + initial_delay (precise, within ceiling)
+    obs = [EpochObs(7, Phase.DONE, "done", done=True)]
+    end = make_epoch_end_ts(0, 1000)  # end(0)=1000
+    s = next_sleep_seconds(obs, 0, end, now=600.0, poll_interval=1800, initial_delay=0)
+    assert s == 400.0  # 1000 - 600
+
+
+def test_sleep_capped_at_ceiling():
+    obs = [EpochObs(7, Phase.DONE, "done", done=True)]
+    end = make_epoch_end_ts(0, 1000)
+    s = next_sleep_seconds(obs, 0, end, now=0.0, poll_interval=1800, initial_delay=100_000)
+    assert s == 3600.0  # max(poll_interval, 3600) ceiling
+
+
+def test_sleep_too_early_uses_wait_until():
+    obs = [EpochObs(5, Phase.REWARD_WAIT, "holding", wait_until=10_500.0)]
+    s = next_sleep_seconds(obs, 6, lambda _e: 0, now=10_000.0, poll_interval=1800, initial_delay=3600)
+    assert s == 500.0  # exactly until the window opens
+
+
+def test_sleep_active_wait_uses_poll_interval():
+    obs = [EpochObs(5, Phase.CLAIM_WAIT, "awaiting finalization")]  # wait_until None
+    s = next_sleep_seconds(obs, 6, lambda _e: 0, now=10_000.0, poll_interval=1800, initial_delay=3600)
+    assert s == 1800.0
+
+
+def test_sleep_floor_when_overdue():
+    obs = [EpochObs(5, Phase.REWARD_WAIT, "holding", wait_until=9_900.0)]  # already past
+    s = next_sleep_seconds(obs, 6, lambda _e: 0, now=10_000.0, poll_interval=1800, initial_delay=3600)
+    assert s == 60.0  # floor

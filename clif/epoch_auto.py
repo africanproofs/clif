@@ -23,6 +23,7 @@ rewardsHash flip; the chain exposes no live signing-weight %.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -64,6 +65,10 @@ class EpochObs:
     detail: str
     done: bool = False
     terminal: bool = False
+    # When set (REWARD_WAIT-too-early), the precise UNIX time this epoch next
+    # becomes actionable (epoch_end + initial_delay) — lets the daemon sleep
+    # exactly until the window opens instead of polling blindly.
+    wait_until: float | None = None
     actions: list[tuple[str, str, str]] = field(default_factory=list)  # (leg, status, detail)
 
 
@@ -97,6 +102,7 @@ def drive_epoch(
     *,
     uptime_enabled: bool,
     initial_delay: int,
+    epoch_end_ts: Callable[[int], int],
 ) -> EpochObs:
     """Advance a single closed reward epoch through its phases (one cycle)."""
     fsm = settings.net.flare_systems_manager
@@ -116,11 +122,12 @@ def drive_epoch(
     signed_rewards = rpc.voter_rewards_sign_info(fsm, epoch, voter)[0] != 0
 
     if not finalized and not signed_rewards:
-        end_ts = rpc.reward_epoch_end_ts(fsm, epoch)
+        end_ts = epoch_end_ts(epoch)
         if now < end_ts + initial_delay:
             return EpochObs(
                 epoch, Phase.REWARD_WAIT,
                 f"holding until epoch_end+{initial_delay}s (end_ts={end_ts})",
+                wait_until=float(end_ts + initial_delay),
                 actions=actions,
             )
         if get_reward_distribution_data(settings, epoch) is None:
@@ -181,6 +188,7 @@ def run_cycle(
     uptime_enabled: bool,
     initial_delay: int,
     terminal_cooldown: int,
+    epoch_end_ts: Callable[[int], int],
 ) -> tuple[int | None, int, list[EpochObs]]:
     """One poll cycle: process all closed-but-unhandled epochs (oldest first).
 
@@ -218,6 +226,7 @@ def run_cycle(
         obs = drive_epoch(
             settings, rpc, fwd, voter, claimers, epoch, now,
             uptime_enabled=uptime_enabled, initial_delay=initial_delay,
+            epoch_end_ts=epoch_end_ts,
         )
         observations.append(obs)
         if obs.terminal:
@@ -271,3 +280,45 @@ def build_epoch_report(
             for o in observations
         ],
     }
+
+
+def make_epoch_end_ts(first_reward_epoch_start_ts: int, reward_epoch_duration_sec: int):
+    """Closure: epoch_end_ts(N) = first + (N+1)*duration — the EXPECTED end of any
+    reward epoch (apgateway's constant-derived model). Works for the current/next
+    (not-yet-closed) epoch, unlike a per-epoch getRewardEpochStartInfo read."""
+    def _end(epoch: int) -> int:
+        return first_reward_epoch_start_ts + (epoch + 1) * reward_epoch_duration_sec
+    return _end
+
+
+def next_sleep_seconds(
+    observations: list[EpochObs],
+    current_epoch: int | None,
+    epoch_end_ts: Callable[[int], int],
+    now: float,
+    *,
+    poll_interval: int,
+    initial_delay: int,
+) -> float:
+    """How long to sleep before the next cycle — precise, epoch-anchored.
+
+    - all caught up (no active epoch) → sleep until the CURRENT epoch's
+      reward window opens (epoch_end + initial_delay) — true idle, not a poll;
+    - an active epoch waiting too-early → sleep until the earliest wait_until;
+    - an active epoch polling for publication / finalization / claim → poll_interval.
+    Clamped to [60s, max(poll_interval, 3600s)]: the ceiling keeps the status
+    file fresh for monitoring and re-checks epoch advance ≥ hourly; the floor
+    avoids a busy loop.
+    """
+    floor = 60.0
+    ceiling = float(max(poll_interval, 3600))
+    active = [o for o in observations if not o.done]
+    if not active:
+        # Nothing to do until the current epoch ends and its window opens.
+        wake = (epoch_end_ts(current_epoch) + initial_delay) if current_epoch is not None else now + poll_interval
+    else:
+        candidates: list[float] = []
+        for o in active:
+            candidates.append(o.wait_until if o.wait_until is not None else now + poll_interval)
+        wake = min(candidates)
+    return max(floor, min(wake - now, ceiling))

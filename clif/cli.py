@@ -54,7 +54,13 @@ from clif.fsp_autostate import (
     fsp_status_exit_code,
     fsp_stream_key,
 )
-from clif.epoch_auto import build_epoch_report, resolve_voter, run_cycle
+from clif.epoch_auto import (
+    build_epoch_report,
+    make_epoch_end_ts,
+    next_sleep_seconds,
+    resolve_voter,
+    run_cycle,
+)
 from clif.reward_data import get_reward_distribution_data
 from clif.rpc import RpcClient, RpcError
 
@@ -1366,20 +1372,34 @@ def epoch_run(
             s.network, iv, s.uptime_auto_enabled, s.epoch_reward_initial_delay_sec,
             voter, last_done, s.epoch_status_file,
         )
+        # Reward-epoch timing constants (firstRewardEpochStartTs +
+        # rewardEpochDurationSeconds) — read once, then epoch boundaries are pure
+        # math (apgateway's model). Read lazily inside the loop so a startup RPC
+        # blip just retries next cycle instead of crashing.
+        timing: tuple[int, int] | None = None
         try:
             while True:
                 now = time.time()
                 observations = []
                 current = None
+                sleep_s = float(iv)  # fallback when timing/RPC unavailable this cycle
                 try:
                     with RpcClient(s.rpc_url) as rpc, FwdClient(
                         s.fwd_endpoint, s.fwd_caller_token
                     ) as fwd:
+                        if timing is None:
+                            timing = rpc.reward_epoch_timing(s.net.flare_systems_manager)
+                            log.info(
+                                "epoch timing: first_reward_epoch_start_ts=%s reward_epoch_duration_sec=%s",
+                                timing[0], timing[1],
+                            )
+                        epoch_end_ts = make_epoch_end_ts(*timing)
                         last_done, current, observations = run_cycle(
                             s, rpc, fwd, voter, claimers, state, last_done, now,
                             uptime_enabled=s.uptime_auto_enabled,
                             initial_delay=s.epoch_reward_initial_delay_sec,
                             terminal_cooldown=s.epoch_terminal_cooldown_sec,
+                            epoch_end_ts=epoch_end_ts,
                         )
                         for o in observations:
                             acts = "".join(f" [{leg}={st}]" for leg, st, _ in o.actions)
@@ -1387,6 +1407,10 @@ def epoch_run(
                                 "epoch %s phase=%s done=%s: %s%s",
                                 o.epoch, o.phase.value, o.done, o.detail, acts,
                             )
+                        sleep_s = next_sleep_seconds(
+                            observations, current, epoch_end_ts, time.time(),
+                            poll_interval=iv, initial_delay=s.epoch_reward_initial_delay_sec,
+                        )
                 except RpcError as exc:
                     log.warning("epoch rpc failure: %s (retry next cycle)", exc)
                 except FwdRetryableError as exc:
@@ -1399,7 +1423,8 @@ def epoch_run(
                 write_status_atomic(s.epoch_status_file, report)
                 if report["degraded"]:
                     log.error("epoch DEGRADED: %s", "; ".join(report["reasons"]))
-                time.sleep(iv)
+                log.info("epoch sleeping %.0fs", sleep_s)
+                time.sleep(sleep_s)
         except KeyboardInterrupt:
             log.info("epoch stopped")
     finally:

@@ -162,3 +162,10 @@
   read) is a deferred Phase-2 polish. Config: `EPOCH_REWARD_INITIAL_DELAY_SEC` (3600),
   `EPOCH_POLL_INTERVAL_SEC` (1800). Tests in `tests/test_epoch_auto.py`; live Songbird
   end-to-end at the next ended epoch is the standing real-infra gate.*
+  *(0.5.17, apgateway-informed: epoch timing now comes from FlareSystemsManager constants
+  read once — `firstRewardEpochStartTs()` + `rewardEpochDurationSeconds()` →
+  `epoch_end(N) = first + (N+1)·dur` — instead of a per-epoch `getRewardEpochStartInfo(N+1)`.
+  This lets the daemon time the current/next not-yet-closed epoch and sleep precisely:
+  `next_sleep_seconds` wakes at the next reward window when idle, at `wait_until` when
+  too-early, and at `poll_interval` while actively waiting — replacing the flat 30-min poll.
+  Mirrors `ftso/apgateway/apgateway/indexer/epoch_cache.py::get_timing`.)*

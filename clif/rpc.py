@@ -309,25 +309,21 @@ class RpcClient:
         (out,) = self._abi_decode(["bytes32"], self.eth_call(flare_systems_manager, data))
         return "0x" + out.hex()
 
-    def reward_epoch_start_ts(self, flare_systems_manager: str, epoch_id: int) -> int:
-        """getRewardEpochStartInfo(uint24) → (startTs, startBlock); returns startTs.
+    def reward_epoch_timing(self, flare_systems_manager: str) -> tuple[int, int]:
+        """(firstRewardEpochStartTs, rewardEpochDurationSeconds) — both uint64, keyless.
 
-        Epoch N's END timestamp == epoch (N+1)'s START timestamp, so a closed
-        epoch's end is reward_epoch_start_ts(fsm, N + 1). Keyless read.
+        These constants never change, so the caller reads once and derives ANY
+        reward epoch's boundaries by pure math (apgateway's model):
+            epoch_end_ts(N) = first + (N + 1) * duration
+        This works for the current/next (not-yet-closed) epoch too — unlike a
+        per-epoch getRewardEpochStartInfo(N+1) read, which only exists once N+1
+        has started.
         """
-        data = (
-            "0x"
-            + selector("getRewardEpochStartInfo(uint24)").hex()
-            + abi_encode(["uint24"], [epoch_id]).hex()
-        )
-        start_ts, _start_block = self._abi_decode(
-            ["uint64", "uint64"], self.eth_call(flare_systems_manager, data)
-        )
-        return int(start_ts)
-
-    def reward_epoch_end_ts(self, flare_systems_manager: str, epoch_id: int) -> int:
-        """The end timestamp of (closed) reward epoch `epoch_id` = start of epoch+1."""
-        return self.reward_epoch_start_ts(flare_systems_manager, epoch_id + 1)
+        first = "0x" + selector("firstRewardEpochStartTs()").hex()
+        dur = "0x" + selector("rewardEpochDurationSeconds()").hex()
+        (first_ts,) = self._abi_decode(["uint64"], self.eth_call(flare_systems_manager, first))
+        (duration,) = self._abi_decode(["uint64"], self.eth_call(flare_systems_manager, dur))
+        return int(first_ts), int(duration)
 
     def voter_rewards_sign_info(
         self, flare_systems_manager: str, epoch_id: int, voter: str
