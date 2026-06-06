@@ -134,9 +134,9 @@ Envelope `{ "error": str, "message": str }`.
 **There is no `502` from fwd anymore** — fwd does no RPC, so broadcast/RPC
 errors are clif's **own** (raised by `clif/rpc.py`, not by fwd). Rule:
 **400/401/403/404/409/422 → do not retry (escalate); 503/transport-error →
-backoff + retry.** A down fwd MUST degrade `clif auto`, never crash it (clif
-converts transport errors to `FwdRetryableError` via the shared `fwd-client`
-lib, never propagated raw).
+backoff + retry.** A down fwd MUST degrade the clif daemon (`clif epoch run`, or the
+legacy `clif auto`/`clif fsp auto`), never crash it (clif converts transport errors to
+`FwdRetryableError` via the shared `fwd-client` lib, never propagated raw).
 
 ## RewardManager ABI (what fwd decodes)
 

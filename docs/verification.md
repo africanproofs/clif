@@ -10,6 +10,17 @@
 > back (`/v1/transactions/{tx_id}/broadcast-result` → poll
 > `eth_getTransactionReceipt` → `/receipt`). fwd never broadcasts.
 
+> **Epoch daemon (v0.5.16/0.5.17, the canonical `clif epoch run`).** The new
+> epoch-anchored sign→claim state machine reuses the same claim/FSP transport rungs
+> below — its on-chain gates are identical (rung 4 `setClaimExecutors` for claiming;
+> F2 FSP acceptance for signing). What is **proven** for the daemon specifically: its
+> on-chain READS + timing are live-validated on Songbird + Flare — `epoch_end_ts(N)`
+> (derived from `firstRewardEpochStartTs`+`rewardEpochDurationSeconds`) equals the
+> contract's own `currentRewardEpochExpectedEndTs()` exactly, and `voter_*_sign_info` /
+> reward-publication reads decode correctly (cross-checked vs flarestack). What is
+> **pending**: the end-to-end sign→finalize→claim execution at the next ended epoch
+> (same gate as rungs 4 / F2). See `clif/CLAUDE.md` § Automation.
+
 ## Verification ladder
 
 | rung | confirms | status | blocker |
@@ -79,9 +90,9 @@ Per-rung pass criteria:
 - **No `setClaimExecutors` yet** → a perfect clif→fwd→sign still reverts
   on-chain until the offline identity key authorizes the fwd wallet
   (`docs/onchain-migration.md` step 3).
-- **fwd network name** → the `clif-auto` container must share fwd's Docker
-  network (`FWD_NETWORK`, default `fwd_fwd-callers`) or `FWD_ENDPOINT` must be
-  otherwise reachable.
+- **fwd network name** → the `clif-epoch-<net>` container (canonical daemon; or the
+  legacy `clif-auto`) must share fwd's Docker network (`FWD_NETWORK`, default
+  `fwd_fwd-callers`) or `FWD_ENDPOINT` must be otherwise reachable.
 
 ## Local checks (always runnable, no fwd/Docker)
 
@@ -90,7 +101,8 @@ poetry install && poetry run pytest -q && poetry run ruff check .
 clif health    # expects fwd; fails closed when unreachable (correct)
 clif list      # live keyless discovery
 clif spec      # regenerate the operator handshake artifact
-clif status    # exit 3 with no daemon (correct)
+clif epoch status  # canonical daemon health; exit 3 with no daemon (correct)
+clif status        # legacy claim-loop health
 clif rehearse  # rehearsal-ladder fwd-custody proof (needs fwd + caller token)
 ```
 

@@ -55,42 +55,53 @@ on-chain as executor — **operator-gated for production**):
 ```
 clif rehearse                                       # prove the on-chain `from` is your fwd wallet
 clif claim [-t fee|direct] [-e EPOCH] [--no-wait]   # one-shot claim
-clif auto  [--interval SECONDS]                     # resilient daemon
-clif status                                         # scrapable health
+clif epoch run [--interval SEC] [--from-epoch N]    # CANONICAL daemon — per-epoch sign→claim
+clif epoch status                                   # scrapable daemon health
+clif auto [--interval SEC]  ·  clif status          # legacy claim-only loop (superseded by `clif epoch`)
 ```
 
 ## How automation works
 
-A reward epoch becomes claimable when providers' reward-signing weight crosses
-**>50%** — observable on-chain as `FlareSystemsManager.rewardsHash(epoch)`
-flipping non-zero, which clif's keyless discovery detects. `clif auto` polls
-(~15 min default; epochs run ~3.5 days, so this is ample), and when an epoch is
-claimable it builds the `claim` calldata, has fwd sign it, then broadcasts and
-reports back (idempotency-keyed so retries never double-broadcast; stuck txs are
-resubmitted via fwd's replacement path).
+The canonical daemon is **`clif epoch run`** — one epoch-anchored state machine per
+network that walks each reward epoch through its lifecycle, then idles until the next.
+Per reward epoch N, once it closes:
 
-It never exits on error: a transient failure retries next cycle; a **terminal**
-failure (policy denial / on-chain revert / fwd down) enters a cooldown (no
-denial spam) and marks clif **degraded**. Because unclaimed FTSO rewards
-eventually expire, a claimable epoch left unclaimed past `stale_after` (24h
-default) also goes degraded. Degraded state is loud in the logs and exposed by
-`clif status` (non-zero exit; also detects a dead daemon) for the Docker
-healthcheck and monitoring.
+> (optional) sign uptime → wait until `epoch_end + 1h` → poll (~30 min) for reward
+> publication → sign rewards (Merkle-verified) → wait for the **>threshold** finalization
+> (`FlareSystemsManager.rewardsHash(N)` flips non-zero) → **claim only epoch N** → idle.
 
-**A mined tx is not a successful claim.** clif never reports success from a
-`status == 0x1` receipt, a "mined" line, or a balance delta. Proof of a claim
-is the effect of that exact tx — a `RewardClaimed` log with amount > 0.
-`RewardManager.claim` *silently no-ops* on an already-claimed `(owner, epoch)`
-(mined, no event); clif reports that as a distinct `MINED_NOOP` outcome, never
-as success, and pre-flights the `-e` path to refuse already-claimed,
-out-of-range, or not-yet-signed epochs without submitting.
+Epoch timing comes from FlareSystemsManager constants read once (`firstRewardEpochStartTs`
++ `rewardEpochDurationSeconds`), so the daemon computes each epoch's end precisely and
+sleeps until the next window rather than polling blindly. Idempotency is **chain-derived**
+— it reads whether *our* voter already signed (`getVoterRewardsSignInfo`) and whether the
+epoch is finalized/claimed — so a restart safely resumes mid-lifecycle. It signs/claims via
+fwd and broadcasts itself (idempotency-keyed so retries never double-broadcast; stuck txs
+use fwd's replacement path).
 
-Deploy: `docker compose up -d clif-auto` (see `docker-compose.yml` for the fwd
-network note). One-shot: `docker compose run --rm clif claim -t fee`.
-Multichain (Flare ∥ Songbird ∥ Coston2 on one shared fwd): `docker compose
---profile multichain up -d` — one keyless claim + FSP daemon per network, each
-with its own gitignored `.env.<network>` and `CLIF_STATE_DIR`; status files are
-network-scoped. See the `docker-compose.yml` multichain header.
+It never exits on error: a transient failure retries next cycle; a **terminal** failure
+(policy denial / on-chain revert / fwd down) enters a cooldown (no denial spam) and marks
+clif **degraded**. Because unclaimed FTSO rewards eventually expire, an epoch left
+unresolved past `stale_after` (24h default) also goes degraded. Degraded state is loud in
+the logs and exposed by `clif epoch status` (non-zero exit; also detects a dead daemon) for
+the Docker healthcheck and monitoring.
+
+**A mined tx is not a successful claim.** clif never reports success from a `status == 0x1`
+receipt, a "mined" line, or a balance delta. Proof of a claim is the effect of that exact tx
+— a `RewardClaimed` log with amount > 0. `RewardManager.claim` *silently no-ops* on an
+already-claimed `(owner, epoch)` (mined, no event); clif reports that as a distinct
+`MINED_NOOP` outcome, never as success.
+
+**Signing is hard-off by default** — `clif epoch run` refuses to sign and exits 2 unless
+`FSP_AUTO_ENABLED=true` (the uptime phase is additionally gated by `UPTIME_AUTO_ENABLED`,
+default false). The one-shot `clif claim` / `clif fsp uptime|rewards` and the legacy
+claim-only `clif auto` / sign-only `clif fsp auto` loops remain for manual use, but
+`clif epoch run` is the daemon entrypoint.
+
+Deploy: `sudo fwd start <net>` (the fwd install overlay launches the `clif-epoch-<net>`
+service), or directly `docker compose --profile <net> up -d` (multichain) /
+`docker compose up -d clif-epoch` (single). One-shot: `docker compose run --rm clif claim
+-t fee`. Each network reads its own gitignored `.env.<network>` + `CLIF_STATE_DIR`; status
+files are network-scoped. See the `docker-compose.yml` header.
 
 ## Configuration
 
@@ -160,7 +171,7 @@ the wrong data is irreversible on-chain.
 clif fsp uptime   --epoch EPOCH [--no-wait] [--yes/-y] [--retry STR]
 clif fsp rewards  --epoch EPOCH [--no-wait] [--yes/-y] [--retry STR]
 clif fsp status                # scrapable health + current epoch from chain
-clif fsp auto    [--interval SEC] [--from-epoch EPOCH]  # resilient daemon
+clif fsp auto    [--interval SEC] [--from-epoch EPOCH]  # legacy sign-only loop (superseded by `clif epoch run`)
 ```
 
 **Two distinct fwd caller tokens are required.** fwd's policy loader forbids
@@ -174,12 +185,13 @@ span both legs:
   and per-caller-scoped tx poll; operator provisions the `clif-fsp-submit`
   caller in fwd's `permissions` block for `FlareSystemsManager`.
 
-`clif fsp auto` is **hard-disabled by default**. Set `FSP_AUTO_ENABLED=true`
-explicitly to enable the unattended REWARDS auto-signer; without it, `clif fsp
-auto` exits 2.
+Signing is **hard-disabled by default** (D15): the canonical `clif epoch run` (and the
+legacy `clif fsp auto`) refuse to sign and exit 2 unless `FSP_AUTO_ENABLED=true`. The
+uptime phase of `clif epoch run` is additionally gated by `UPTIME_AUTO_ENABLED`
+(default false).
 
-See `docs/fsp-signing-tool-spec.md` and `docs/decisions.md` (D15) for full
-provisioning details.
+See `docs/decisions.md` (D15, D17) and clif `CLAUDE.md` § Automation for full provisioning
+and the epoch-daemon lifecycle.
 
 ## On `SIGNING_POLICY_PRIVATE_KEY`
 

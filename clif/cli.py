@@ -1,13 +1,13 @@
 """clif CLI.
 
-Keyless: `version`, `health`, `list`, `spec`. Claim/automation (plan step 4,
-operator-gated for production — fwd must be provisioned and the new wallet
-authorized on-chain as executor first): `claim` (one-shot), `auto` (resilient
-daemon), `status` (scrapable degraded state). The ">50% reward-signing-weight"
-trigger is the on-chain `rewardsHash` flip that `discovery` already detects.
-
-FSP signing-tool (keyless — fwd signs protocol messages): `fsp uptime`,
-`fsp rewards`, `fsp status`, `fsp auto`.
+Keyless: `version`, `health`, `list`, `spec`. The CANONICAL automation is
+`epoch run` (`epoch status`) — one epoch-anchored sign→claim state machine per
+network (operator-gated: fwd provisioned + the wallet authorized on-chain as
+executor + `FSP_AUTO_ENABLED=true`). Per reward epoch: optional uptime sign →
+wait → reward-publication poll → sign rewards → wait for the >threshold
+`rewardsHash` finalization → claim that epoch → idle. One-shots + legacy loops:
+`claim`, `rehearse`, `auto`/`status` (claim-only), `fsp uptime|rewards|status`,
+`fsp auto` (sign-only) — superseded as the daemon by `epoch run`.
 """
 
 from __future__ import annotations
@@ -71,8 +71,8 @@ app = typer.Typer(
     add_completion=False,
     help=(
         "Keyless FTSO reward claimer + FSP signing-tool — signs via the fwd daemon. "
-        "Claim commands: claim, auto, status. FSP commands: fsp uptime, fsp rewards, "
-        "fsp status, fsp auto."
+        "Canonical daemon: epoch run / epoch status (per-epoch sign→claim). "
+        "One-shots + legacy: claim, rehearse, auto, status, fsp uptime|rewards|status|auto."
     ),
 )
 
