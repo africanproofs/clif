@@ -100,7 +100,7 @@ def _env_file_offenders(env_file: str | os.PathLike[str] | None) -> list[str]:
             continue
         name = s.split("=", 1)[0].strip()
         if name.startswith("export "):
-            name = name[len("export "):].strip()
+            name = name[len("export ") :].strip()
         if "PRIVATE_KEY" in name.upper():
             offenders.append(name)
     return offenders
@@ -178,7 +178,7 @@ class Settings(BaseSettings):
     # fsp_permissions) OR /v1/sign-and-send (Leg-2, permissions) — never both.
     # tx poll /v1/transactions/{id} is per-caller-scoped → it MUST use the
     # Leg-2 (submit) caller.
-    fsp_sign_caller_token: str | None = None   # Leg-1: /v1/sign-fsp-message (fsp_permissions)
+    fsp_sign_caller_token: str | None = None  # Leg-1: /v1/sign-fsp-message (fsp_permissions)
     fsp_submit_caller_token: str | None = None  # Leg-2 + tx poll: /v1/sign-and-send (permissions)
     fsp_auto_enabled: bool = False
     fsp_signing_wallet_name: str | None = None

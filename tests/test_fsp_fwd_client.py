@@ -30,6 +30,7 @@ def _client(handler) -> FwdClient:
 
 # ---- cross-field validation fires BEFORE any HTTP ----
 
+
 def test_uptime_rejects_chain_id():
     with _client(lambda _: httpx.Response(200, json=FAKE_RESPONSE)) as fwd:
         with pytest.raises(ValueError, match="all be None"):
@@ -57,15 +58,20 @@ def test_reward_distribution_requires_all_three():
 def test_reward_distribution_requires_rewards_hash_present():
     with _client(lambda _: httpx.Response(200, json=FAKE_RESPONSE)) as fwd:
         with pytest.raises(ValueError, match="all required"):
-            fwd.sign_fsp_message("w", "REWARD_DISTRIBUTION", 3, chain_id=114, no_of_weight_based_claims=56)
+            fwd.sign_fsp_message(
+                "w", "REWARD_DISTRIBUTION", 3, chain_id=114, no_of_weight_based_claims=56
+            )
 
 
 def test_reward_distribution_bad_rewards_hash_format():
     with _client(lambda _: httpx.Response(200, json=FAKE_RESPONSE)) as fwd:
         with pytest.raises(ValueError, match="rewards_hash must match"):
             fwd.sign_fsp_message(
-                "w", "REWARD_DISTRIBUTION", 3,
-                chain_id=114, no_of_weight_based_claims=56,
+                "w",
+                "REWARD_DISTRIBUTION",
+                3,
+                chain_id=114,
+                no_of_weight_based_claims=56,
                 rewards_hash="not-a-hash",
             )
 
@@ -92,10 +98,12 @@ def test_cross_field_check_fires_before_http():
 
 # ---- happy-path: UPTIME ----
 
+
 def test_sign_fsp_uptime_success():
     def h(req: httpx.Request) -> httpx.Response:
         body = req.content
         import json
+
         payload = json.loads(body)
         assert payload["message_type"] == "UPTIME"
         assert payload["reward_epoch_id"] == 0
@@ -117,9 +125,11 @@ def test_sign_fsp_uptime_success():
 
 # ---- happy-path: REWARD_DISTRIBUTION ----
 
+
 def test_sign_fsp_rewards_success():
     def h(req: httpx.Request) -> httpx.Response:
         import json
+
         payload = json.loads(req.content)
         assert payload["message_type"] == "REWARD_DISTRIBUTION"
         assert payload["chain_id"] == 114
@@ -131,14 +141,18 @@ def test_sign_fsp_rewards_success():
 
     with _client(h) as fwd:
         r = fwd.sign_fsp_message(
-            "signing-wallet", "REWARD_DISTRIBUTION", 3,
-            chain_id=114, no_of_weight_based_claims=56,
+            "signing-wallet",
+            "REWARD_DISTRIBUTION",
+            3,
+            chain_id=114,
+            no_of_weight_based_claims=56,
             rewards_hash=REWARDS_HASH,
         )
     assert r.v == 27
 
 
 # ---- idempotency key header ----
+
 
 def test_idempotency_key_header_sent():
     def h(req: httpx.Request) -> httpx.Response:
@@ -160,11 +174,15 @@ def test_no_idempotency_key_no_header():
 
 # ---- error status mapping ----
 
-@pytest.mark.parametrize("code,err_code", [
-    (403, "policy_denied"),
-    (404, "wallet_not_found"),
-    (422, "transaction_rejected"),
-])
+
+@pytest.mark.parametrize(
+    "code,err_code",
+    [
+        (403, "policy_denied"),
+        (404, "wallet_not_found"),
+        (422, "transaction_rejected"),
+    ],
+)
 def test_terminal_statuses_fsp(code, err_code):
     def h(_req):
         return httpx.Response(code, json={"error": err_code, "message": "no"})
@@ -175,10 +193,13 @@ def test_terminal_statuses_fsp(code, err_code):
     assert ei.value.status == code
 
 
-@pytest.mark.parametrize("code,err_code", [
-    # fwd v1.1.0a9+: 502 is GONE (fwd no longer does RPC); only 503 is retryable.
-    (503, "vault_unavailable"),
-])
+@pytest.mark.parametrize(
+    "code,err_code",
+    [
+        # fwd v1.1.0a9+: 502 is GONE (fwd no longer does RPC); only 503 is retryable.
+        (503, "vault_unavailable"),
+    ],
+)
 def test_retryable_statuses_fsp(code, err_code):
     def h(_req):
         return httpx.Response(code, json={"error": err_code, "message": "down"})
@@ -191,6 +212,7 @@ def test_retryable_statuses_fsp(code, err_code):
 def test_502_is_now_terminal_for_sign_fsp_message():
     """502 is GONE in fwd v1.1.0a9+ (fwd no longer does RPC). Falls through
     to the terminal catch-all in _raise_for_error."""
+
     def h(_req):
         return httpx.Response(502, json={"error": "old_rpc_unreachable", "message": "gone"})
 
@@ -212,6 +234,7 @@ def test_transport_error_is_retryable_fsp():
 
 
 # ---- make_fsp_idempotency_key ----
+
 
 def test_fsp_idempotency_key_deterministic():
     a = make_fsp_idempotency_key("flare", "UPTIME", 42, "sign")

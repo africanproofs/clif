@@ -43,9 +43,7 @@ def _claims(*epochs):
     return [
         RewardClaimWithProof(
             merkle_proof=["0x" + "ab" * 32],
-            body=RewardClaimBody(
-                reward_epoch_id=e, beneficiary=BENEF, amount=1, claim_type=1
-            ),
+            body=RewardClaimBody(reward_epoch_id=e, beneficiary=BENEF, amount=1, claim_type=1),
         )
         for e in epochs
     ]
@@ -56,7 +54,8 @@ class FakeFwd:
 
     def __init__(
         self,
-        sign=None, sign_exc=None,
+        sign=None,
+        sign_exc=None,
         broadcast_result_exc=None,
         receipt_exc=None,
     ):
@@ -168,6 +167,7 @@ def _reverted_receipt() -> dict:
 
 # ---- config guards (terminal before any HTTP) ----
 
+
 def test_missing_fwd_config_is_terminal():
     s = _settings(fwd_wallet_name=None)
     o = submit_claims(s, FakeFwd(), 1, BENEF, _claims(10))
@@ -188,12 +188,11 @@ def test_no_claims_is_nothing_claimable():
 
 # ---- happy path: sign → broadcast → receipt → mined ----
 
+
 def test_happy_mined_and_idempotency_key_passed():
     s = _settings()
     fwd = FakeFwd(
-        sign=SignTransactionResponse(
-            tx_id="tx-1", hash="0xfwd", signed_raw_tx=SIGNED_RAW, nonce=4
-        ),
+        sign=SignTransactionResponse(tx_id="tx-1", hash="0xfwd", signed_raw_tx=SIGNED_RAW, nonce=4),
     )
     rpc = FakeRpc(
         receipt_log_addr=s.net.reward_manager,
@@ -206,9 +205,7 @@ def test_happy_mined_and_idempotency_key_passed():
     # hash is the broadcast_hash (from rpc.send_raw_transaction), not fwd's hash
     assert o.tx_hash == "0x" + "aa" * 32
     # deterministic idempotency key bound to the last epoch
-    assert fwd.signed_kwargs["idempotency_key"] == make_idempotency_key(
-        "coston2", 1, BENEF, 11
-    )
+    assert fwd.signed_kwargs["idempotency_key"] == make_idempotency_key("coston2", 1, BENEF, 11)
     assert fwd.signed_kwargs["wallet"] == "claim-wallet"
     assert fwd.signed_kwargs["value_wei"] == "0"
     # fwd was notified of broadcast + receipt
@@ -256,15 +253,14 @@ def test_sign_retryable_is_failed_retryable():
 
 def test_sign_409_nonce_not_initialized_is_terminal():
     """409 nonce_not_initialized must surface as FAILED_TERMINAL with the right detail."""
-    fwd = FakeFwd(
-        sign_exc=FwdTerminalError(409, "nonce_not_initialized", "run clifwd nonce-init")
-    )
+    fwd = FakeFwd(sign_exc=FwdTerminalError(409, "nonce_not_initialized", "run clifwd nonce-init"))
     o = submit_claims(_settings(), fwd, 1, BENEF, _claims(10))
     assert o.status == OutcomeStatus.FAILED_TERMINAL
     assert "nonce_not_initialized" in o.detail or "fwd denied" in o.detail
 
 
 # ---- broadcast rejection paths ----
+
 
 def test_broadcast_rejected_insufficient_funds_is_terminal():
     """Deterministic node rejection → rejected_releaseable → FAILED_TERMINAL."""
@@ -299,6 +295,7 @@ def test_broadcast_rejected_nonce_too_low_is_retryable():
 
 # ---- receipt polling ----
 
+
 def test_receipt_poll_timeout_is_pending():
     """Receipt poll timeout (poll_receipt returns None) → SUBMITTED_PENDING."""
     fwd = FakeFwd(
@@ -325,6 +322,7 @@ def test_mined_reverted_is_terminal():
 
 # ---- run_claim paths ----
 
+
 def test_run_claim_discovery_rpc_error_is_retryable(monkeypatch):
     def boom(*_a, **_k):
         raise RpcError("rpc down")
@@ -335,9 +333,7 @@ def test_run_claim_discovery_rpc_error_is_retryable(monkeypatch):
 
 
 def test_run_claim_delegates_to_submit(monkeypatch):
-    monkeypatch.setattr(
-        claimer_mod, "collect_reward_claims", lambda *_a, **_k: _claims(7)
-    )
+    monkeypatch.setattr(claimer_mod, "collect_reward_claims", lambda *_a, **_k: _claims(7))
     s = _settings()
     fwd = FakeFwd(
         sign=SignTransactionResponse(tx_id="t", hash="0xh", signed_raw_tx=SIGNED_RAW, nonce=0),
@@ -352,6 +348,7 @@ def test_run_claim_delegates_to_submit(monkeypatch):
 
 # ---- STOP-SHIP #2: production idempotency retry discriminator ----
 
+
 def test_default_idempotency_key_is_legacy_no_regression():
     """No retry set anywhere ⇒ byte-identical to the legacy key, so a
     same-attempt network retry / crash-rerun still dedups at fwd."""
@@ -360,9 +357,7 @@ def test_default_idempotency_key_is_legacy_no_regression():
     )
     rpc = FakeRpc()
     submit_claims(_settings(), fwd, 1, BENEF, _claims(10), wait=False, rpc=rpc)
-    assert fwd.signed_kwargs["idempotency_key"] == make_idempotency_key(
-        "coston2", 1, BENEF, 10
-    )
+    assert fwd.signed_kwargs["idempotency_key"] == make_idempotency_key("coston2", 1, BENEF, 10)
 
 
 def test_explicit_retry_param_overrides_settings_for_deliberate_reattempt():
@@ -375,9 +370,7 @@ def test_explicit_retry_param_overrides_settings_for_deliberate_reattempt():
     assert fwd.signed_kwargs["idempotency_key"] == make_idempotency_key(
         "coston2", 1, BENEF, 10, retry="cli-2"
     )
-    assert fwd.signed_kwargs["idempotency_key"] != make_idempotency_key(
-        "coston2", 1, BENEF, 10
-    )
+    assert fwd.signed_kwargs["idempotency_key"] != make_idempotency_key("coston2", 1, BENEF, 10)
 
 
 def test_auto_uses_settings_idempotency_retry_when_no_explicit():
@@ -397,10 +390,12 @@ def test_auto_uses_settings_idempotency_retry_when_no_explicit():
 
 # ---- STOP-SHIP #3: a down fwd must NOT crash `clif auto` ----
 
+
 def test_down_fwd_yields_retryable_not_raise():
     """Real FwdClient whose transport is down: submit_claims must RETURN a
     FAILED_RETRYABLE outcome (so the `auto` loop records degraded and keeps
     running), never propagate a raw httpx error that terminates the daemon."""
+
     def boom(req):
         raise httpx.ConnectError("fwd down", request=req)
 
@@ -412,6 +407,7 @@ def test_down_fwd_yields_retryable_not_raise():
 
 
 # ---- MINED_NOOP: effect verification (RewardClaimed event check) ----
+
 
 def test_run_claim_e_already_claimed_is_clear_nothing_claimable():
     """`clif claim -e <claimed epoch>` must NOT submit a no-op; it reports
@@ -439,6 +435,7 @@ def test_run_claim_e_out_of_range_is_clear():
 
 
 # ---- empty auto-discovery path must classify WHY (not bare nothing-claimable) ----
+
 
 def test_run_claim_no_epoch_already_claimed_reports_frontier():
     """`clif claim` (no -e) on a caught-up owner reports the per-epoch reason
@@ -509,6 +506,7 @@ def test_submit_claims_real_claim_has_reward_event():
 
 
 # ---- report-back: fwd notification is best-effort (non-fatal failures) ----
+
 
 def test_broadcast_report_failure_is_nonfatal():
     """If report_broadcast_result raises, clif continues (warning, not crash)."""

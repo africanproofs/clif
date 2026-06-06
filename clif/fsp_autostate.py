@@ -10,7 +10,14 @@ from __future__ import annotations
 
 import time
 
-from clif.autostate import AutoState, _DEAD_INTERVALS, EXIT_DEGRADED, EXIT_HEALTHY, EXIT_NO_STATE, _ts_iso
+from clif.autostate import (
+    AutoState,
+    _DEAD_INTERVALS,
+    EXIT_DEGRADED,
+    EXIT_HEALTHY,
+    EXIT_NO_STATE,
+    _ts_iso,
+)
 
 
 def fsp_stream_key(network: str, message_type: str) -> str:

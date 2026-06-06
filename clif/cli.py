@@ -57,9 +57,7 @@ from clif.fsp_autostate import (
 from clif.reward_data import get_reward_distribution_data
 from clif.rpc import RpcClient, RpcError
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s %(levelname)s clif %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s clif %(message)s")
 log = logging.getLogger("clif")
 
 app = typer.Typer(
@@ -151,8 +149,7 @@ def list_claimable(
     with RpcClient(s.rpc_url) as rpc:
         for claim_type, beneficiary in claimers:
             console.print(
-                f"\n[bold]{claim_type.name}[/] beneficiary={beneficiary} "
-                f"network={s.network}"
+                f"\n[bold]{claim_type.name}[/] beneficiary={beneficiary} " f"network={s.network}"
             )
             claims = collect_reward_claims(rpc, s, beneficiary, int(claim_type))
             if not claims:
@@ -171,16 +168,13 @@ def list_claimable(
             for c in claims:
                 ether = c.body.amount / 1e18
                 console.print(
-                    f"  ✨ epoch {c.body.reward_epoch_id}: "
-                    f"{c.body.amount} wei (~{ether:.6f})"
+                    f"  ✨ epoch {c.body.reward_epoch_id}: " f"{c.body.amount} wei (~{ether:.6f})"
                 )
 
 
 @app.command()
 def spec(
-    out: Annotated[
-        Path, typer.Option(help="Output path")
-    ] = Path("docs/fwd-integration-spec.md"),
+    out: Annotated[Path, typer.Option(help="Output path")] = Path("docs/fwd-integration-spec.md"),
 ) -> None:
     """Emit Deliverable 2 — the fwd integration spec, from REAL captured bytes.
 
@@ -206,9 +200,7 @@ def spec(
         try:
             with RpcClient(s.rpc_url) as rpc:
                 for claim_type, beneficiary in claimers:
-                    claims = collect_reward_claims(
-                        rpc, s, beneficiary, int(claim_type)
-                    )
+                    claims = collect_reward_claims(rpc, s, beneficiary, int(claim_type))
                     if not claims:
                         pending.append(
                             f"{claim_type.name}: no claimable rewards for "
@@ -237,16 +229,11 @@ def spec(
             pending.append(f"Live capture failed ({exc}); re-run against a reachable RPC.")
 
     rows = "\n".join(
-        f"| {n.name} | {n.chain_id} | `{n.reward_manager}` | "
-        f"`{n.flare_systems_manager}` |"
+        f"| {n.name} | {n.chain_id} | `{n.reward_manager}` | " f"`{n.flare_systems_manager}` |"
         for n in _NETWORKS.values()
     )
-    samples_md = "\n".join(samples) if samples else (
-        "_No real sample captured in this run._"
-    )
-    pending_md = (
-        "\n".join(f"- {p}" for p in pending) if pending else "- None."
-    )
+    samples_md = "\n".join(samples) if samples else ("_No real sample captured in this run._")
+    pending_md = "\n".join(f"- {p}" for p in pending) if pending else "- None."
 
     doc = f"""# fwd integration spec — clif (Phase 8b, Deliverable 2)
 
@@ -352,8 +339,7 @@ def _exit_for(status: OutcomeStatus) -> int:
 
 def _print_outcome(o: ClaimOutcome) -> None:
     line = (
-        f"{o.claim_type_name} {o.beneficiary} epochs={o.epochs} "
-        f"→ {o.status.value} ({o.detail})"
+        f"{o.claim_type_name} {o.beneficiary} epochs={o.epochs} " f"→ {o.status.value} ({o.detail})"
     )
     if o.tx_hash:
         line += f" tx={o.tx_hash}"
@@ -369,12 +355,30 @@ def _print_outcome(o: ClaimOutcome) -> None:
 
 @app.command()
 def preflight(
-    identity: Annotated[str, typer.Option("--identity", "-i", help="Provider identity / reward owner address")],
-    recipient: Annotated[Optional[str], typer.Option("--recipient", "-r", help="Intended claim recipient")] = None,
-    signing_policy: Annotated[Optional[str], typer.Option("--signing-policy", help="Registered FSP signing-policy address")] = None,
+    identity: Annotated[
+        str, typer.Option("--identity", "-i", help="Provider identity / reward owner address")
+    ],
+    recipient: Annotated[
+        Optional[str], typer.Option("--recipient", "-r", help="Intended claim recipient")
+    ] = None,
+    signing_policy: Annotated[
+        Optional[str],
+        typer.Option("--signing-policy", help="Registered FSP signing-policy address"),
+    ] = None,
     network: Annotated[Optional[str], typer.Option(help="Override NETWORK env")] = None,
-    json_output: Annotated[bool, typer.Option("--json", help="Machine-readable JSON output (exits 0 on RPC error with empty arrays)")] = False,
-    fast_updates_address: Annotated[Optional[list[str]], typer.Option("--fast-updates-address", help="Fast Updates gas wallet (repeatable; not on-chain registered)")] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json", help="Machine-readable JSON output (exits 0 on RPC error with empty arrays)"
+        ),
+    ] = False,
+    fast_updates_address: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--fast-updates-address",
+            help="Fast Updates gas wallet (repeatable; not on-chain registered)",
+        ),
+    ] = None,
 ) -> None:
     """On-chain pre-flight: registered identity + executor/recipient state (keyless)."""
     import os
@@ -383,7 +387,9 @@ def preflight(
     _addrs_to_check = ([identity] if identity else []) + list(fast_updates_address or [])
     for _addr in _addrs_to_check:
         if not _HEX_ADDR_RE.match(_addr):
-            typer.echo(f"error: invalid address format: {_addr!r} (expected 0x + 40 hex chars)", err=True)
+            typer.echo(
+                f"error: invalid address format: {_addr!r} (expected 0x + 40 hex chars)", err=True
+            )
             raise typer.Exit(1)
 
     net = network or os.environ.get("NETWORK") or "flare"
@@ -409,21 +415,36 @@ def preflight(
                 )
                 delegation_addr = rpc.get_delegation_address(netcfg.entity_manager, identity)
                 node_ids = rpc.get_node_ids(netcfg.entity_manager, identity)
-                for addr in [identity, delegation_addr, submit_addr, submit_sig_addr, signing_policy_addr]:
+                for addr in [
+                    identity,
+                    delegation_addr,
+                    submit_addr,
+                    submit_sig_addr,
+                    signing_policy_addr,
+                ]:
                     if addr:
                         balances[addr.lower()] = rpc.get_balance(addr)
                 for addr in fu_addrs:
                     balances[addr.lower()] = rpc.get_balance(addr)
             if netcfg.claim_setup_manager:
                 executors = rpc.claim_executors(netcfg.claim_setup_manager, identity)
-                recipients_on_chain = rpc.allowed_claim_recipients(netcfg.claim_setup_manager, identity)
+                recipients_on_chain = rpc.allowed_claim_recipients(
+                    netcfg.claim_setup_manager, identity
+                )
     except RpcError as exc:
         if json_output:
-            print(json.dumps({
-                "network": net, "chain_id": netcfg.chain_id, "identity": identity,
-                "executors": [], "allowed_recipients": [],
-                "fast_updates_addresses": fu_addrs,
-            }))
+            print(
+                json.dumps(
+                    {
+                        "network": net,
+                        "chain_id": netcfg.chain_id,
+                        "identity": identity,
+                        "executors": [],
+                        "allowed_recipients": [],
+                        "fast_updates_addresses": fu_addrs,
+                    }
+                )
+            )
             return
         err.print(f"[bold red]  RPC error: {exc}[/]")
         raise typer.Exit(1)
@@ -459,9 +480,13 @@ def preflight(
         if submit_addr:
             console.print(f"  {'Submit (SA):':<22} {submit_addr}   {_bal(submit_addr)}")
         if submit_sig_addr:
-            console.print(f"  {'Submit Sigs (SSA):':<22} {submit_sig_addr}   {_bal(submit_sig_addr)}")
+            console.print(
+                f"  {'Submit Sigs (SSA):':<22} {submit_sig_addr}   {_bal(submit_sig_addr)}"
+            )
         if signing_policy_addr:
-            console.print(f"  {'Signing Policy (SPA):':<22} {signing_policy_addr}   {_bal(signing_policy_addr)}")
+            console.print(
+                f"  {'Signing Policy (SPA):':<22} {signing_policy_addr}   {_bal(signing_policy_addr)}"
+            )
         for i, addr in enumerate(fu_addrs, 1):
             label = f"Fast Updates ({i}):"
             console.print(f"  {label:<22} {addr}   {_bal(addr)}")
@@ -475,14 +500,18 @@ def preflight(
             console.print(f"  FSP signer: {signing_policy}")
 
     if not netcfg.claim_setup_manager:
-        console.print(f"\n[yellow]  claim setup manager address unknown for {net} — skipping executor/recipient checks[/]")
+        console.print(
+            f"\n[yellow]  claim setup manager address unknown for {net} — skipping executor/recipient checks[/]"
+        )
     else:
         console.print(f"\n[bold]Claim Setup[/] (ClaimSetupManager {netcfg.claim_setup_manager})")
         if executors:
             for ex in executors:
                 console.print(f"  executor  : {ex} [dim](authorized)[/]")
         else:
-            console.print("  executor  : [yellow]none set — run ClaimSetupManager.setClaimExecutors([new_wallet]) after onboarding[/]")
+            console.print(
+                "  executor  : [yellow]none set — run ClaimSetupManager.setClaimExecutors([new_wallet]) after onboarding[/]"
+            )
 
         if recipients_on_chain:
             for rc in recipients_on_chain:
@@ -490,20 +519,28 @@ def preflight(
                 tag = " [bold green]✓ matches --recipient[/]" if match else ""
                 console.print(f"  recipient : {rc}{tag}")
             if recipient and recipient.lower() not in [r.lower() for r in recipients_on_chain]:
-                console.print(f"  [yellow]WARNING: {recipient} is NOT in the allowed recipients list — run setAllowedClaimRecipients after onboarding[/]")
+                console.print(
+                    f"  [yellow]WARNING: {recipient} is NOT in the allowed recipients list — run setAllowedClaimRecipients after onboarding[/]"
+                )
         else:
-            console.print("  recipients: [yellow]none set — run ClaimSetupManager.setAllowedClaimRecipients([recipient]) after onboarding[/]")
+            console.print(
+                "  recipients: [yellow]none set — run ClaimSetupManager.setAllowedClaimRecipients([recipient]) after onboarding[/]"
+            )
             if recipient:
-                console.print(f"  [yellow]  → {recipient} will not be able to receive claims until added[/]")
+                console.print(
+                    f"  [yellow]  → {recipient} will not be able to receive claims until added[/]"
+                )
 
     effective_spa = signing_policy_addr or signing_policy
     if effective_spa:
-        console.print(f"\n[bold]FSP Signing[/]")
+        console.print("\n[bold]FSP Signing[/]")
         console.print(f"  key       : {effective_spa}")
-        console.print(f"  [dim]use `clif fsp status` to verify voter registration and recent signing activity[/]")
+        console.print(
+            "  [dim]use `clif fsp status` to verify voter registration and recent signing activity[/]"
+        )
 
-    console.print(f"\n[bold]Gas Wallets[/]")
-    console.print(f"  [dim]wallet balances available after onboarding via `clifwd wallets list`[/]")
+    console.print("\n[bold]Gas Wallets[/]")
+    console.print("  [dim]wallet balances available after onboarding via `clifwd wallets list`[/]")
     console.print()
 
 
@@ -538,7 +575,8 @@ def claim(
     if retry:
         log.info(
             "claim: DELIBERATE retry discriminator=%r (fresh idempotency key — "
-            "operator-intended post-failure re-attempt)", retry,
+            "operator-intended post-failure re-attempt)",
+            retry,
         )
     recipient = s.claim_recipient_address or "[CLAIM_RECIPIENT_ADDRESS not set]"
     native = "SGB" if str(s.network).lower() == "songbird" else "FLR"
@@ -560,9 +598,7 @@ def claim(
             console.print(f"  beneficiary : {benef}")
             console.print(f"  recipient   : [bold green]{recipient}[/]")
             console.print(f"  epochs      : {epochs_list}")
-            console.print(
-                f"  amount      : {total_wei} wei (~{total_wei / 1e18:.6f} {native})"
-            )
+            console.print(f"  amount      : {total_wei} wei (~{total_wei / 1e18:.6f} {native})")
             console.print(f"  wrap        : {s.wrap_rewards}")
             console.print(f"  network     : {s.network}")
             if not yes:
@@ -573,8 +609,14 @@ def claim(
         with FwdClient(s.fwd_endpoint, s.fwd_caller_token) as fwd:
             for ct, benef in confirmed_pairs:
                 o = run_claim(
-                    s, rpc, fwd, int(ct), benef,
-                    only_epoch=epoch, wait=not no_wait, retry=retry,
+                    s,
+                    rpc,
+                    fwd,
+                    int(ct),
+                    benef,
+                    only_epoch=epoch,
+                    wait=not no_wait,
+                    retry=retry,
                 )
                 _print_outcome(o)
                 worst = max(worst, _exit_for(o.status))
@@ -583,12 +625,8 @@ def claim(
 
 @app.command()
 def rehearse(
-    gas: Annotated[
-        int, typer.Option(help="explicit gas limit (clif estimates if 0)")
-    ] = 500_000,
-    no_wait: Annotated[
-        bool, typer.Option("--no-wait", help="don't poll to mined")
-    ] = False,
+    gas: Annotated[int, typer.Option(help="explicit gas limit (clif estimates if 0)")] = 500_000,
+    no_wait: Annotated[bool, typer.Option("--no-wait", help="don't poll to mined")] = False,
     idem_tag: Annotated[
         Optional[str],
         typer.Option(
@@ -632,12 +670,13 @@ def rehearse(
     reward_owner = recipient  # not policy-gated; a self-shaped rehearsal claim
     log.info(
         "rehearse network=%s to=%s recipient=%s gas=%s",
-        s.network, s.net.reward_manager, recipient, gas,
+        s.network,
+        s.net.reward_manager,
+        recipient,
+        gas,
     )
 
-    with RpcClient(s.rpc_url) as rpc, FwdClient(
-        s.fwd_endpoint, s.fwd_caller_token
-    ) as fwd:
+    with RpcClient(s.rpc_url) as rpc, FwdClient(s.fwd_endpoint, s.fwd_caller_token) as fwd:
         try:
             h = fwd.health()
         except Exception as exc:  # noqa: BLE001 — surface any transport failure
@@ -651,14 +690,13 @@ def rehearse(
         claims: list = []
         if s.identity_address:
             try:
-                claims = collect_reward_claims(
-                    rpc, s, s.identity_address, int(ClaimType.FEE)
-                )
+                claims = collect_reward_claims(rpc, s, s.identity_address, int(ClaimType.FEE))
             except RpcError as exc:
                 log.warning("discovery rpc failure (rehearse uses empty proofs): %s", exc)
         log.info(
             "discovery FEE owner=%s claims=%d",
-            s.identity_address or "<unset>", len(claims),
+            s.identity_address or "<unset>",
+            len(claims),
         )
 
         epoch_src = "reward_epoch_id_range.end"
@@ -668,9 +706,7 @@ def rehearse(
             log.warning("reward_epoch_id_range failed (%s); falling back", exc1)
             epoch_src = "next_claimable_reward_epoch_id"
             try:
-                epoch = rpc.next_claimable_reward_epoch_id(
-                    s.net.reward_manager, reward_owner
-                )
+                epoch = rpc.next_claimable_reward_epoch_id(s.net.reward_manager, reward_owner)
             except RpcError as exc2:
                 err.print(
                     f"[bold red]no real epoch id readable from chain ({exc2}); "
@@ -682,14 +718,15 @@ def rehearse(
             epoch_src = "discovery.last"
         log.info("epoch=%s source=%s", epoch, epoch_src)
 
-        data = build_claim_calldata(
-            reward_owner, recipient, epoch, s.wrap_rewards, claims
-        )
+        data = build_claim_calldata(reward_owner, recipient, epoch, s.wrap_rewards, claims)
         nbytes = (len(data) - 2) // 2
         console.print(f"[bold]calldata[/] ({nbytes} bytes): {data}")
         log.info(
             "built claim calldata selector=0x%s len=%dB epoch=%s proofs=%d",
-            CLAIM_SELECTOR.hex(), nbytes, epoch, len(claims),
+            CLAIM_SELECTOR.hex(),
+            nbytes,
+            epoch,
+            len(claims),
         )
 
         # Production determinism (D10) is preserved: the base key is the exact
@@ -698,10 +735,7 @@ def rehearse(
         # fwd cannot replay a stale prior outcome (e.g. a pre-fix failed tx)
         # when the epoch has not rolled. Never applied to the money path.
         tag = idem_tag or str(int(time.time()))
-        idem = (
-            make_idempotency_key(s.network, int(ClaimType.FEE), reward_owner, epoch)
-            + f"-r{tag}"
-        )
+        idem = make_idempotency_key(s.network, int(ClaimType.FEE), reward_owner, epoch) + f"-r{tag}"
         log.info("rehearse idempotency-key=%s (tag=%s)", idem, tag)
 
         # Estimate EIP-1559 fees for sign-transaction request.
@@ -724,21 +758,20 @@ def rehearse(
                 idempotency_key=idem,
             )
         except FwdTerminalError as exc:
-            err.print(
-                f"[bold red]fwd TERMINAL (no broadcast): {exc} — escalate to operator[/]"
-            )
+            err.print(f"[bold red]fwd TERMINAL (no broadcast): {exc} — escalate to operator[/]")
             raise typer.Exit(2) from exc
         except FwdRetryableError as exc:
             err.print(f"[yellow]fwd retryable: {exc} (retry later)[/]")
             raise typer.Exit(1) from exc
 
         console.print(
-            f"[bold green]fwd signed[/] tx_id={resp.tx_id} hash={resp.hash} "
-            f"nonce={resp.nonce}"
+            f"[bold green]fwd signed[/] tx_id={resp.tx_id} hash={resp.hash} " f"nonce={resp.nonce}"
         )
         log.info(
             "fwd sign-transaction OK tx_id=%s hash=%s nonce=%s",
-            resp.tx_id, resp.hash, resp.nonce,
+            resp.tx_id,
+            resp.hash,
+            resp.nonce,
         )
 
         # Broadcast the signed tx.
@@ -747,6 +780,7 @@ def rehearse(
         except Exception as exc:  # noqa: BLE001 — node rejection or transport error
             from clif.claimer import _classify_broadcast_error
             from clif.rpc import RpcError as _RpcError
+
             if isinstance(exc, _RpcError):
                 fwd_outcome, err_class = _classify_broadcast_error(exc)
                 try:
@@ -770,9 +804,7 @@ def rehearse(
 
         receipt_poll = rpc.poll_receipt(broadcast_hash, timeout=600.0)
         if receipt_poll is None:
-            err.print(
-                f"[yellow]submitted; receipt poll timed out (tx_id={resp.tx_id})[/]"
-            )
+            err.print(f"[yellow]submitted; receipt poll timed out (tx_id={resp.tx_id})[/]")
             raise typer.Exit(1)
 
         block_number = int(str(receipt_poll.get("blockNumber", "0x0")), 16)
@@ -789,21 +821,19 @@ def rehearse(
         block = receipt_poll.get("blockNumber") or onchain.get("blockNumber")
         console.print("[bold]── Coston2 fwd-custody proof ──[/]")
         console.print(
-            f"  fwd     : tx_id={resp.tx_id} hash={broadcast_hash} "
-            f"nonce={resp.nonce}"
+            f"  fwd     : tx_id={resp.tx_id} hash={broadcast_hash} " f"nonce={resp.nonce}"
         )
+        console.print(f"  chain   : block={block} receipt.status={rstatus} from={ofrom}")
         console.print(
-            f"  chain   : block={block} receipt.status={rstatus} from={ofrom}"
-        )
-        console.print(
-            f"  to      : {s.net.reward_manager} (RewardManager, chain="
-            f"{s.net.chain_id})"
+            f"  to      : {s.net.reward_manager} (RewardManager, chain=" f"{s.net.chain_id})"
         )
         console.print(f"  recipient (pinned arg) : {recipient}")
         console.print(f"  calldata: {data}")
         log.info(
             "custody proof from=%s block=%s receipt.status=%s",
-            ofrom, block, rstatus,
+            ofrom,
+            block,
+            rstatus,
         )
 
         # The rehearsal custody proof = the tx is ON-CHAIN (in a block) with a
@@ -853,17 +883,17 @@ def auto(
     iv = interval or s.poll_interval_sec
     state = AutoState()
     log.info(
-        "auto start network=%s interval=%ss streams=%d state=%s "
-        "idempotency-retry=%s",
-        s.network, iv, len(pairs), s.status_file,
+        "auto start network=%s interval=%ss streams=%d state=%s " "idempotency-retry=%s",
+        s.network,
+        iv,
+        len(pairs),
+        s.status_file,
         s.idempotency_retry or "<none>",
     )
     try:
         while True:
             now = time.time()
-            with RpcClient(s.rpc_url) as rpc, FwdClient(
-                s.fwd_endpoint, s.fwd_caller_token
-            ) as fwd:
+            with RpcClient(s.rpc_url) as rpc, FwdClient(s.fwd_endpoint, s.fwd_caller_token) as fwd:
                 for ct, benef in pairs:
                     key = stream_key(s.network, int(ct), benef)
                     try:
@@ -893,7 +923,9 @@ def auto(
                     if state.in_cooldown(key, last, now):
                         log.error(
                             "%s epoch %s in terminal cooldown — NOT resubmitting "
-                            "(degraded; operator action likely needed)", key, last,
+                            "(degraded; operator action likely needed)",
+                            key,
+                            last,
                         )
                         state.record_attempt(key, now, "terminal-cooldown")
                         continue
@@ -909,28 +941,36 @@ def auto(
                         recipient = s.claim_recipient_address or "unknown"
                         log.info(
                             "%s claim: epochs=%s amount=%s wei recipient=%s tx=%s",
-                            key, o.epochs, total_wei, recipient, o.tx_hash,
+                            key,
+                            o.epochs,
+                            total_wei,
+                            recipient,
+                            o.tx_hash,
                         )
                     elif o.status == OutcomeStatus.SUBMITTED_PENDING:
                         log.info(
                             "%s submitted epochs=%s tx=%s (pending receipt confirmation)",
-                            key, o.epochs, o.tx_hash,
+                            key,
+                            o.epochs,
+                            o.tx_hash,
                         )
                     elif o.status == OutcomeStatus.MINED_NOOP:
                         log.info(
                             "%s mined noop epochs=%s tx=%s (already claimed)",
-                            key, o.epochs, o.tx_hash,
+                            key,
+                            o.epochs,
+                            o.tx_hash,
                         )
                     elif o.status == OutcomeStatus.FAILED_RETRYABLE:
                         log.warning("%s transient: %s (retry next cycle)", key, o.detail)
                     elif o.status == OutcomeStatus.FAILED_TERMINAL:
                         if o.last_epoch is not None:
-                            state.record_terminal(
-                                key, o.last_epoch, now, s.terminal_cooldown_sec
-                            )
+                            state.record_terminal(key, o.last_epoch, now, s.terminal_cooldown_sec)
                         log.error(
                             "%s TERMINAL epochs=%s: %s — operator action likely needed",
-                            key, o.epochs, o.detail,
+                            key,
+                            o.epochs,
+                            o.detail,
                         )
             report = build_report(state, s.network, iv, s.stale_after_sec, time.time())
             write_status_atomic(s.status_file, report)
@@ -963,10 +1003,7 @@ def status() -> None:
 
 
 def _print_fsp_outcome(o: FspOutcome) -> None:
-    line = (
-        f"{o.message_type} epoch={o.reward_epoch_id} "
-        f"→ {o.status.value} ({o.detail})"
-    )
+    line = f"{o.message_type} epoch={o.reward_epoch_id} " f"→ {o.status.value} ({o.detail})"
     if o.tx_hash:
         line += f" tx={o.tx_hash}"
     if o.message_hash:
@@ -1034,7 +1071,9 @@ def rewards(
         f"no_of_weight_based_claims={rdd.no_of_weight_based_claims}"
     )
     if not yes:
-        typer.confirm(f"Sign REWARD_DISTRIBUTION for epoch {epoch} with the above data?", abort=True)
+        typer.confirm(
+            f"Sign REWARD_DISTRIBUTION for epoch {epoch} with the above data?", abort=True
+        )
     with RpcClient(s.rpc_url) as rpc:
         o = run_sign_rewards(s, epoch, wait=not no_wait, retry=retry, rpc=rpc)
     _print_fsp_outcome(o)
@@ -1158,11 +1197,17 @@ def fsp_auto(
                 watermark = rpc.get_current_reward_epoch_id(s.net.flare_systems_manager)
                 log.info("fsp auto watermark from chain current_epoch=%s", watermark)
         except Exception as exc:  # noqa: BLE001
-            log.warning("fsp auto: could not read current epoch (%s); watermark=None (will init from chain on first poll)", exc)
+            log.warning(
+                "fsp auto: could not read current epoch (%s); watermark=None (will init from chain on first poll)",
+                exc,
+            )
 
     log.info(
         "fsp auto start network=%s interval=%ss watermark=%s state=%s",
-        s.network, iv, watermark, s.fsp_status_file,
+        s.network,
+        iv,
+        watermark,
+        s.fsp_status_file,
     )
 
     message_types = ["UPTIME", "REWARD_DISTRIBUTION"]
@@ -1174,7 +1219,10 @@ def fsp_auto(
                     current_epoch = rpc.get_current_reward_epoch_id(s.net.flare_systems_manager)
                     if watermark is None:
                         watermark = current_epoch
-                        log.info("fsp auto: watermark initialized to current_epoch=%s (startup read had failed)", watermark)
+                        log.info(
+                            "fsp auto: watermark initialized to current_epoch=%s (startup read had failed)",
+                            watermark,
+                        )
                     # Act on closed epochs (< current) that are >= watermark.
                     closed_epochs = list(range(watermark, current_epoch))
                     for mt in message_types:
@@ -1185,7 +1233,9 @@ def fsp_auto(
                             if state.in_cooldown(key, epoch, now):
                                 log.error(
                                     "fsp auto %s epoch %s in terminal cooldown — skipping "
-                                    "(degraded; operator action likely needed)", key, epoch,
+                                    "(degraded; operator action likely needed)",
+                                    key,
+                                    epoch,
                                 )
                                 state.record_attempt(key, now, "terminal-cooldown")
                                 continue
@@ -1193,13 +1243,19 @@ def fsp_auto(
                             # wait=False skips _broadcast_and_confirm entirely, consuming the
                             # fwd nonce without ever sending the tx to the chain.
                             o = (run_sign_uptime if mt == "UPTIME" else run_sign_rewards)(
-                                s, epoch, wait=True, rpc=rpc,
+                                s,
+                                epoch,
+                                wait=True,
+                                rpc=rpc,
                             )
                             state.record_attempt(key, now, o.status.value)
                             if o.ok:
                                 log.info(
                                     "fsp auto %s epoch %s ok status=%s tx=%s",
-                                    key, epoch, o.status.value, o.tx_hash,
+                                    key,
+                                    epoch,
+                                    o.status.value,
+                                    o.tx_hash,
                                 )
                                 # CLIF-FSP-EPOCH-001: advance the watermark after each
                                 # successful (or already-finalized) epoch so we never
@@ -1208,15 +1264,17 @@ def fsp_auto(
                             elif o.status == OutcomeStatus.FAILED_RETRYABLE:
                                 log.warning(
                                     "fsp auto %s epoch %s transient: %s (retry next cycle)",
-                                    key, epoch, o.detail,
+                                    key,
+                                    epoch,
+                                    o.detail,
                                 )
                             elif o.status == OutcomeStatus.FAILED_TERMINAL:
-                                state.record_terminal(
-                                    key, epoch, now, s.fsp_terminal_cooldown_sec
-                                )
+                                state.record_terminal(key, epoch, now, s.fsp_terminal_cooldown_sec)
                                 log.error(
                                     "fsp auto %s epoch %s TERMINAL: %s — operator action likely needed",
-                                    key, epoch, o.detail,
+                                    key,
+                                    epoch,
+                                    o.detail,
                                 )
                                 # Advance watermark past terminal epochs too, so we don't
                                 # re-attempt until the cooldown expires and they re-appear.
@@ -1246,7 +1304,9 @@ def nonce(
         Optional[str],
         typer.Option("--network", help="Network override (default: NETWORK env / selected .env)"),
     ] = None,
-    json_out: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON to stdout")] = False,
+    json_out: Annotated[
+        bool, typer.Option("--json", help="Emit machine-readable JSON to stdout")
+    ] = False,
 ) -> None:
     """Read an address's on-chain transaction count (next nonce), keyless.
 

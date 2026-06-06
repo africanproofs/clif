@@ -20,7 +20,10 @@ def test_sign_uptime_signature_from_abi():
 
 
 def test_sign_rewards_signature_from_abi():
-    assert SIGN_REWARDS_SIGNATURE == "signRewards(uint24,(uint256,uint256)[],bytes32,(uint8,bytes32,bytes32))"
+    assert (
+        SIGN_REWARDS_SIGNATURE
+        == "signRewards(uint24,(uint256,uint256)[],bytes32,(uint8,bytes32,bytes32))"
+    )
 
 
 def test_sign_uptime_selector_matches_anchor():
@@ -86,7 +89,7 @@ def test_build_sign_rewards_calldata_round_trip():
     assert d_epoch == epoch
     assert len(d_n_claims) == 1
     assert d_n_claims[0][0] == rm_id  # rewardManagerId
-    assert d_n_claims[0][1] == n      # noOfWeightBasedClaims
+    assert d_n_claims[0][1] == n  # noOfWeightBasedClaims
     assert "0x" + d_rh.hex() == rh
     d_v, d_r, d_s = d_sig
     assert d_v == v

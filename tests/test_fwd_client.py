@@ -27,6 +27,7 @@ def _client(handler) -> FwdClient:
 
 # ---- sign_transaction ----
 
+
 def test_sign_transaction_success_200():
     def h(_req):
         return httpx.Response(
@@ -41,7 +42,9 @@ def test_sign_transaction_success_200():
 
     with _client(h) as fwd:
         r = fwd.sign_transaction(
-            "w", 114, "0x" + "00" * 20,
+            "w",
+            114,
+            "0x" + "00" * 20,
             gas=500_000,
             max_fee_per_gas=100_000_000_000,
             max_priority_fee_per_gas=1_000_000_000,
@@ -99,7 +102,9 @@ def test_sign_transaction_idempotency_key_header():
 
     with _client(h) as fwd:
         fwd.sign_transaction(
-            "w", 114, "0x" + "00" * 20,
+            "w",
+            114,
+            "0x" + "00" * 20,
             gas=100_000,
             max_fee_per_gas=10_000_000_000,
             max_priority_fee_per_gas=1_000_000_000,
@@ -107,14 +112,17 @@ def test_sign_transaction_idempotency_key_header():
         )
 
 
-@pytest.mark.parametrize("code,err", [
-    (400, "tx_params_rejected"),
-    (401, "unauthorized"),
-    (403, "policy_denied"),
-    (404, "wallet_not_found"),
-    (409, "nonce_not_initialized"),  # fwd v1.1.0a9+: operator must run nonce-init
-    (422, "transaction_rejected"),
-])
+@pytest.mark.parametrize(
+    "code,err",
+    [
+        (400, "tx_params_rejected"),
+        (401, "unauthorized"),
+        (403, "policy_denied"),
+        (404, "wallet_not_found"),
+        (409, "nonce_not_initialized"),  # fwd v1.1.0a9+: operator must run nonce-init
+        (422, "transaction_rejected"),
+    ],
+)
 def test_sign_transaction_terminal_statuses(code, err):
     def h(_req):
         return httpx.Response(code, json={"error": err, "message": "nope"})
@@ -122,7 +130,9 @@ def test_sign_transaction_terminal_statuses(code, err):
     with _client(h) as fwd:
         with pytest.raises(FwdTerminalError) as ei:
             fwd.sign_transaction(
-                "w", 114, "0x" + "00" * 20,
+                "w",
+                114,
+                "0x" + "00" * 20,
                 gas=100_000,
                 max_fee_per_gas=10_000_000_000,
                 max_priority_fee_per_gas=1_000_000_000,
@@ -133,13 +143,16 @@ def test_sign_transaction_terminal_statuses(code, err):
 
 def test_sign_transaction_503_retryable():
     """503 (vault_unavailable) is the only retryable fwd status in v1.1.0a9+."""
+
     def h(_req):
         return httpx.Response(503, json={"error": "vault_unavailable", "message": "down"})
 
     with _client(h) as fwd:
         with pytest.raises(FwdRetryableError) as ei:
             fwd.sign_transaction(
-                "w", 114, "0x" + "00" * 20,
+                "w",
+                114,
+                "0x" + "00" * 20,
                 gas=100_000,
                 max_fee_per_gas=10_000_000_000,
                 max_priority_fee_per_gas=1_000_000_000,
@@ -150,13 +163,16 @@ def test_sign_transaction_503_retryable():
 def test_sign_transaction_502_is_now_terminal():
     """502 is GONE in fwd v1.1.0a9+ (fwd no longer does RPC). Unmapped statuses
     fall through to the terminal catch-all in _raise_for_error."""
+
     def h(_req):
         return httpx.Response(502, json={"error": "old_rpc_unreachable", "message": "gone"})
 
     with _client(h) as fwd:
         with pytest.raises(FwdTerminalError):
             fwd.sign_transaction(
-                "w", 114, "0x" + "00" * 20,
+                "w",
+                114,
+                "0x" + "00" * 20,
                 gas=100_000,
                 max_fee_per_gas=10_000_000_000,
                 max_priority_fee_per_gas=1_000_000_000,
@@ -172,18 +188,23 @@ def _raising_client(exc) -> FwdClient:
     return fwd
 
 
-@pytest.mark.parametrize("exc", [
-    httpx.ConnectError("down"),
-    httpx.ReadTimeout("slow"),
-    httpx.PoolTimeout("pool"),
-])
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.ConnectError("down"),
+        httpx.ReadTimeout("slow"),
+        httpx.PoolTimeout("pool"),
+    ],
+)
 def test_transport_error_is_retryable_sign_path(exc):
     """A down/restarting fwd must NOT propagate a raw httpx error — it would
     crash `clif auto`. Converted to FwdRetryableError in the sign path."""
     with _raising_client(exc) as fwd:
         with pytest.raises(FwdRetryableError) as ei:
             fwd.sign_transaction(
-                "w", 114, "0x" + "00" * 20,
+                "w",
+                114,
+                "0x" + "00" * 20,
                 gas=100_000,
                 max_fee_per_gas=10_000_000_000,
                 max_priority_fee_per_gas=1_000_000_000,
@@ -204,7 +225,9 @@ def test_unmapped_status_fails_closed_terminal():
     with _client(h) as fwd:
         with pytest.raises(FwdTerminalError):
             fwd.sign_transaction(
-                "w", 114, "0x" + "00" * 20,
+                "w",
+                114,
+                "0x" + "00" * 20,
                 gas=100_000,
                 max_fee_per_gas=10_000_000_000,
                 max_priority_fee_per_gas=1_000_000_000,
@@ -212,6 +235,7 @@ def test_unmapped_status_fails_closed_terminal():
 
 
 # ---- report_broadcast_result ----
+
 
 def test_report_broadcast_result_accepted():
     def h(_req):
@@ -275,6 +299,7 @@ def test_report_broadcast_result_transport_error_retryable():
 
 # ---- report_receipt ----
 
+
 def test_report_receipt_mined_success():
     import json
 
@@ -312,6 +337,7 @@ def test_report_receipt_transport_error_retryable():
 
 # ---- idempotency key helpers ----
 
+
 def test_idempotency_key_deterministic_distinct_bounded():
     a = make_idempotency_key("flare", 1, "0xABC", 100)
     b = make_idempotency_key("flare", 1, "0xabc", 100)  # case-insensitive
@@ -333,9 +359,8 @@ def test_idempotency_retry_discriminator_both_directions():
     legacy = make_idempotency_key("flare", 1, "0xABC", 100)
     assert make_idempotency_key("flare", 1, "0xABC", 100, retry=None) == legacy
     # same-attempt dedup: identical inputs incl. retry collide
-    assert (
-        make_idempotency_key("flare", 1, "0xABC", 100, retry="op-2")
-        == make_idempotency_key("flare", 1, "0xabc", 100, retry="op-2")
+    assert make_idempotency_key("flare", 1, "0xABC", 100, retry="op-2") == make_idempotency_key(
+        "flare", 1, "0xabc", 100, retry="op-2"
     )
     # deliberate retry: a new discriminator yields a distinct key
     k1 = make_idempotency_key("flare", 1, "0xABC", 100, retry="op-1")
@@ -346,10 +371,12 @@ def test_idempotency_retry_discriminator_both_directions():
 
 # ---- 409 nonce_not_initialized surface test ----
 
+
 def test_nonce_not_initialized_surfaces_clearly():
     """409 from fwd must surface as FwdTerminalError with nonce_not_initialized code.
     Callers (claimer) must distinguish this from policy_denied to give the
     operator the right action (run `clifwd nonce-init`, not check policy)."""
+
     def h(_req):
         return httpx.Response(
             409,
@@ -362,7 +389,9 @@ def test_nonce_not_initialized_surfaces_clearly():
     with _client(h) as fwd:
         with pytest.raises(FwdTerminalError) as ei:
             fwd.sign_transaction(
-                "w", 14, "0x" + "00" * 20,
+                "w",
+                14,
+                "0x" + "00" * 20,
                 gas=100_000,
                 max_fee_per_gas=10_000_000_000,
                 max_priority_fee_per_gas=1_000_000_000,

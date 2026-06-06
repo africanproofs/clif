@@ -104,22 +104,20 @@ class RewardDistributionData(BaseModel):
     reward_epoch_id: int = Field(alias="rewardEpochId")
     merkle_root: str = Field(alias="merkleRoot")
     no_of_weight_based_claims: int = Field(alias="noOfWeightBasedClaims")
-    reward_claims: list[RewardClaimWithProofDict] = Field(alias="rewardClaims", default_factory=list)
+    reward_claims: list[RewardClaimWithProofDict] = Field(
+        alias="rewardClaims", default_factory=list
+    )
 
     @field_validator("merkle_root")
     @classmethod
     def _validate_merkle_root(cls, v: str) -> str:
         if not _MERKLE_ROOT_RE.match(v):
-            raise ValueError(
-                f"merkleRoot must match ^0x[0-9a-fA-F]{{64}}$, got {v!r}"
-            )
+            raise ValueError(f"merkleRoot must match ^0x[0-9a-fA-F]{{64}}$, got {v!r}")
         return v
 
     @field_validator("no_of_weight_based_claims")
     @classmethod
     def _validate_no_of_weight_based_claims(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(
-                f"noOfWeightBasedClaims must be an integer >= 0, got {v}"
-            )
+            raise ValueError(f"noOfWeightBasedClaims must be an integer >= 0, got {v}")
         return v

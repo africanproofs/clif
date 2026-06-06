@@ -36,6 +36,7 @@ def test_get_transaction_count_latest_hex_to_int():
 
 def test_get_transaction_count_pending():
     """eth_getTransactionCount with block_tag='pending' converts hex→int."""
+
     def h(req: httpx.Request) -> httpx.Response:
         body = json.loads(req.content)
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": "0x5"})
@@ -48,6 +49,7 @@ def test_get_transaction_count_pending():
 
 def test_get_transaction_count_rpc_error_raises():
     """Transport failure raises RpcError (same as other read methods)."""
+
     def h(req: httpx.Request) -> httpx.Response:
         body = json.loads(req.content)
         return httpx.Response(

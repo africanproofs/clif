@@ -19,8 +19,7 @@ from clif.models import RewardClaimBody, RewardClaimWithProof
 
 def test_signature_reconstructed_from_abi():
     assert CLAIM_SIGNATURE == (
-        "claim(address,address,uint24,bool,"
-        "(bytes32[],(uint24,bytes20,uint120,uint8))[])"
+        "claim(address,address,uint24,bool," "(bytes32[],(uint24,bytes20,uint120,uint8))[])"
     )
 
 

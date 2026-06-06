@@ -99,7 +99,8 @@ def _claim_took_effect(rpc: RpcClient, reward_manager: str, tx_hash: str) -> boo
         log.warning(
             "_claim_took_effect: RPC failure fetching receipt for %s: %s — "
             "treating as not confirmed (claim effect uncertain)",
-            tx_hash, exc,
+            tx_hash,
+            exc,
         )
         return False
     if receipt is None:
@@ -110,10 +111,7 @@ def _claim_took_effect(rpc: RpcClient, reward_manager: str, tx_hash: str) -> boo
         )
         return False
     rm = reward_manager.lower()
-    return any(
-        str(lg.get("address", "")).lower() == rm
-        for lg in (receipt.get("logs") or [])
-    )
+    return any(str(lg.get("address", "")).lower() == rm for lg in (receipt.get("logs") or []))
 
 
 @dataclass
@@ -196,7 +194,11 @@ def submit_claims(
     )
     log.info(
         "submit %s beneficiary=%s epochs=%s idempotency-key=%s retry=%s",
-        name, beneficiary, epochs, idem, retry_token or "<none>",
+        name,
+        beneficiary,
+        epochs,
+        idem,
+        retry_token or "<none>",
     )
 
     # Step 1: ask fwd to sign. fwd allocates the nonce; gas+fees supplied by
@@ -215,7 +217,8 @@ def submit_claims(
             return out(
                 OutcomeStatus.FAILED_RETRYABLE,
                 f"fee estimation rpc failure: {exc}",
-                epochs=epochs, last_epoch=last_epoch,
+                epochs=epochs,
+                last_epoch=last_epoch,
             )
     else:
         # No rpc: use conservative defaults.
@@ -237,13 +240,17 @@ def submit_claims(
         )
     except FwdTerminalError as exc:
         return out(
-            OutcomeStatus.FAILED_TERMINAL, f"fwd denied/failed: {exc}",
-            epochs=epochs, last_epoch=last_epoch,
+            OutcomeStatus.FAILED_TERMINAL,
+            f"fwd denied/failed: {exc}",
+            epochs=epochs,
+            last_epoch=last_epoch,
         )
     except FwdRetryableError as exc:
         return out(
-            OutcomeStatus.FAILED_RETRYABLE, f"fwd transient: {exc}",
-            epochs=epochs, last_epoch=last_epoch,
+            OutcomeStatus.FAILED_RETRYABLE,
+            f"fwd transient: {exc}",
+            epochs=epochs,
+            last_epoch=last_epoch,
         )
 
     # Step 2: broadcast (requires rpc).
@@ -251,15 +258,23 @@ def submit_claims(
         # No rpc available — can't broadcast. Return pending so the caller
         # can decide (e.g. `wait=False` test paths).
         return out(
-            OutcomeStatus.SUBMITTED_PENDING, "signed (no rpc — cannot broadcast)",
-            epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=resp.hash,
+            OutcomeStatus.SUBMITTED_PENDING,
+            "signed (no rpc — cannot broadcast)",
+            epochs=epochs,
+            last_epoch=last_epoch,
+            tx_id=resp.tx_id,
+            tx_hash=resp.hash,
         )
 
     if not wait:
         # Caller requested no-wait. We have the signed blob but skip broadcast+poll.
         return out(
-            OutcomeStatus.SUBMITTED_PENDING, "submitted (no wait)",
-            epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=resp.hash,
+            OutcomeStatus.SUBMITTED_PENDING,
+            "submitted (no wait)",
+            epochs=epochs,
+            last_epoch=last_epoch,
+            tx_id=resp.tx_id,
+            tx_hash=resp.hash,
         )
 
     try:
@@ -277,13 +292,19 @@ def submit_claims(
             return out(
                 OutcomeStatus.FAILED_RETRYABLE,
                 f"broadcast rejected (nonce too low): {exc}",
-                epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=resp.hash,
+                epochs=epochs,
+                last_epoch=last_epoch,
+                tx_id=resp.tx_id,
+                tx_hash=resp.hash,
             )
         # Deterministic node rejection — terminal.
         return out(
             OutcomeStatus.FAILED_TERMINAL,
             f"broadcast rejected ({err_class}): {exc}",
-            epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=resp.hash,
+            epochs=epochs,
+            last_epoch=last_epoch,
+            tx_id=resp.tx_id,
+            tx_hash=resp.hash,
         )
 
     # Step 3: report accepted broadcast to fwd.
@@ -294,15 +315,21 @@ def submit_claims(
 
     log.info(
         "submit %s broadcasted tx_id=%s hash=%s",
-        name, resp.tx_id, broadcast_hash,
+        name,
+        resp.tx_id,
+        broadcast_hash,
     )
 
     # Step 4: poll for receipt.
     receipt = rpc.poll_receipt(broadcast_hash, timeout=wait_timeout)
     if receipt is None:
         return out(
-            OutcomeStatus.SUBMITTED_PENDING, "submitted; receipt poll timed out",
-            epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=broadcast_hash,
+            OutcomeStatus.SUBMITTED_PENDING,
+            "submitted; receipt poll timed out",
+            epochs=epochs,
+            last_epoch=last_epoch,
+            tx_id=resp.tx_id,
+            tx_hash=broadcast_hash,
         )
 
     block_number = int(str(receipt.get("blockNumber", "0x0")), 16)
@@ -318,8 +345,12 @@ def submit_claims(
 
     if not mined_ok:
         return out(
-            OutcomeStatus.FAILED_TERMINAL, "tx reverted on-chain",
-            epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=broadcast_hash,
+            OutcomeStatus.FAILED_TERMINAL,
+            "tx reverted on-chain",
+            epochs=epochs,
+            last_epoch=last_epoch,
+            tx_id=resp.tx_id,
+            tx_hash=broadcast_hash,
         )
 
     # Step 6: effect verification — a mined receipt with NO RewardManager log
@@ -330,12 +361,19 @@ def submit_claims(
             OutcomeStatus.MINED_NOOP,
             "mined but claimed nothing — epoch already claimed "
             "(no RewardManager event in receipt)",
-            epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=broadcast_hash,
+            epochs=epochs,
+            last_epoch=last_epoch,
+            tx_id=resp.tx_id,
+            tx_hash=broadcast_hash,
         )
 
     return out(
-        OutcomeStatus.SUBMITTED_MINED, "mined",
-        epochs=epochs, last_epoch=last_epoch, tx_id=resp.tx_id, tx_hash=broadcast_hash,
+        OutcomeStatus.SUBMITTED_MINED,
+        "mined",
+        epochs=epochs,
+        last_epoch=last_epoch,
+        tx_id=resp.tx_id,
+        tx_hash=broadcast_hash,
     )
 
 
@@ -362,8 +400,13 @@ def run_claim(
 
     def _out(status: OutcomeStatus, detail: str) -> ClaimOutcome:
         return ClaimOutcome(
-            claim_type=claim_type, claim_type_name=name, beneficiary=beneficiary,
-            status=status, detail=detail, epochs=[], last_epoch=only_epoch,
+            claim_type=claim_type,
+            claim_type_name=name,
+            beneficiary=beneficiary,
+            status=status,
+            detail=detail,
+            epochs=[],
+            last_epoch=only_epoch,
         )
 
     if only_epoch is not None:
@@ -402,6 +445,13 @@ def run_claim(
         )
         return _out(OutcomeStatus.NOTHING_CLAIMABLE, detail)
     return submit_claims(
-        settings, fwd, claim_type, beneficiary, claims,
-        wait=wait, wait_timeout=wait_timeout, retry=retry, rpc=rpc,
+        settings,
+        fwd,
+        claim_type,
+        beneficiary,
+        claims,
+        wait=wait,
+        wait_timeout=wait_timeout,
+        retry=retry,
+        rpc=rpc,
     )

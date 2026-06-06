@@ -52,9 +52,9 @@ def epoch228(epoch228_raw: dict) -> RewardDistributionData:
 def test_build_root_matches_published(epoch228: RewardDistributionData) -> None:
     """Recomputed root must equal the fixture's published merkleRoot byte-exactly."""
     recomputed = build_reward_merkle_root(c.body for c in epoch228.reward_claims)
-    assert recomputed.lower() == EXPECTED_ROOT.lower(), (
-        f"recomputed={recomputed} published={EXPECTED_ROOT}"
-    )
+    assert (
+        recomputed.lower() == EXPECTED_ROOT.lower()
+    ), f"recomputed={recomputed} published={EXPECTED_ROOT}"
 
 
 def test_build_root_with_all_119_claims(epoch228: RewardDistributionData) -> None:

@@ -63,14 +63,10 @@ def test_uptime_calldata_uses_oracle_signature():
     """Build calldata from the §4 UPTIME oracle v/r/s and verify selector + vote hash."""
     from eth_abi import decode as abi_decode
 
-    data = build_sign_uptime_calldata(
-        0, UPTIME_ORACLE["v"], UPTIME_ORACLE["r"], UPTIME_ORACLE["s"]
-    )
+    data = build_sign_uptime_calldata(0, UPTIME_ORACLE["v"], UPTIME_ORACLE["r"], UPTIME_ORACLE["s"])
     assert data[2:10] == EXPECTED_SIGN_UPTIME_SELECTOR
     payload = bytes.fromhex(data[10:])
-    epoch, vote_hash, sig = abi_decode(
-        ["uint24", "bytes32", "(uint8,bytes32,bytes32)"], payload
-    )
+    epoch, vote_hash, sig = abi_decode(["uint24", "bytes32", "(uint8,bytes32,bytes32)"], payload)
     assert epoch == 0
     assert "0x" + vote_hash.hex() == UPTIME_VOTE_HASH
     assert sig[0] == 27
@@ -81,8 +77,13 @@ def test_rewards_calldata_uses_oracle_signature():
     from eth_abi import decode as abi_decode
 
     data = build_sign_rewards_calldata(
-        3, 114, 56, REWARDS_HASH,
-        REWARDS_ORACLE["v"], REWARDS_ORACLE["r"], REWARDS_ORACLE["s"],
+        3,
+        114,
+        56,
+        REWARDS_HASH,
+        REWARDS_ORACLE["v"],
+        REWARDS_ORACLE["r"],
+        REWARDS_ORACLE["s"],
     )
     assert data[2:10] == EXPECTED_SIGN_REWARDS_SELECTOR
     payload = bytes.fromhex(data[10:])
@@ -91,8 +92,8 @@ def test_rewards_calldata_uses_oracle_signature():
         payload,
     )
     assert epoch == 3
-    assert n_claims[0][0] == 114   # rewardManagerId = chain_id
-    assert n_claims[0][1] == 56    # noOfWeightBasedClaims
+    assert n_claims[0][0] == 114  # rewardManagerId = chain_id
+    assert n_claims[0][1] == 56  # noOfWeightBasedClaims
     assert "0x" + rh.hex() == REWARDS_HASH
     assert sig[0] == 27
 
@@ -127,6 +128,6 @@ def test_live_uptime_byte_match():
         r = fwd.sign_fsp_message(wallet, "UPTIME", 0)
     # The message_hash is deterministic for (network, epoch, message_type)
     # so it should match the oracle vector for epoch=0.
-    assert r.message_hash == UPTIME_ORACLE["message_hash"], (
-        f"Live message_hash {r.message_hash} != oracle {UPTIME_ORACLE['message_hash']}"
-    )
+    assert (
+        r.message_hash == UPTIME_ORACLE["message_hash"]
+    ), f"Live message_hash {r.message_hash} != oracle {UPTIME_ORACLE['message_hash']}"

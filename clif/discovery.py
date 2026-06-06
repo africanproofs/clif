@@ -32,8 +32,7 @@ def claimable_epoch_ids(rpc: RpcClient, settings: Settings, beneficiary: str) ->
 
 
 def reward_claim_for(
-    rpc: RpcClient,
-    settings: Settings, epoch: int, beneficiary: str, claim_type: int
+    rpc: RpcClient, settings: Settings, epoch: int, beneficiary: str, claim_type: int
 ) -> RewardClaimWithProof | None:
     """The `(merkleProof, body)` for this beneficiary+claimType in one epoch.
 
@@ -62,7 +61,9 @@ def reward_claim_for(
                 amount=int(amount_str),
                 claim_type=c_type,
             )
-            leaf = compute_leaf(body.reward_epoch_id, body.beneficiary, body.amount, body.claim_type)
+            leaf = compute_leaf(
+                body.reward_epoch_id, body.beneficiary, body.amount, body.claim_type
+            )
             if not verify_proof(leaf, merkle_proof, data.merkle_root):
                 print(
                     f"discovery: proof verification FAILED for epoch={epoch} "
@@ -113,7 +114,9 @@ def collect_reward_claims(
     return out
 
 
-def _reason_from_state(epoch: int, beneficiary: str, nxt: int, end: int, signed: bool) -> str | None:
+def _reason_from_state(
+    epoch: int, beneficiary: str, nxt: int, end: int, signed: bool
+) -> str | None:
     """Why `epoch` fails the on-chain claimability gates, or None if it passes them.
 
     Pure: takes the already-fetched chain reads. None means epoch is in the

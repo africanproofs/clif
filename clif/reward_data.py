@@ -69,7 +69,11 @@ def get_reward_distribution_data(settings: Settings, epoch: int) -> RewardDistri
     """
     try:
         local = (
-            Path.cwd() / "rewards-data" / settings.network / str(epoch) / "reward-distribution-data.json"
+            Path.cwd()
+            / "rewards-data"
+            / settings.network
+            / str(epoch)
+            / "reward-distribution-data.json"
         )
         if local.exists():
             return RewardDistributionData.model_validate_json(local.read_text())

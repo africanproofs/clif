@@ -25,9 +25,7 @@ def test_empty_proofs_rehearse_calldata_round_trips_recipient_exact():
     assert CLAIM_SELECTOR.hex() == "8e33aba5"
 
     payload = bytes.fromhex(data[10:])
-    owner_d, recip_d, epoch_d, wrap_d, proofs_d = abi_decode(
-        _CLAIM_ARG_TYPES, payload
-    )
+    owner_d, recip_d, epoch_d, wrap_d, proofs_d = abi_decode(_CLAIM_ARG_TYPES, payload)
     assert owner_d == reward_owner.lower()
     assert recip_d == recipient.lower()  # pinned arg-predicate, byte-exact
     assert epoch_d == epoch

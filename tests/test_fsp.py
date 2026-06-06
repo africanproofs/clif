@@ -47,8 +47,10 @@ class FakeFwdFsp:
 
     def __init__(
         self,
-        sign_fsp=None, sign_fsp_exc=None,
-        sign_tx=None, sign_tx_exc=None,
+        sign_fsp=None,
+        sign_fsp_exc=None,
+        sign_tx=None,
+        sign_tx_exc=None,
         broadcast_result_exc=None,
         receipt_exc=None,
     ):
@@ -76,9 +78,7 @@ class FakeFwdFsp:
         return self._sign_tx
 
     def report_broadcast_result(self, tx_id, tx_hash, outcome, error_class=None):
-        self.broadcast_calls.append(
-            {"tx_id": tx_id, "tx_hash": tx_hash, "outcome": outcome}
-        )
+        self.broadcast_calls.append({"tx_id": tx_id, "tx_hash": tx_hash, "outcome": outcome})
         if self._broadcast_result_exc:
             raise self._broadcast_result_exc
 
@@ -107,11 +107,12 @@ class FakeRpc:
         *,
         send_raw_raises=None,
         poll_receipt_result=None,  # None = timeout; dict = the receipt
-        revert_reason=None,        # str returned by get_revert_reason (None = unknown)
+        revert_reason=None,  # str returned by get_revert_reason (None = unknown)
         rewards_hash_result=None,  # str returned by rewards_hash (None = ZERO_BYTES32)
         uptime_vote_hash_result=None,  # str returned by uptime_vote_hash (None = ZERO_BYTES32)
     ):
         from clif.config import ZERO_BYTES32
+
         self._send_raw_raises = send_raw_raises
         self._poll_receipt_result = poll_receipt_result
         self._revert_reason = revert_reason
@@ -164,6 +165,7 @@ def _patch_fwd_factory(monkeypatch, *, sign_fwd, submit_fwd):
 
 # ---- config guards (terminal before any HTTP) ----
 
+
 def test_missing_fsp_sign_caller_token_is_terminal(monkeypatch):
     s = _settings(fsp_sign_caller_token=None)
     sign_fwd = FakeFwdFsp()
@@ -206,6 +208,7 @@ def test_missing_fsp_sender_wallet_is_terminal(monkeypatch):
 
 # ---- rdd guard for rewards ----
 
+
 def test_rdd_none_is_terminal(monkeypatch):
     sign_fwd = FakeFwdFsp()
     submit_fwd = FakeFwdFsp()
@@ -217,6 +220,7 @@ def test_rdd_none_is_terminal(monkeypatch):
 
 
 # ---- MAJOR-1 epoch-bind tests ----
+
 
 def test_rdd_wrong_epoch_is_terminal_no_sign_call(monkeypatch):
     """File rewardEpochId=99 but signing epoch=3 → FAILED_TERMINAL, no Leg-1 call."""
@@ -258,6 +262,7 @@ def test_rdd_present_proceeds(monkeypatch):
 
 # ---- UPTIME happy path ----
 
+
 def test_uptime_mined(monkeypatch):
     rpc = FakeRpc(poll_receipt_result=_ok_receipt())
     sign_fwd = FakeFwdFsp(sign_fsp=SIG)
@@ -297,6 +302,7 @@ def test_uptime_no_rpc_returns_pending_signed(monkeypatch):
 
 # ---- two-caller topology ----
 
+
 def test_leg1_uses_sign_caller_leg2_uses_submit_caller(monkeypatch):
     """Leg-1 sign call goes to sign_fwd; Leg-2 sign_transaction goes to submit_fwd."""
     rpc = FakeRpc(poll_receipt_result=_ok_receipt())
@@ -317,6 +323,7 @@ def test_leg1_uses_sign_caller_leg2_uses_submit_caller(monkeypatch):
 
 
 # ---- error classification ----
+
 
 def test_leg1_terminal_is_failed_terminal(monkeypatch):
     sign_fwd = FakeFwdFsp(sign_fsp_exc=FwdTerminalError(403, "policy_denied", "no"))
@@ -417,6 +424,7 @@ def test_fsp_outcome_ok_property():
 
 # ---- ALREADY_FINALIZED: post-revert classification ----
 
+
 def test_rewards_already_signed_revert_is_already_finalized(monkeypatch):
     """status=0x0 + get_revert_reason='rewards hash already signed'
     → ALREADY_FINALIZED (benign, in _OK)."""
@@ -438,6 +446,7 @@ def test_rewards_already_signed_revert_is_already_finalized(monkeypatch):
 def test_rewards_already_signed_in_ok_set():
     """ALREADY_FINALIZED is in the _OK set — exit-0 outcome."""
     from clif.claimer import _OK
+
     assert OutcomeStatus.ALREADY_FINALIZED in _OK
 
 
@@ -488,9 +497,11 @@ def test_none_revert_reason_stays_failed_terminal_unknown(monkeypatch):
 
 # ---- ALREADY_FINALIZED: pre-flight finalization skip ----
 
+
 def test_rewards_pre_flight_already_finalized_skips_signing(monkeypatch):
     """rewardsHash != ZERO_BYTES32 → ALREADY_FINALIZED before any leg-1/leg-2."""
     from clif.config import ZERO_BYTES32
+
     non_zero_hash = "0x" + "ab" * 32
     assert non_zero_hash != ZERO_BYTES32
     rpc = FakeRpc(rewards_hash_result=non_zero_hash)
@@ -508,6 +519,7 @@ def test_rewards_pre_flight_already_finalized_skips_signing(monkeypatch):
 def test_uptime_pre_flight_already_finalized_skips_signing(monkeypatch):
     """uptimeVoteHash != ZERO_BYTES32 → ALREADY_FINALIZED before any leg-1/leg-2."""
     from clif.config import ZERO_BYTES32
+
     non_zero_hash = "0x" + "cd" * 32
     assert non_zero_hash != ZERO_BYTES32
     rpc = FakeRpc(uptime_vote_hash_result=non_zero_hash)
@@ -524,6 +536,7 @@ def test_uptime_pre_flight_already_finalized_skips_signing(monkeypatch):
 def test_rewards_pre_flight_not_finalized_proceeds(monkeypatch):
     """rewardsHash == ZERO_BYTES32 → pre-flight passes, proceeds to leg-1/leg-2."""
     from clif.config import ZERO_BYTES32
+
     rpc = FakeRpc(
         rewards_hash_result=ZERO_BYTES32,
         poll_receipt_result=_ok_receipt(),
@@ -538,6 +551,7 @@ def test_rewards_pre_flight_not_finalized_proceeds(monkeypatch):
 
 
 # ---- fsp auto hard-off gate ----
+
 
 def test_fsp_auto_disabled_by_default(monkeypatch):
     """clif fsp auto exits 2 with a D15 message unless FSP_AUTO_ENABLED=true."""
