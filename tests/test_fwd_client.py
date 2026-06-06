@@ -1,11 +1,4 @@
-"""fwd transport: status -> terminal/retryable classification + envelope parse.
-
-Updated for fwd v1.1.0a9+ sign-only API:
-  sign_and_send -> sign_transaction (fwd signs; clif broadcasts)
-  New: report_broadcast_result, report_receipt
-  Removed: wait_until_mined (clif polls rpc.py directly)
-  Status taxonomy: 502 gone (fwd no longer does RPC), 409 added (terminal).
-"""
+"""fwd transport: status -> terminal/retryable classification + envelope parse."""
 
 import httpx
 import pytest

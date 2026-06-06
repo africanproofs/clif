@@ -1,11 +1,10 @@
 """Build `RewardManager.claim(...)` calldata from the vendored ABI.
 
-Constraint 3 of the Phase 8b canonical prompt: every on-wire value is derived
-from the real producing path, never a hand-authored shape. So the function
-signature is reconstructed from the *registered ABI* and the selector is
-computed at runtime, then asserted equal to the independently-verified anchor
-`0x8e33aba5` (constraint 4). A mismatch (wrong ABI, or a vendored-keccak bug)
-fails loudly at import.
+Every on-wire value is derived from the real producing path, never a
+hand-authored shape. The function signature is reconstructed from the
+*registered ABI* and the selector is computed at runtime, then asserted equal
+to the independently-verified anchor `0x8e33aba5`. A mismatch (wrong ABI, or a
+vendored-keccak bug) fails loudly at import.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from eth_abi import encode as abi_encode
 from clif._keccak import keccak256
 from clif.models import RewardClaimWithProof
 
-# Independently-verified anchor (Phase 8b canonical prompt, constraint 4).
+# Independently-verified anchor: keccak4 of the canonical claim signature.
 EXPECTED_CLAIM_SELECTOR = "8e33aba5"
 
 

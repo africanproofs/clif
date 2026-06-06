@@ -1,10 +1,4 @@
-"""claimer outcome classification + idempotency passthrough (fwd faked).
-
-Updated for fwd v1.1.0a9+ sign-only API:
-  sign_and_send -> sign_transaction (fwd signs; clif broadcasts via rpc)
-  New: report_broadcast_result, report_receipt on FakeFwd
-  FakeRpc gains: send_raw_transaction, poll_receipt, estimate_gas, suggest_fees
-"""
+"""claimer outcome classification + idempotency passthrough (fwd faked)."""
 
 import httpx
 

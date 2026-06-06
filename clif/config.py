@@ -168,18 +168,16 @@ class Settings(BaseSettings):
     terminal_cooldown_sec: int = 3_600
 
     # FSP signing-tool (keyless — Leg-1 is fwd /v1/sign-fsp-message, Leg-2 is
-    # fwd /v1/sign-and-send to FlareSystemsManager). Distinct caller tokens and
+    # fwd /v1/sign-transaction to FlareSystemsManager). Distinct caller tokens and
     # wallet names from the claim path (D14: two different fwd wallets/callers).
     #
     # fwd cross-domain policy_path rule: fwd's policy loader forbids the SAME
     # policy_path key appearing in both `permissions` and `fsp_permissions`
     # (cross-domain key reuse = fail-fast boot). One caller → one policy_path
     # → one block. So one caller authorizes EITHER /v1/sign-fsp-message (Leg-1,
-    # fsp_permissions) OR /v1/sign-and-send (Leg-2, permissions) — never both.
-    # tx poll /v1/transactions/{id} is per-caller-scoped → it MUST use the
-    # Leg-2 (submit) caller.
+    # fsp_permissions) OR /v1/sign-transaction (Leg-2, permissions) — never both.
     fsp_sign_caller_token: str | None = None  # Leg-1: /v1/sign-fsp-message (fsp_permissions)
-    fsp_submit_caller_token: str | None = None  # Leg-2 + tx poll: /v1/sign-and-send (permissions)
+    fsp_submit_caller_token: str | None = None  # Leg-2: /v1/sign-transaction (permissions)
     fsp_auto_enabled: bool = False
     fsp_signing_wallet_name: str | None = None
     fsp_sender_wallet_name: str | None = None

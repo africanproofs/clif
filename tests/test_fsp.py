@@ -1,10 +1,4 @@
-"""FSP orchestrator: outcome mapping, rdd-guard, epoch-bind, config-guard, terminal/retryable paths.
-
-Updated for fwd v1.1.0a9+ sign-only API:
-  Leg-2 sign_and_send -> sign_transaction + clif-side broadcast + report-back
-  FakeFwdFsp gains sign_transaction, report_broadcast_result, report_receipt
-  Tests that checked wait_until_mined now go through FakeRpc.poll_receipt
-"""
+"""FSP orchestrator: outcome mapping, rdd-guard, epoch-bind, config-guard, terminal/retryable paths."""
 
 from clif.claimer import OutcomeStatus
 from clif.config import Settings

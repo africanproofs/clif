@@ -7,11 +7,6 @@ the SUBMIT caller token (permissions block): fwd signs the tx via
 /v1/sign-transaction; clif broadcasts via rpc.py and reports back via
 /v1/transactions/{id}/broadcast-result + /v1/transactions/{id}/receipt.
 
-fwd v1.1.0a9+: /v1/sign-and-send is retired. Leg-2 uses the new sign-only
-flow (sign-transaction + clif-side broadcast + report-back). The
-/v1/transactions/{id} poll is gone (fwd no longer manages broadcast/receipt);
-clif uses rpc.py to poll eth_getTransactionReceipt instead.
-
 fwd cross-domain rule: the same policy_path key cannot appear in both
 `permissions` and `fsp_permissions` (fwd fail-fast boot). One caller → one
 block. So the orchestrator owns two distinct FwdClient instances — one per leg.
@@ -75,14 +70,14 @@ def _is_finalization_revert(message_type: str, reason: str | None) -> bool:
 # fwd cross-domain rule (D15 MAJOR-2): the same policy_path key cannot appear
 # in both `permissions` and `fsp_permissions`. Operator provisions TWO callers:
 #   clif-fsp-sign  → fsp_permissions  (authorizes /v1/sign-fsp-message, Leg-1)
-#   clif-fsp-submit→ permissions      (authorizes /v1/sign-and-send to
-#                                      FlareSystemsManager, Leg-2 + tx poll)
+#   clif-fsp-submit→ permissions      (authorizes /v1/sign-transaction to
+#                                      FlareSystemsManager, Leg-2)
 # clif never authors fwd policy nor mints credentials.
 _OPERATOR_PROVISION_HINT = (
     "operator must provision TWO fwd FSP callers (fwd cross-domain policy_path "
     "rule: one caller cannot span both fsp_permissions and permissions): "
     "clif-fsp-sign → fsp_permissions (Leg-1 /v1/sign-fsp-message); "
-    "clif-fsp-submit → permissions for FlareSystemsManager (Leg-2 + tx poll). "
+    "clif-fsp-submit → permissions for FlareSystemsManager (Leg-2 /v1/sign-transaction). "
     "Also: FSP wallets, FlareSystemsManager ABI+policy — clif never authors fwd policy"
 )
 
