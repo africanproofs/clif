@@ -86,15 +86,29 @@ def _claim_took_effect(rpc: RpcClient, reward_manager: str, tx_hash: str) -> boo
     manager; claiming an already-claimed `(rewardOwner, epoch)` is a SILENT
     status-0x1 no-op with NO such log (it does NOT revert, unlike
     `signUptimeVote`). So a mined receipt is verified by EFFECT (a log from the
-    reward manager), never by status alone. On an RPC failure we cannot disprove
-    the claim, so we do not assert a false no-op (return True).
+    reward manager), never by status alone.
+
+    On an RPC failure we return False (not confirmed) and log a warning — the
+    caller should treat the claim as uncertain, not successful. Returning True
+    on RPC failure previously caused silent missed claims when the receipt fetch
+    failed; returning False surfaces the uncertainty so the operator can verify.
     """
     try:
         receipt = rpc.get_transaction_receipt(tx_hash)
-    except RpcError:
-        return True
+    except RpcError as exc:
+        log.warning(
+            "_claim_took_effect: RPC failure fetching receipt for %s: %s — "
+            "treating as not confirmed (claim effect uncertain)",
+            tx_hash, exc,
+        )
+        return False
     if receipt is None:
-        return True
+        log.warning(
+            "_claim_took_effect: receipt for %s is None — "
+            "treating as not confirmed (claim effect uncertain)",
+            tx_hash,
+        )
+        return False
     rm = reward_manager.lower()
     return any(
         str(lg.get("address", "")).lower() == rm

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 
-from clif.autostate import AutoState, _DEAD_INTERVALS, EXIT_DEGRADED, EXIT_HEALTHY, EXIT_NO_STATE
+from clif.autostate import AutoState, _DEAD_INTERVALS, EXIT_DEGRADED, EXIT_HEALTHY, EXIT_NO_STATE, _ts_iso
 
 
 def fsp_stream_key(network: str, message_type: str) -> str:
@@ -33,13 +33,16 @@ def build_fsp_report(
             {
                 "stream": key,
                 "pending_epochs": sorted(s.first_seen),
-                "last_success_ts": s.last_success_ts,
-                "last_attempt_ts": s.last_attempt_ts,
+                # OBS-007: ISO8601 timestamps for human/tooling readability.
+                "last_success_ts": _ts_iso(s.last_success_ts),
+                "last_attempt_ts": _ts_iso(s.last_attempt_ts),
                 "last_outcome": s.last_outcome,
             }
         )
     return {
-        "updated_at": now,
+        # OBS-007: ISO8601 timestamp for updated_at.
+        "updated_at": _ts_iso(now),
+        "updated_at_ts": now,  # retain raw float for staleness arithmetic
         "network": network,
         "poll_interval_sec": poll_interval_sec,
         "stale_after_sec": stale_after_sec,
@@ -55,7 +58,13 @@ def fsp_status_exit_code(report: dict | None, now: float | None = None) -> tuple
         return EXIT_NO_STATE, "no FSP daemon status found (clif fsp auto has not run)"
     now = time.time() if now is None else now
     interval = int(report.get("poll_interval_sec", 900))
-    age = now - float(report.get("updated_at", 0.0))
+    # Support both the new updated_at_ts (float) and old updated_at (float) fields;
+    # updated_at is now an ISO8601 string (OBS-007) so fall back to updated_at_ts.
+    raw_ts = report.get("updated_at_ts") or report.get("updated_at", 0.0)
+    try:
+        age = now - float(raw_ts)
+    except (TypeError, ValueError):
+        age = float("inf")
     if age > _DEAD_INTERVALS * interval:
         return (
             EXIT_DEGRADED,

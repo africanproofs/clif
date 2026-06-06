@@ -44,8 +44,20 @@ def compute_leaf(
 
     ``beneficiary`` must be a 0x-prefixed 40-hex address string; it is
     lower-cased and stripped of the 0x prefix before encoding as bytes20.
+
+    Raises ``ValueError`` with a clear message if the beneficiary address
+    is malformed (not a valid 40-hex string after the 0x prefix).
     """
-    beneficiary_bytes20 = bytes.fromhex(beneficiary.lower().removeprefix("0x"))
+    try:
+        beneficiary_bytes20 = bytes.fromhex(beneficiary.lower().removeprefix("0x"))
+        if len(beneficiary_bytes20) != 20:
+            raise ValueError(
+                f"beneficiary must be a 40-hex address (got {len(beneficiary_bytes20 * 2)} hex chars)"
+            )
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(
+            f"compute_leaf: malformed beneficiary address {beneficiary!r}: {exc}"
+        ) from exc
     encoded = abi_encode(
         ["(uint24,bytes20,uint120,uint8)"],
         [(reward_epoch_id, beneficiary_bytes20, amount, claim_type)],
@@ -56,10 +68,11 @@ def compute_leaf(
 def node(x: str, y: str) -> str:
     """Combine two 0x-prefixed 32-byte hashes into an internal tree node.
 
-    The pair is sorted lexicographically (on the 0x-hex string) so the hash is
-    commutative — same result regardless of left/right assignment.
+    The pair is sorted lexicographically on the LOWERCASE hex string so the
+    hash is commutative and case-insensitive — an uppercase hex hash from the
+    data file and a lowercase computed hash sort identically.
     """
-    a, b = (x, y) if x <= y else (y, x)
+    a, b = (x, y) if x.lower() <= y.lower() else (y, x)
     encoded = abi_encode(
         ["bytes32", "bytes32"],
         [bytes.fromhex(a[2:]), bytes.fromhex(b[2:])],

@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     identity_address: str | None = None
     signing_policy_address: str | None = None
     claim_recipient_address: str | None = None
-    wrap_rewards: bool = True
+    wrap_rewards: bool = False
 
     fwd_endpoint: str = "http://fwd:8080"
     fwd_wallet_name: str | None = None

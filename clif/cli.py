@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -123,7 +124,8 @@ def health() -> None:
             raise typer.Exit(1) from exc
     console.print(f"endpoint : {s.fwd_endpoint}")
     console.print(f"master   : {h.master}")
-    console.print(f"rpc      : {h.rpc}")
+    # h.rpc is a retired field (fwd v1.1.0a9+: sign-only, no outbound RPC);
+    # omit it to avoid printing "rpc: None" which misleads the operator.
     console.print(f"fwd      : {h.fwd}")
     if h.master != "ok":
         err.print("[bold red]fwd sealed master not ready (master != 'ok')[/]")
@@ -895,11 +897,28 @@ def auto(
                         )
                         state.record_attempt(key, now, "terminal-cooldown")
                         continue
-                    o = submit_claims(s, fwd, int(ct), benef, claims, wait=False)
+                    # CLIF-AUTO-DAEMON-002 fix: pass rpc and wait=True so the daemon
+                    # broadcasts and polls for receipt confirmation.  wait=False with
+                    # rpc=None previously signed but never broadcast — a nonce was
+                    # consumed each cycle but no tx ever hit the chain.
+                    o = submit_claims(s, fwd, int(ct), benef, claims, wait=True, rpc=rpc)
                     state.record_attempt(key, now, o.status.value)
-                    if o.status == OutcomeStatus.SUBMITTED_PENDING:
+                    if o.status == OutcomeStatus.SUBMITTED_MINED:
+                        # OBS-008: include claim amount in log (from discovered claims).
+                        total_wei = sum(c.body.amount for c in claims)
+                        recipient = s.claim_recipient_address or "unknown"
                         log.info(
-                            "%s submitted epochs=%s tx=%s (mining via fwd)",
+                            "%s claim: epochs=%s amount=%s wei recipient=%s tx=%s",
+                            key, o.epochs, total_wei, recipient, o.tx_hash,
+                        )
+                    elif o.status == OutcomeStatus.SUBMITTED_PENDING:
+                        log.info(
+                            "%s submitted epochs=%s tx=%s (pending receipt confirmation)",
+                            key, o.epochs, o.tx_hash,
+                        )
+                    elif o.status == OutcomeStatus.MINED_NOOP:
+                        log.info(
+                            "%s mined noop epochs=%s tx=%s (already claimed)",
                             key, o.epochs, o.tx_hash,
                         )
                     elif o.status == OutcomeStatus.FAILED_RETRYABLE:
@@ -1050,6 +1069,47 @@ def fsp_status() -> None:
     raise typer.Exit(code)
 
 
+_FSP_AUTO_LOCK_FILE = "/tmp/clif-fsp-auto.lock"
+
+
+def _acquire_fsp_auto_lock() -> None:
+    """Acquire the fsp-auto singleton lock.
+
+    Writes the current PID to /tmp/clif-fsp-auto.lock.  If the file already
+    exists and the recorded PID is still running, print an error and exit — two
+    concurrent fsp-auto processes would double-sign epochs.  Stale locks (PID
+    gone) are silently overwritten.
+    """
+    lock_path = Path(_FSP_AUTO_LOCK_FILE)
+    if lock_path.exists():
+        try:
+            existing_pid = int(lock_path.read_text().strip())
+            # Check if that PID is still alive.
+            os.kill(existing_pid, 0)
+            # If os.kill succeeds, the process exists.
+            err.print(
+                f"[bold red]clif fsp auto is already running (PID {existing_pid}). "
+                f"Lock file: {_FSP_AUTO_LOCK_FILE}. "
+                "Two concurrent fsp-auto processes would double-sign epochs. Aborting.[/]"
+            )
+            raise typer.Exit(2)
+        except (ProcessLookupError, PermissionError):
+            # Process is gone (ProcessLookupError) or we can't signal it
+            # (PermissionError = exists but different user). Treat as stale.
+            pass
+        except ValueError:
+            pass  # malformed PID file — treat as stale
+    lock_path.write_text(str(os.getpid()))
+
+
+def _release_fsp_auto_lock() -> None:
+    """Remove the fsp-auto lock file on clean exit."""
+    try:
+        Path(_FSP_AUTO_LOCK_FILE).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 @fsp_app.command(name="auto")
 def fsp_auto(
     interval: Annotated[
@@ -1079,6 +1139,9 @@ def fsp_auto(
             "irreversible on-chain (D15 §5 risk).[/]"
         )
         raise typer.Exit(2)
+
+    # Concurrency guard: one fsp-auto process at a time.
+    _acquire_fsp_auto_lock()
 
     iv = interval or s.fsp_poll_interval_sec
     state = AutoState()
@@ -1126,15 +1189,22 @@ def fsp_auto(
                                 )
                                 state.record_attempt(key, now, "terminal-cooldown")
                                 continue
+                            # CLIF-FSP-FLOW-001 fix: always broadcast — do NOT pass wait=False.
+                            # wait=False skips _broadcast_and_confirm entirely, consuming the
+                            # fwd nonce without ever sending the tx to the chain.
                             o = (run_sign_uptime if mt == "UPTIME" else run_sign_rewards)(
-                                s, epoch, wait=False, rpc=rpc,
+                                s, epoch, wait=True, rpc=rpc,
                             )
                             state.record_attempt(key, now, o.status.value)
                             if o.ok:
                                 log.info(
-                                    "fsp auto %s epoch %s submitted tx=%s",
-                                    key, epoch, o.tx_hash,
+                                    "fsp auto %s epoch %s ok status=%s tx=%s",
+                                    key, epoch, o.status.value, o.tx_hash,
                                 )
+                                # CLIF-FSP-EPOCH-001: advance the watermark after each
+                                # successful (or already-finalized) epoch so we never
+                                # re-process the same epoch on the next poll cycle.
+                                watermark = epoch + 1
                             elif o.status == OutcomeStatus.FAILED_RETRYABLE:
                                 log.warning(
                                     "fsp auto %s epoch %s transient: %s (retry next cycle)",
@@ -1148,9 +1218,14 @@ def fsp_auto(
                                     "fsp auto %s epoch %s TERMINAL: %s — operator action likely needed",
                                     key, epoch, o.detail,
                                 )
+                                # Advance watermark past terminal epochs too, so we don't
+                                # re-attempt until the cooldown expires and they re-appear.
+                                watermark = epoch + 1
             except RpcError as exc:
                 log.warning("fsp auto rpc failure: %s (retry next cycle)", exc)
             except FwdRetryableError as exc:
+                # CLIF-AUTO-DAEMON-007: fwd 429 (rate-limit) is a retryable condition —
+                # log and retry next cycle rather than entering terminal cooldown.
                 log.warning("fsp auto fwd retryable: %s (retry next cycle)", exc)
 
             report = build_fsp_report(state, s.network, iv, s.fsp_stale_after_sec, time.time())
@@ -1160,6 +1235,8 @@ def fsp_auto(
             time.sleep(iv)
     except KeyboardInterrupt:
         log.info("fsp auto stopped")
+    finally:
+        _release_fsp_auto_lock()
 
 
 @chain_app.command()

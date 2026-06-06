@@ -18,6 +18,7 @@ import os
 import tempfile
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 # clif status exit codes (Docker healthcheck / monitoring scrape these).
@@ -84,9 +85,22 @@ class AutoState:
         return self._s(key).cooldown_until.get(epoch, 0.0) > now
 
     def evaluate(self, now: float, stale_after_sec: int) -> tuple[bool, list[str]]:
-        """Degraded if any epoch is claimable too long, or in terminal cooldown."""
+        """Degraded if any epoch is claimable too long, or in terminal cooldown.
+
+        Expired cooldowns are pruned here so the DEGRADED status clears once the
+        cooldown window passes and the epoch is no longer in first_seen (i.e.
+        normal processing resumed successfully).  This ensures the daemon
+        transitions from DEGRADED back to ACTIVE (non-degraded) once at least
+        one epoch is successfully processed after the cooldown expires — it does
+        not stay DEGRADED indefinitely due to a stale cooldown entry.
+        """
         reasons: list[str] = []
         for key, s in self.streams.items():
+            # Prune expired cooldowns so they don't re-fire as "in cooldown".
+            expired = [ep for ep, until in s.cooldown_until.items() if until <= now]
+            for ep in expired:
+                del s.cooldown_until[ep]
+
             for epoch, seen in s.first_seen.items():
                 age = now - seen
                 if age > stale_after_sec:
@@ -103,6 +117,13 @@ class AutoState:
         return (bool(reasons), reasons)
 
 
+def _ts_iso(ts: float | None) -> str | None:
+    """Convert a float Unix timestamp to an ISO8601 UTC string, or None."""
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
 def build_report(
     state: AutoState,
     network: str,
@@ -117,13 +138,16 @@ def build_report(
             {
                 "stream": key,
                 "claimable_epochs": sorted(s.first_seen),
-                "last_success_ts": s.last_success_ts,
-                "last_attempt_ts": s.last_attempt_ts,
+                # OBS-007: ISO8601 timestamps for human/tooling readability.
+                "last_success_ts": _ts_iso(s.last_success_ts),
+                "last_attempt_ts": _ts_iso(s.last_attempt_ts),
                 "last_outcome": s.last_outcome,
             }
         )
     return {
-        "updated_at": now,
+        # OBS-007: ISO8601 timestamp for updated_at.
+        "updated_at": _ts_iso(now),
+        "updated_at_ts": now,  # retain raw float for staleness arithmetic
         "network": network,
         "poll_interval_sec": poll_interval_sec,
         "stale_after_sec": stale_after_sec,
@@ -158,7 +182,13 @@ def status_exit_code(report: dict | None, now: float | None = None) -> tuple[int
         return EXIT_NO_STATE, "no daemon status found (clif auto has not run)"
     now = time.time() if now is None else now
     interval = int(report.get("poll_interval_sec", 900))
-    age = now - float(report.get("updated_at", 0.0))
+    # Support both the new updated_at_ts (float) and old updated_at (float) fields;
+    # updated_at is now an ISO8601 string (OBS-007) so fall back to updated_at_ts.
+    raw_ts = report.get("updated_at_ts") or report.get("updated_at", 0.0)
+    try:
+        age = now - float(raw_ts)
+    except (TypeError, ValueError):
+        age = float("inf")
     if age > _DEAD_INTERVALS * interval:
         return (
             EXIT_DEGRADED,
