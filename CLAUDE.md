@@ -66,6 +66,41 @@ paths now do too (v0.5.6). *Codified 2026-05-29 after an empty Flare discovery (
 already claimed manually by the operator) was mis-reported as "not yet claimable" — the
 same done-vs-pending conflation as the rule above, made right after invoking it.*
 
+## Automation — `clif epoch run` (canonical reward-lifecycle daemon)
+
+The canonical automation is **`clif epoch run`** (`clif/epoch_auto.py`; decisions D17) — ONE
+epoch-anchored sign→claim state machine per network that **replaces** the older always-on
+`clif auto` (claim) + `clif fsp auto` (sign) 15-min pollers as the daemon entrypoint (those
+survive for manual one-shots only). Per reward epoch N, once it closes:
+
+(optional) sign uptime → wait until `epoch_end + EPOCH_REWARD_INITIAL_DELAY_SEC` (1h) →
+poll every `EPOCH_POLL_INTERVAL_SEC` (30m) for reward publication
+(`get_reward_distribution_data`) → sign rewards (Merkle-verified) → wait for the >threshold
+`rewardsHash` finalization → **claim ONLY epoch N** (`run_claim(only_epoch=N)`) → idle until
+the next epoch.
+
+- **Timing (apgateway model):** read `firstRewardEpochStartTs()` + `rewardEpochDurationSeconds()`
+  from FlareSystemsManager ONCE, then `epoch_end_ts(N) = first + (N+1)·dur` — pure math for any
+  epoch incl. the current/next not-yet-closed one. Mirrors
+  `ftso/apgateway/apgateway/indexer/epoch_cache.py::get_timing`; **apgateway is the reference for
+  FTSO reward-epoch timing** (it does not model the FSP finalization phases — clif does).
+  `next_sleep_seconds` sleeps precisely (next-window when idle / `wait_until` when too-early /
+  `poll_interval` while waiting), never a flat poll.
+- **Idempotency is chain-derived** (no durable phase state): `getVoterRewardsSignInfo` /
+  `getVoterUptimeVoteSignInfo` (ts≠0 ⇒ we signed), `rewardsHash != 0` (finalized), `run_claim`
+  pre-flight + `MINED_NOOP`. A restart re-derives each epoch's phase and resumes.
+- **Gates:** signs only when `FSP_AUTO_ENABLED=true` (hard-off, D15); the uptime phase is
+  additionally gated by `UPTIME_AUTO_ENABLED` (default false). Claim scope = the signed epoch only.
+- **Deploy:** compose service `clif-epoch-<net>` (`command: ["epoch","run"]`, healthcheck
+  `clif epoch status`), launched by `sudo fwd start <net>` (fwd install overlay).
+- **No live signing-weight %** is on-chain (only the binary finalized flip); a live-% readout
+  would self-index `RewardsSigned` events + the Relay signing policy (deferred Phase-2).
+
+The reads + timing are **live-validated** on Songbird+Flare (`epoch_end_ts(N)` == the contract's
+own `currentRewardEpochExpectedEndTs()`, exact). The end-to-end sign→finalize→claim execution +
+FSP on-chain acceptance remain the operator's standing live drill at the next ended epoch. Deeper
+rationale: agent memory `clif-epoch-daemon-and-apgateway-timing.md` + `validating-keyless-chain-reads.md`.
+
 ## Knowledge base (authoritative, in-repo)
 
 Read these before non-trivial work; they are the binding references:
@@ -79,7 +114,7 @@ Read these before non-trivial work; they are the binding references:
 | `docs/verification.md` | Verification ladder (proven vs blocked), rehearsal ladder, pre-flight traps, local checks. |
 | `docs/fwd-integration-spec.md` | The operator handshake artifact (regenerate with `clif spec`). |
 
-## Status — current: v0.5.11
+## Status — current: v0.5.17
 
 clif is on the public `github.com/africanproofs/clif` (build-from-source). The
 reward-claim and FSP signing paths are code complete and keyless. The clif ↔ fwd ↔
@@ -100,6 +135,13 @@ tests green. Build via `fwd-client` (shared keyless transport lib).
 
 **Changelog (condensed):**
 
+- **v0.5.16–0.5.17 (2026-06-06) — epoch-anchored sign→claim daemon.** New `clif epoch run`
+  (`clif/epoch_auto.py`, D17) replaces `clif auto` + `clif fsp auto` as the daemon: one
+  per-network state machine sequencing uptime?→reward-sign→claim per reward epoch (§ Automation).
+  0.5.17 adopts apgateway's timing model — FSM constants (`firstRewardEpochStartTs` +
+  `rewardEpochDurationSeconds`) read once → `epoch_end_ts(N)` math + `next_sleep_seconds` precise
+  idle/poll scheduling. Reads live-validated SGB+FLR (cross-checked vs `currentRewardEpochExpectedEndTs`).
+  fwd install wiring (`clif-epoch-<net>`, `fwd start <net>`) shipped fwd a88.
 - **v0.5.8 (2026-05-31)** — docs-only professionalization (cross-repo pass with fwd):
   corrected "What clif is NOT" to the present (FSP signing is live + keyless via
   fwd's `/v1/sign-fsp-message` + `/v1/sign-transaction` — not "deferred"; dropped the
