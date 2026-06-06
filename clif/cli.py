@@ -54,6 +54,7 @@ from clif.fsp_autostate import (
     fsp_status_exit_code,
     fsp_stream_key,
 )
+from clif.epoch_auto import build_epoch_report, resolve_voter, run_cycle
 from clif.reward_data import get_reward_distribution_data
 from clif.rpc import RpcClient, RpcError
 
@@ -83,6 +84,15 @@ chain_app = typer.Typer(
     help="Keyless chain reads (nonce, ...). No keys; public RPC reads only.",
 )
 app.add_typer(chain_app, name="chain")
+
+epoch_app = typer.Typer(
+    add_completion=False,
+    help=(
+        "Epoch-anchored sign→claim daemon (replaces `auto` + `fsp auto`). "
+        "`epoch run` is the daemon; `epoch status` is the scrapable health."
+    ),
+)
+app.add_typer(epoch_app, name="epoch")
 console = Console()
 err = Console(stderr=True)
 
@@ -1287,6 +1297,135 @@ def fsp_auto(
         log.info("fsp auto stopped")
     finally:
         _release_fsp_auto_lock()
+
+
+@epoch_app.command(name="run")
+def epoch_run(
+    interval: Annotated[
+        Optional[int], typer.Option("--interval", help="poll seconds (default EPOCH_POLL_INTERVAL_SEC=1800)")
+    ] = None,
+    from_epoch: Annotated[
+        Optional[int],
+        typer.Option("--from-epoch", help="backfill start (default: only epochs that close while running)"),
+    ] = None,
+) -> None:
+    """Epoch-anchored sign→claim daemon — one flow per reward epoch.
+
+    Per epoch N (once it closes): (optional) sign uptime → wait until
+    epoch_end+initial_delay, poll for reward publication → sign rewards →
+    wait for the >threshold rewardsHash finalization → claim ONLY epoch N →
+    idle until the next epoch. Idempotency is chain-derived (getVoter*SignInfo
+    + rewardsHash + claim pre-flight), so restarts resume safely.
+
+    Replaces `clif auto` + `clif fsp auto` as the daemon entrypoint. Shares the
+    fsp-auto singleton lock (only one signer process per host).
+    """
+    s = _settings()
+    # Hard-off gate (D15): the state machine SIGNS. A valid signature over wrong
+    # data is irreversible on-chain, so signing is opt-in.
+    if not s.fsp_auto_enabled:
+        err.print(
+            "[bold red]clif epoch is HARD-DISABLED by default (it signs). Set "
+            "FSP_AUTO_ENABLED=true to run it (decisions.md D15). The UPTIME phase "
+            "is additionally gated by UPTIME_AUTO_ENABLED (default false).[/]"
+        )
+        raise typer.Exit(2)
+
+    # One signer at a time (shared with fsp auto — both sign → double-sign risk).
+    _acquire_fsp_auto_lock()
+    try:
+        iv = interval or s.epoch_poll_interval_sec
+        claimers = [(int(ct), benef) for ct, benef in _enabled_claimers(s)]
+        if not claimers:
+            err.print(
+                "[bold red]epoch: no claim beneficiary configured "
+                "(set IDENTITY_ADDRESS and/or SIGNING_POLICY_ADDRESS).[/]"
+            )
+            raise typer.Exit(2)
+        state = AutoState()
+
+        # Resume the low-watermark: --from-epoch, else the prior status file,
+        # else None (handle only epochs that close while we run).
+        last_done: int | None = (from_epoch - 1) if from_epoch is not None else None
+        if last_done is None:
+            prior = read_status(s.epoch_status_file)
+            if prior is not None and prior.get("last_done_epoch") is not None:
+                last_done = int(prior["last_done_epoch"])
+
+        with RpcClient(s.rpc_url) as rpc0:
+            voter = resolve_voter(s, rpc0)
+        if not voter:
+            err.print(
+                "[bold red]epoch: cannot resolve the FSP voter address — set "
+                "SIGNING_POLICY_ADDRESS (or IDENTITY_ADDRESS with a known EntityManager).[/]"
+            )
+            raise typer.Exit(2)
+
+        log.info(
+            "epoch start network=%s interval=%ss uptime=%s initial_delay=%ss voter=%s last_done=%s state=%s",
+            s.network, iv, s.uptime_auto_enabled, s.epoch_reward_initial_delay_sec,
+            voter, last_done, s.epoch_status_file,
+        )
+        try:
+            while True:
+                now = time.time()
+                observations = []
+                current = None
+                try:
+                    with RpcClient(s.rpc_url) as rpc, FwdClient(
+                        s.fwd_endpoint, s.fwd_caller_token
+                    ) as fwd:
+                        last_done, current, observations = run_cycle(
+                            s, rpc, fwd, voter, claimers, state, last_done, now,
+                            uptime_enabled=s.uptime_auto_enabled,
+                            initial_delay=s.epoch_reward_initial_delay_sec,
+                            terminal_cooldown=s.epoch_terminal_cooldown_sec,
+                        )
+                        for o in observations:
+                            acts = "".join(f" [{leg}={st}]" for leg, st, _ in o.actions)
+                            log.info(
+                                "epoch %s phase=%s done=%s: %s%s",
+                                o.epoch, o.phase.value, o.done, o.detail, acts,
+                            )
+                except RpcError as exc:
+                    log.warning("epoch rpc failure: %s (retry next cycle)", exc)
+                except FwdRetryableError as exc:
+                    log.warning("epoch fwd retryable: %s (retry next cycle)", exc)
+
+                report = build_epoch_report(
+                    state, s.network, iv, s.epoch_stale_after_sec,
+                    last_done, current, observations, time.time(),
+                )
+                write_status_atomic(s.epoch_status_file, report)
+                if report["degraded"]:
+                    log.error("epoch DEGRADED: %s", "; ".join(report["reasons"]))
+                time.sleep(iv)
+        except KeyboardInterrupt:
+            log.info("epoch stopped")
+    finally:
+        _release_fsp_auto_lock()
+
+
+@epoch_app.command(name="status")
+def epoch_status() -> None:
+    """Scrapable health for `clif epoch run` (Docker healthcheck / monitoring).
+
+    Exit: 0 healthy; 2 degraded or daemon dead/stale; 3 no daemon state.
+    """
+    s = _settings()
+    report = read_status(s.epoch_status_file)
+    code, line = status_exit_code(report)
+    (console.print if code == 0 else err.print)(
+        f"[{'green' if code == 0 else 'bold red'}]{line}[/]"
+    )
+    if report is not None:
+        console.print(
+            f"  network={report.get('network')} last_done_epoch={report.get('last_done_epoch')} "
+            f"current_epoch={report.get('current_epoch')}"
+        )
+        for e in report.get("epochs", []):
+            console.print(f"  epoch {e['epoch']}: {e['phase']} — {e['detail']}")
+    raise typer.Exit(code)
 
 
 @chain_app.command()

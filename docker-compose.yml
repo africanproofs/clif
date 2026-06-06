@@ -1,5 +1,6 @@
-# clif deployment. `clif-auto` is the always-on daemon; `clif` (profile: cli)
-# is the one-shot used for the rehearsal ladder + manual ops.
+# clif deployment. `clif-epoch` is the always-on epoch-anchored sign→claim
+# daemon (replaces the former `clif-auto` + `clif-fsp-auto` 15-min pollers);
+# `clif` (profile: cli) is the one-shot used for the rehearsal ladder + manual ops.
 #
 # Networking: clif reaches fwd at FWD_ENDPOINT (default http://fwd:8080), which
 # requires sharing fwd's Docker network. fwd's compose network is project-
@@ -7,41 +8,38 @@
 # different. If clif runs on another host, set FWD_ENDPOINT to a reachable URL
 # and replace the external network with a normal bridge.
 #
-# Multichain cutover (profile: multichain) — replaces the upstream
-# `~/opt/signing-tool` hot-key signer. clif drives ONE shared fwd for
-# Flare (14) ∥ Songbird (19) ∥ Coston2 (114) in parallel: per network, one
-# keyless fee-claim daemon (`auto`) + one FSP daemon (`fsp auto`), each with
-# its own gitignored `.env.<network>` and its own `CLIF_STATE_DIR`. Notes:
+# Multichain (profile: multichain) — replaces the upstream `~/opt/signing-tool`
+# hot-key signer. clif drives ONE shared fwd for Flare (14) ∥ Songbird (19) ∥
+# Coston2 (114) in parallel: per network, ONE epoch daemon (`epoch run`) that
+# sequences uptime(optional)→reward-sign→claim per reward epoch, each with its
+# own gitignored `.env.<network>` and its own `CLIF_STATE_DIR`. Notes:
 #  - Per-network `CLIF_STATE_DIR` (e.g. `.clif-state/flare`) is REQUIRED in
-#    each `.env.<network>` — defense in depth on top of the now
-#    network-scoped status filenames (clean per-network logs/backups).
-#  - The fwd signing-policy wallet `clif-fsp-signing-policy-prod` and sender
-#    `clif-fsp-sender` are the SAME on every network; chain is a runtime
-#    parameter on the fwd side — clif only selects `NETWORK`.
+#    each `.env.<network>` (clean per-network status/logs/backups).
 #  - Every process MUST boot keyless: no `*PRIVATE_KEY*` in env or the
 #    resolved `.env.<network>` (config.assert_keyless). clif holds no keys.
-#  - The FSP daemon stays hard-disabled unless `FSP_AUTO_ENABLED=true` in
-#    that network's env file (D15). Per-network fwd caller tokens are
+#  - The daemon SIGNS, so it stays hard-disabled unless `FSP_AUTO_ENABLED=true`
+#    in that network's env file (D15). The UPTIME phase is additionally gated by
+#    `UPTIME_AUTO_ENABLED` (default false). Per-network fwd caller tokens are
 #    operator-injected secrets (Core #12) — only in the gitignored
 #    `.env.<network>`, never in this file.
-# Run a single network's pair, e.g.:
-#   docker compose --profile multichain up -d clif-auto-flare clif-fsp-auto-flare
-# or all three networks' daemons:
+# Run a single network's daemon, e.g.:
+#   docker compose --profile multichain up -d clif-epoch-flare
+# or all three networks:
 #   docker compose --profile multichain up -d
 
 services:
-  clif-auto:
+  clif-epoch:
     build: .
     image: clif:dev
-    container_name: clif-auto
-    command: ["auto"]
+    container_name: clif-epoch
+    command: ["epoch", "run"]
     env_file: [.env]
     networks: [fwd-net, egress]
     restart: unless-stopped
     healthcheck:
-      # `clif status` exits non-zero when degraded or when the daemon is
+      # `clif epoch status` exits non-zero when degraded or when the daemon is
       # dead/stale — the scrapable money-path health signal.
-      test: ["CMD", "clif", "status"]
+      test: ["CMD", "clif", "epoch", "status"]
       interval: 300s
       timeout: 15s
       retries: 3
@@ -59,102 +57,52 @@ services:
 
   # --- Multichain (Flare ∥ Songbird ∥ Coston2), one shared fwd ---
   # Each service: own gitignored .env.<network> (NETWORK, CLIF_STATE_DIR,
-  # FWD_ENDPOINT, the per-network FSP_*_CALLER_TOKEN secrets, the shared
-  # FSP_SIGNING_WALLET_NAME=clif-fsp-signing-policy-prod /
-  # FSP_SENDER_WALLET_NAME=clif-fsp-sender). Additive — the single-network
-  # clif-auto/clif services above are unchanged.
+  # FWD_ENDPOINT, the per-network FSP_*_CALLER_TOKEN + claim token secrets,
+  # the per-network FSP_SIGNING_WALLET_NAME / FSP_SENDER_WALLET_NAME).
 
-  clif-auto-coston2:
+  clif-epoch-coston2:
     build: .
     image: clif:dev
-    container_name: clif-auto-coston2
-    command: ["auto"]
+    container_name: clif-epoch-coston2
+    command: ["epoch", "run"]
     env_file: [.env.coston2]
     networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "clif", "status"]
+      test: ["CMD", "clif", "epoch", "status"]
       interval: 300s
       timeout: 15s
       retries: 3
       start_period: 1200s
 
-  clif-fsp-auto-coston2:
+  clif-epoch-songbird:
     build: .
     image: clif:dev
-    container_name: clif-fsp-auto-coston2
-    command: ["fsp", "auto"]
-    env_file: [.env.coston2]
-    networks: [fwd-net, egress]
-    profiles: ["multichain"]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "clif", "fsp", "status"]
-      interval: 300s
-      timeout: 15s
-      retries: 3
-      start_period: 1200s
-
-  clif-auto-songbird:
-    build: .
-    image: clif:dev
-    container_name: clif-auto-songbird
-    command: ["auto"]
+    container_name: clif-epoch-songbird
+    command: ["epoch", "run"]
     env_file: [.env.songbird]
     networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "clif", "status"]
+      test: ["CMD", "clif", "epoch", "status"]
       interval: 300s
       timeout: 15s
       retries: 3
       start_period: 1200s
 
-  clif-fsp-auto-songbird:
+  clif-epoch-flare:
     build: .
     image: clif:dev
-    container_name: clif-fsp-auto-songbird
-    command: ["fsp", "auto"]
-    env_file: [.env.songbird]
-    networks: [fwd-net, egress]
-    profiles: ["multichain"]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "clif", "fsp", "status"]
-      interval: 300s
-      timeout: 15s
-      retries: 3
-      start_period: 1200s
-
-  clif-auto-flare:
-    build: .
-    image: clif:dev
-    container_name: clif-auto-flare
-    command: ["auto"]
+    container_name: clif-epoch-flare
+    command: ["epoch", "run"]
     env_file: [.env.flare]
     networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "clif", "status"]
-      interval: 300s
-      timeout: 15s
-      retries: 3
-      start_period: 1200s
-
-  clif-fsp-auto-flare:
-    build: .
-    image: clif:dev
-    container_name: clif-fsp-auto-flare
-    command: ["fsp", "auto"]
-    env_file: [.env.flare]
-    networks: [fwd-net, egress]
-    profiles: ["multichain"]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "clif", "fsp", "status"]
+      test: ["CMD", "clif", "epoch", "status"]
       interval: 300s
       timeout: 15s
       retries: 3

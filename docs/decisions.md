@@ -142,3 +142,23 @@
   a stale balance delta looked like a claim. The operator deliberately set the trap.
   Verify the effect, never the status. Proven on the live already-claimed epoch;
   tests in `tests/test_claimer.py`.*
+- **D17 — Epoch-anchored sign→claim state machine replaces the two always-on
+  pollers (2026-06-06).** `clif epoch run` (`clif/epoch_auto.py`) drives each reward
+  epoch through phases — (optional) uptime sign → wait until epoch_end+initial_delay,
+  poll for reward publication → reward sign → wait for the >threshold rewardsHash
+  finalization → claim ONLY that epoch → idle until the next epoch — superseding the
+  former `clif auto` (claim) + `clif fsp auto` (sign) 15-min dumb-pollers as the daemon
+  entrypoint (the old commands remain for manual one-shots). Idempotency is
+  **chain-derived**: "have WE signed" = FlareSystemsManager `getVoterRewardsSignInfo` /
+  `getVoterUptimeVoteSignInfo` (ts≠0); finalization = `rewardsHash != 0`; claim
+  readiness/already-claimed = the existing `run_claim` pre-flight + `MINED_NOOP`
+  effect-check (D16). So a crash/restart re-derives each epoch's phase and resumes.
+  Signing stays behind the `FSP_AUTO_ENABLED` hard-off gate (D15); the uptime phase is
+  additionally gated by `UPTIME_AUTO_ENABLED` (default false); claim scope is the signed
+  epoch only (`run_claim(only_epoch=N)`). *Threshold note: the chain exposes only the
+  binary finalized `rewardsHash` flip, NOT a live signing-weight % — no third-party
+  indexer is used; the `RewardsSigned(… thresholdReached)` events + per-voter getters are
+  sufficient. A live-% readout (self-indexed via `eth_getLogs` + a Relay signing-policy
+  read) is a deferred Phase-2 polish. Config: `EPOCH_REWARD_INITIAL_DELAY_SEC` (3600),
+  `EPOCH_POLL_INTERVAL_SEC` (1800). Tests in `tests/test_epoch_auto.py`; live Songbird
+  end-to-end at the next ended epoch is the standing real-infra gate.*

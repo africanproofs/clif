@@ -187,6 +187,19 @@ class Settings(BaseSettings):
     fsp_stale_after_sec: int = 86_400
     fsp_terminal_cooldown_sec: int = 3_600
 
+    # Epoch-anchored sign→claim state machine (`clif epoch`). One daemon per
+    # network drives each reward epoch through its phases instead of the two
+    # always-on 15-min pollers. Signing stays behind fsp_auto_enabled (the D15
+    # hard-off gate); the uptime phase is additionally gated OFF by default.
+    # initial_delay = wait this long after epoch end before the first
+    # reward-publication check (reward calc takes time); poll_interval = the
+    # active-window cadence.
+    uptime_auto_enabled: bool = False
+    epoch_reward_initial_delay_sec: int = 3_600  # 1h
+    epoch_poll_interval_sec: int = 1_800  # 30m
+    epoch_stale_after_sec: int = 86_400  # 24h: an active epoch stuck this long ⇒ degraded
+    epoch_terminal_cooldown_sec: int = 3_600
+
     @property
     def net(self) -> NetworkConfig:
         return _NETWORKS[self.network]
@@ -211,6 +224,10 @@ class Settings(BaseSettings):
     @property
     def fsp_status_file(self) -> Path:
         return Path(self.clif_state_dir) / f"fsp-auto-status-{self.network}.json"
+
+    @property
+    def epoch_status_file(self) -> Path:
+        return Path(self.clif_state_dir) / f"epoch-status-{self.network}.json"
 
 
 def load_settings() -> Settings:

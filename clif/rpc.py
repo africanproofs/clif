@@ -309,6 +309,61 @@ class RpcClient:
         (out,) = self._abi_decode(["bytes32"], self.eth_call(flare_systems_manager, data))
         return "0x" + out.hex()
 
+    def reward_epoch_start_ts(self, flare_systems_manager: str, epoch_id: int) -> int:
+        """getRewardEpochStartInfo(uint24) → (startTs, startBlock); returns startTs.
+
+        Epoch N's END timestamp == epoch (N+1)'s START timestamp, so a closed
+        epoch's end is reward_epoch_start_ts(fsm, N + 1). Keyless read.
+        """
+        data = (
+            "0x"
+            + selector("getRewardEpochStartInfo(uint24)").hex()
+            + abi_encode(["uint24"], [epoch_id]).hex()
+        )
+        start_ts, _start_block = self._abi_decode(
+            ["uint64", "uint64"], self.eth_call(flare_systems_manager, data)
+        )
+        return int(start_ts)
+
+    def reward_epoch_end_ts(self, flare_systems_manager: str, epoch_id: int) -> int:
+        """The end timestamp of (closed) reward epoch `epoch_id` = start of epoch+1."""
+        return self.reward_epoch_start_ts(flare_systems_manager, epoch_id + 1)
+
+    def voter_rewards_sign_info(
+        self, flare_systems_manager: str, epoch_id: int, voter: str
+    ) -> tuple[int, int]:
+        """getVoterRewardsSignInfo(uint24,address) → (signTs, signBlock).
+
+        (0, 0) = this voter has NOT signed rewards for the epoch; a non-zero
+        signTs = the voter (our signing-policy address) already signed. Keyless.
+        """
+        data = (
+            "0x"
+            + selector("getVoterRewardsSignInfo(uint24,address)").hex()
+            + abi_encode(["uint24", "address"], [epoch_id, voter]).hex()
+        )
+        ts, blk = self._abi_decode(
+            ["uint64", "uint64"], self.eth_call(flare_systems_manager, data)
+        )
+        return int(ts), int(blk)
+
+    def voter_uptime_vote_sign_info(
+        self, flare_systems_manager: str, epoch_id: int, voter: str
+    ) -> tuple[int, int]:
+        """getVoterUptimeVoteSignInfo(uint24,address) → (signTs, signBlock).
+
+        (0, 0) = this voter has NOT signed the uptime vote for the epoch. Keyless.
+        """
+        data = (
+            "0x"
+            + selector("getVoterUptimeVoteSignInfo(uint24,address)").hex()
+            + abi_encode(["uint24", "address"], [epoch_id, voter]).hex()
+        )
+        ts, blk = self._abi_decode(
+            ["uint64", "uint64"], self.eth_call(flare_systems_manager, data)
+        )
+        return int(ts), int(blk)
+
     def get_revert_reason(self, tx_hash: str) -> str | None:
         """Attempt to decode the revert reason for a mined-reverted tx by replaying it.
 
