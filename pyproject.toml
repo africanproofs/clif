@@ -26,7 +26,7 @@ eth-abi = "^5.0"
 pydantic = "^2.10"
 pydantic-settings = "^2.6"
 # Shared fwd HTTP transport (pure httpx+pydantic; no crypto dep).
-fwd-client = {git = "https://github.com/africanproofs/fwd-client.git", tag = "v0.1.0"}
+fwd-client = {git = "https://github.com/africanproofs/fwd-client.git", tag = "v0.1.1", subdirectory = "python"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"
