@@ -130,8 +130,11 @@ inferred via the registered `0xfB021c…` voter key, not demonstrated). See
 `docs/verification.md` for the rung-by-rung state.
 
 Current contract: clif asks fwd to SIGN (`/v1/sign-transaction`), then **broadcasts
-the returned `signed_raw_tx` itself** and **reports the outcome back** to fwd. 186
-tests green. Build via `fwd-client` (shared keyless transport lib).
+the returned `signed_raw_tx` itself** and **reports the outcome back** to fwd. 216
+tests green. Build via the shared `fwd-client` lib
+(`github.com/africanproofs/fwd-client`, `subdirectory=python`, tag **v0.1.1**); fwd
+error classification is **class-based** (`FwdRetryableError`/`FwdTerminalError`, never
+`error_code`) — see `docs/fwd-contract.md` § Error taxonomy and `docs/decisions.md` D18.
 
 **Changelog (condensed):**
 

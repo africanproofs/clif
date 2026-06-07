@@ -11,6 +11,14 @@ client-broadcast → report-back**: clif POSTs the intent, fwd returns a signed
 raw tx, clif broadcasts it itself (`clif/rpc.py`, `eth_sendRawTransaction`),
 then reports the outcome back so fwd can confirm or release the nonce.
 
+clif talks to fwd through the shared **fwd-client** library
+(`github.com/africanproofs/fwd-client`, Python in `subdirectory=python`, tag
+**v0.1.1**) — `from fwd_client import …`, re-exported via `clif/fwd_client.py`.
+Error classification is **class-based** (`FwdRetryableError` / `FwdTerminalError`,
+HTTP-status-driven — never `error_code`; see § Error taxonomy). clif composes
+idempotency keys via the lib's generic `make_idempotency_key`, **byte-identical to
+the Go port's `MakeIdempotencyKey`** — never reimplement the hashing.
+
 ## Auth
 
 `Authorization: Bearer fwd_live_<…>` — a per-caller token minted **once** by
@@ -118,7 +126,14 @@ on signing (`clif health`).
 
 ## Error taxonomy
 
-Envelope `{ "error": str, "message": str }`.
+Envelope (FastAPI-nested): `{ "detail": { "error": str, "message": str } }`.
+
+> **Known gap (fwd-client Python ≤ v0.1.1):** `raise_for_fwd_error` reads
+> top-level `body["error"]`, not `body["detail"]["error"]`, so
+> `FwdError.error_code` is `"unknown"` for daemon errors. **Harmless for clif** —
+> classification is by exception **class** (`FwdRetryableError` vs
+> `FwdTerminalError`), which is **HTTP-status-driven**; clif never branches on
+> `error_code`, and must not start.
 
 | HTTP | examples | class |
 |---|---|---|
@@ -126,17 +141,23 @@ Envelope `{ "error": str, "message": str }`.
 | 401 | unauthorized | **terminal** |
 | 403 | `policy_denied` | **terminal** |
 | 404 | `wallet_not_found` / cross-caller tx | **terminal** |
-| 409 | `nonce_not_initialized` (operator runs admin `nonce-init`) / `idempotency_conflict` / `tx_hash_mismatch` / `illegal_transition` | **terminal** |
+| 409 | `nonce_not_initialized` (operator runs admin `nonce-init`) / `idempotency_conflict` / `tx_hash_mismatch` / `illegal_transition` — every code **except** `idempotent_replay` (see note) | **terminal** |
 | 422 | `/v1/sign-fsp-message` body cannot be reconstructed into a messageHash (bad / unknown FSP fields) | **terminal** |
 | 503 | `vault_unavailable` (sealed master not loaded) | **retryable** |
 | — | any httpx transport error (ConnectError/ReadTimeout/PoolTimeout/…) — a down/restarting fwd | **retryable** |
 
+**409 is split by error code in fwd-client:** `idempotent_replay` → **retryable**
+(a defensive fail-safe), every other 409 code → **terminal**. In practice the fwd
+**daemon never sends clif a 409 `idempotent_replay`** — a replayed idempotency key
+returns the **cached 200 result** — so **every 409 clif actually receives is terminal**.
+
 **There is no `502` from fwd anymore** — fwd does no RPC, so broadcast/RPC
 errors are clif's **own** (raised by `clif/rpc.py`, not by fwd). Rule:
-**400/401/403/404/409/422 → do not retry (escalate); 503/transport-error →
-backoff + retry.** A down fwd MUST degrade the clif daemon (`clif epoch run`, or the
-legacy `clif auto`/`clif fsp auto`), never crash it (clif converts transport errors to
-`FwdRetryableError` via the shared `fwd-client` lib, never propagated raw).
+**400/401/403/404/409/422 — and any unmapped status (fail closed) — → do not retry
+(escalate); 503/transport-error → backoff + retry.** A down fwd MUST degrade the clif
+daemon (`clif epoch run`, or the legacy `clif auto`/`clif fsp auto`), never crash it
+(clif converts transport errors to `FwdRetryableError` via the shared `fwd-client`
+lib, never propagated raw).
 
 ## RewardManager ABI (what fwd decodes)
 
