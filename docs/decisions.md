@@ -192,7 +192,7 @@
   `raise_for_fwd_error` reads top-level `body["error"]`, so `FwdError.error_code` is
   `"unknown"` for daemon errors. Harmless: clif dispatches on the exception **class**
   (HTTP-status-driven), never on `error_code` — and must not start (the fix belongs in
-  fwd-client, a sibling repo clif does not touch). **(d) Idempotency parity.** the lib's
+  fwd-client, a sibling repo clif does not touch). **(d) Idempotency parity.** The lib's
   `make_idempotency_key` is byte-identical to the Go port's `MakeIdempotencyKey`; clif
   composes via the lib helper and never reimplements the hashing. *Why: reconcile clif to
   the migrated/reorganized fwd-client; docs/verification-only — no clif version bump.*
