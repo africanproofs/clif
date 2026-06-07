@@ -15,9 +15,10 @@ clif talks to fwd through the shared **fwd-client** library
 (`github.com/africanproofs/fwd-client`, Python in `subdirectory=python`, tag
 **v0.1.1**) — `from fwd_client import …`, re-exported via `clif/fwd_client.py`.
 Error classification is **class-based** (`FwdRetryableError` / `FwdTerminalError`,
-HTTP-status-driven — never `error_code`; see § Error taxonomy). clif composes
-idempotency keys via the lib's generic `make_idempotency_key`, **byte-identical to
-the Go port's `MakeIdempotencyKey`** — never reimplement the hashing.
+HTTP-status-driven — never `error_code`; see § Error taxonomy). clif composes its
+idempotency keys via the lib's generic `make_idempotency_key` — whose hashing is
+**byte-identical to the Go port's `MakeIdempotencyKey` for the same input** (clif adds
+a `clif:` / `clif-fsp:` namespace prefix); never reimplement the hashing.
 
 ## Auth
 
