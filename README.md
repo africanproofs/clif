@@ -20,6 +20,31 @@ Read-only commands use public RPC and do not need fwd credentials.
 
 ## Install
 
+### Full reward-provider stack (fwd + clif)
+
+For a full FTSO reward-provider stack, install fwd with the optional clif
+claim/FSP layer:
+
+```sh
+curl -sfL https://get.proofs.africa/fwd | sudo sh -s -- --with-clif
+```
+
+Until `get.proofs.africa` hosting is live, run the public source installer
+directly:
+
+```sh
+git clone https://github.com/africanproofs/fwd.git
+sudo sh fwd/install/install.sh --with-clif
+```
+
+The installer builds from source, creates `/opt/fwd`, starts only fwd and
+litestream, and leaves the stack inert: empty default-deny policy, zero wallets,
+no signable custody.
+
+### clif only (from source)
+
+Build clif on its own — for development, or to run against an existing fwd:
+
 ```sh
 git clone https://github.com/africanproofs/clif.git
 cd clif
@@ -27,10 +52,34 @@ poetry install
 poetry run clif version
 ```
 
+## Onboard rewards
+
+Reward custody is a separate opt-in step. Start with the Songbird canary, prove
+it, then add Flare:
+
+```sh
+sudo fwd onboard rewards \
+  --identity 0xYOUR_OFFLINE_IDENTITY_ADDRESS \
+  --recipient 0xYOUR_CLAIM_RECIPIENT_ADDRESS \
+  --networks songbird
+```
+
+The wizard creates or imports the reward wallets, writes the policy, mints
+caller tokens into clif's env files, reads sender nonces from chain truth
+through keyless clif, and prints the on-chain authorizations you must perform
+from the offline identity key (`setClaimExecutors` + allowed recipients — see
+`docs/onchain-migration.md`). It is compact by default; add `--guided` for the
+full walk-through.
+
+Migrating an existing provider uses the same wizard with `--import-existing`.
+Stop the old claimer/submitter before fwd takes over those keys, or the two
+systems will collide on nonces.
+
 ## Configure
 
-Copy the example environment file and fill in the network, beneficiary, claim
-recipient, and fwd settings:
+The onboarding wizard writes clif's env files for the full-stack install. For a
+clif-only deployment (or to review/adjust), copy the example environment file
+and fill in the network, beneficiary, claim recipient, and fwd settings:
 
 ```sh
 cp .env.example .env
