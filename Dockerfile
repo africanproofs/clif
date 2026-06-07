@@ -1,4 +1,4 @@
-# clif — keyless FTSO reward claimer. No keys in this image (fwd holds them).
+# clif — keyless FTSO reward claimer and FSP signer. No keys in this image.
 # Multi-stage, non-root, lockfile-honored.
 
 FROM python:3.12-slim AS builder
@@ -29,4 +29,4 @@ WORKDIR /home/clif
 # Status file lives in the clif user's home (writable, non-root). No secrets.
 ENV CLIF_STATE_DIR=/home/clif/.clif-state
 ENTRYPOINT ["clif"]
-CMD ["auto"]
+CMD ["epoch", "run"]

@@ -22,7 +22,7 @@ rewards` (coston2), with a local `rewards-data/{net}/{epoch}/…` cache fallback
 |---|---|---|
 | **Identity** (FEE beneficiary) | AP Flare identity `0x26534aC74153E3257dDD3471f96faA33D5D3B575` | offline hardware wallet — never in fwd/clif |
 | **Signing-policy** (DIRECT beneficiary) | AP signing-policy address | offline; keyless arg to `claim` |
-| **Claim recipient** | AP Flare recipient `0x7c3579aB3E647395c96a1EfC98aF9A31C5Ecc294` | **keyless** `claim` arg; allow-listed via `ClaimSetupManager.setAllowedClaimRecipient` |
+| **Claim recipient** | AP Flare recipient `0x7c3579aB3E647395c96a1EfC98aF9A31C5Ecc294` | **keyless** `claim` arg; allow-listed via `ClaimSetupManager.setAllowedClaimRecipients` |
 | **Executor** | the new **fwd-custodied wallet** | the ONLY key — held by fwd, never by clif |
 
 ## The trigger: ">50% reward-signing weight"
@@ -41,7 +41,7 @@ The producing code shows the **keyed entity is the executor**
 (`CLAIM_EXECUTOR_PRIVATE_KEY` in the TS tool), authorized by the
 identity/signing-policy address via **`ClaimSetupManager.setClaimExecutors`**.
 The recipient is a keyless arg, separately allow-listed via
-`setAllowedClaimRecipient`. So the real rotation authorizes fwd's new wallet as
+`setAllowedClaimRecipients`. So the real rotation authorizes fwd's new wallet as
 **executor**, not a recipient swap. Surfaced for the operator/Reviewer; clif
 does not edit fwd (`docs/phase8b-spec.md` constraint 2).
 

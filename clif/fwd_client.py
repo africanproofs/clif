@@ -1,7 +1,7 @@
 """Thin shim: re-exports the shared fwd-client library + clif's own idempotency helpers.
 
 The transport (FwdClient, error classes, wire models) now lives in the shared
-`fwd_client` package (gitlab.com/proofs.africa/fwd-client v0.1.0).  This shim
+`fwd_client` package (github.com/africanproofs/fwd-client v0.1.0).  This shim
 re-exports that surface so existing callers (`from clif.fwd_client import …`)
 continue to work with no change.
 

@@ -1,208 +1,175 @@
-# clif — keyless FTSO reward claimer + FSP signer
+# clif
 
-`clif` is a keyless client for two FTSO v2 operations on Flare, Songbird, and
-Coston2:
+Keyless FTSO v2 reward claimer and FSP signing client for Flare, Songbird, and
+Coston2.
 
-- **reward claiming** — `RewardManager.claim(...)` for FEE and DIRECT rewards;
-- **FSP signing** — the protocol messages `signUptimeVote` and `signRewards`.
+clif builds reward-claim and FSP signing requests, sends them to the
+`fwd` signing daemon, broadcasts the resulting signed transactions itself,
+and reports the results back to fwd. clif holds no private
+keys, and it refuses to start if any `*PRIVATE_KEY*` variable is present in the
+environment or `.env` file.
 
-It holds **no private keys.** Every key operation is delegated to the
-[**fwd**](https://github.com/africanproofs/fwd) signing daemon: clif builds the
-intent, fwd gates it by policy, signs it, and allocates the nonce; **clif
-broadcasts the signed payload itself and reports the outcome back** (fwd is
-zero-egress and never broadcasts). All epoch and Merkle-proof discovery is
-plain keyless RPC + HTTP.
+## Requirements
 
-clif is the Python successor to the TypeScript `ftso-fee-claimer`, and the
-first consumer in the fwd program to delete its `.env PRIVATE_KEY=` line.
+- Python 3.12
+- Poetry
+- A reachable [fwd](https://github.com/africanproofs/fwd) daemon for signing commands
+- Docker Compose, if you run the daemon containers
 
-## The keyless guarantee
-
-clif carries no `.env PRIVATE_KEY=` and no local-signing dependency
-(`eth-account`, `eth-keys`, `pycryptodome`, `web3`, `argon2`). keccak-256 is
-vendored (`clif/_keccak.py`) to derive ABI function selectors (the `claim` and
-FSP `signUptimeVote`/`signRewards` selectors) and to hash Merkle leaves/nodes for
-client-side reward-proof verification — it is not a signing primitive. clif refuses to start if any
-`*PRIVATE_KEY*` variable is present in its environment.
+Read-only commands use public RPC and do not need fwd credentials.
 
 ## Install
 
-clif is built from source from the public repository
-(<https://github.com/africanproofs/fwd> ships the one-command installer that
-clones and builds clif alongside fwd; see *Run your own provider stack* below).
-To build clif on its own:
-
-```
+```sh
 git clone https://github.com/africanproofs/clif.git
 cd clif
 poetry install
+poetry run clif version
 ```
+
+## Configure
+
+Copy the example environment file and fill in the network, beneficiary, claim
+recipient, and fwd settings:
+
+```sh
+cp .env.example .env
+```
+
+Core variables:
+
+| variable | purpose |
+|---|---|
+| `NETWORK` | `flare`, `songbird`, or `coston2` |
+| `IDENTITY_ADDRESS` | FEE reward owner |
+| `SIGNING_POLICY_ADDRESS` | DIRECT reward owner; primary FSP voter (EntityManager-resolved if unset) |
+| `CLAIM_RECIPIENT_ADDRESS` | recipient allowed on-chain by the operator |
+| `WRAP_REWARDS` | wrap claimed rewards when `true` |
+| `FWD_ENDPOINT` | fwd HTTP endpoint, usually `http://fwd:8080` in Compose |
+| `FWD_WALLET_NAME` | fwd wallet used for reward claims |
+| `FWD_CALLER_TOKEN` | fwd caller token for reward claims |
+
+FSP signing needs separate fwd callers and wallets:
+
+| variable | purpose |
+|---|---|
+| `FSP_SIGN_CALLER_TOKEN` | Leg 1, `/v1/sign-fsp-message` |
+| `FSP_SUBMIT_CALLER_TOKEN` | Leg 2, `/v1/sign-transaction` |
+| `FSP_SIGNING_WALLET_NAME` | fwd wallet holding the FSP signing-policy key |
+| `FSP_SENDER_WALLET_NAME` | fwd wallet that submits `FlareSystemsManager` txs |
+
+`FSP_AUTO_ENABLED=false` by default. `clif epoch run` signs, so it exits until
+the operator explicitly sets `FSP_AUTO_ENABLED=true`. Uptime signing is also
+gated by `UPTIME_AUTO_ENABLED`, which defaults to false.
 
 ## Commands
 
-Read-only (no fwd provisioning needed):
+Read-only:
 
-```
-clif health                       # probe fwd /healthz (require master == "ok")
-clif list                         # enumerate claimable FEE/DIRECT epochs + amounts
-clif spec                         # emit docs/fwd-integration-spec.md from real captured calldata
-clif chain nonce --address 0x...  # read an address's on-chain nonce (used by fwd onboarding)
-```
-
-Claim + automation (needs fwd provisioned and the signing wallet authorized
-on-chain as executor — **operator-gated for production**):
-
-```
-clif rehearse                                       # prove the on-chain `from` is your fwd wallet
-clif claim [-t fee|direct] [-e EPOCH] [--no-wait]   # one-shot claim
-clif epoch run [--interval SEC] [--from-epoch N]    # CANONICAL daemon — per-epoch sign→claim
-clif epoch status                                   # scrapable daemon health
-clif auto [--interval SEC]  ·  clif status          # legacy claim-only loop (superseded by `clif epoch`)
+```sh
+poetry run clif list
+poetry run clif preflight --identity 0x... --recipient 0x...
+poetry run clif chain nonce --address 0x...
+poetry run clif spec
 ```
 
-## How automation works
+fwd-backed one-shots:
 
-The canonical daemon is **`clif epoch run`** — one epoch-anchored state machine per
-network that walks each reward epoch through its lifecycle, then idles until the next.
-Per reward epoch N, once it closes:
-
-> (optional) sign uptime → wait until `epoch_end + 1h` → poll (~30 min) for reward
-> publication → sign rewards (Merkle-verified) → wait for the **>threshold** finalization
-> (`FlareSystemsManager.rewardsHash(N)` flips non-zero) → **claim only epoch N** → idle.
-
-Epoch timing comes from FlareSystemsManager constants read once (`firstRewardEpochStartTs`
-+ `rewardEpochDurationSeconds`), so the daemon computes each epoch's end precisely and
-sleeps until the next window rather than polling blindly. Idempotency is **chain-derived**
-— it reads whether *our* voter already signed (`getVoterRewardsSignInfo`) and whether the
-epoch is finalized/claimed — so a restart safely resumes mid-lifecycle. It signs/claims via
-fwd and broadcasts itself (idempotency-keyed so retries never double-broadcast; stuck txs
-use fwd's replacement path).
-
-It never exits on error: a transient failure retries next cycle; a **terminal** failure
-(policy denial / on-chain revert / fwd down) enters a cooldown (no denial spam) and marks
-clif **degraded**. Because unclaimed FTSO rewards eventually expire, an epoch left
-unresolved past `stale_after` (24h default) also goes degraded. Degraded state is loud in
-the logs and exposed by `clif epoch status` (non-zero exit; also detects a dead daemon) for
-the Docker healthcheck and monitoring.
-
-**A mined tx is not a successful claim.** clif never reports success from a `status == 0x1`
-receipt, a "mined" line, or a balance delta. Proof of a claim is the effect of that exact tx
-— a `RewardClaimed` log with amount > 0. `RewardManager.claim` *silently no-ops* on an
-already-claimed `(owner, epoch)` (mined, no event); clif reports that as a distinct
-`MINED_NOOP` outcome, never as success.
-
-**Signing is hard-off by default** — `clif epoch run` refuses to sign and exits 2 unless
-`FSP_AUTO_ENABLED=true` (the uptime phase is additionally gated by `UPTIME_AUTO_ENABLED`,
-default false). The one-shot `clif claim` / `clif fsp uptime|rewards` and the legacy
-claim-only `clif auto` / sign-only `clif fsp auto` loops remain for manual use, but
-`clif epoch run` is the daemon entrypoint.
-
-Deploy: `sudo fwd start <net>` (the fwd install overlay launches the `clif-epoch-<net>`
-service), or directly `docker compose --profile <net> up -d` (multichain) /
-`docker compose up -d clif-epoch` (single). One-shot: `docker compose run --rm clif claim
--t fee`. Each network reads its own gitignored `.env.<network>` + `CLIF_STATE_DIR`; status
-files are network-scoped. See the `docker-compose.yml` header.
-
-## Configuration
-
-Copy `.env.example` to `.env`. `NETWORK`, the beneficiary addresses
-(`IDENTITY_ADDRESS` for FEE, `SIGNING_POLICY_ADDRESS` for DIRECT),
-`CLAIM_RECIPIENT_ADDRESS`, and the fwd connection (`FWD_ENDPOINT`,
-`FWD_WALLET_NAME`, `FWD_CALLER_TOKEN`) are all keyless.
-
-## Run your own provider stack
-
-clif + fwd are not AP-specific. Any FTSO provider can self-host the same
-keyless stack — clif claims/signs, **their own** fwd custodies the keys.
-
-1. **Stand up fwd.** Follow fwd's
-   [`docs/one-command-install.md`](https://github.com/africanproofs/fwd) — the
-   `curl | sh` installer clones and builds fwd from source and brings up an
-   inert default-deny daemon, and `--with-clif` overlays the clif claim/FSP
-   layer. On the fwd side the operator runs `fwd onboard rewards` (the canonical
-   onboarding wizard; `clifwd onboard` is a compat alias), which provisions the
-   policy, wallets, caller tokens, and nonces for the reward classes —
-   `--import-existing` imports operator-supplied keys. fwd's `clifwd` admin CLI
-   (`clifwd policy init` / `validate`, `clifwd nonce init`) is available for
-   manual provisioning. clif never authors fwd policy.
-2. **Configure clif.** `cp .env.example .env` (or a per-network
-   `.env.<network>` for multichain). Set **your** beneficiary addresses —
-   `IDENTITY_ADDRESS` (FEE), `SIGNING_POLICY_ADDRESS` (DIRECT, if any),
-   `CLAIM_RECIPIENT_ADDRESS`, `WRAP_REWARDS` — and the fwd integration:
-   `FWD_ENDPOINT`, `FWD_WALLET_NAME`, `FWD_CALLER_TOKEN`, plus the FSP `FSP_*`
-   vars (`FSP_SIGN_CALLER_TOKEN`, `FSP_SUBMIT_CALLER_TOKEN`,
-   `FSP_SIGNING_WALLET_NAME`, `FSP_SENDER_WALLET_NAME`) if you sign FSP
-   messages. All operator-provisioned on **your** fwd; the per-var detail is in
-   `.env.example`.
-3. **Verify keyless, then rehearse.** `clif health` (require `master == "ok"`)
-   → `clif list` (your claimable epochs) → `clif rehearse` on **Coston2**
-   first, then Songbird, then Flare. The rehearsal proves the on-chain `from`
-   is your fwd-custodied wallet (clif holds no key). Only then go live.
-
-## Knowledge base
-
-This repo is self-contained. `CLAUDE.md` is the entry point; the binding
-references are:
-
-- `docs/phase8b-spec.md` — binding spec (authoritative)
-- `docs/decisions.md` — settled decisions D1–D16
-- `docs/fwd-contract.md` — verified fwd HTTP + ABI contract, and the policy trap
-- `docs/onchain-migration.md` — networks, actors, the >50% trigger, rotation
-- `docs/verification.md` — what's proven vs blocked; the rehearsal ladder
-- `docs/fwd-integration-spec.md` — operator handshake (generated by `clif spec`)
-
-## FSP signing (keyless)
-
-`clif fsp` signs the FTSO FSP protocol messages (`signUptimeVote`,
-`signRewards`) via fwd — clif holds zero keys. Two-leg flow:
-
-- **Leg-1** — `POST /v1/sign-fsp-message`: fwd reconstructs the protocol-message
-  hash from typed fields and returns its v/r/s signature.
-- **Leg-2** — `POST /v1/sign-transaction`: fwd signs the built
-  `FlareSystemsManager` calldata; clif broadcasts and reports back.
-
-For `REWARD_DISTRIBUTION`, clif first fetches and validates
-`reward-distribution-data.json` — it never signs an unverified `rewardsHash`.
-The file's `rewardEpochId` must equal the signing epoch before Leg-1; on
-mismatch clif fails terminally with no sign call, because a valid signature over
-the wrong data is irreversible on-chain.
-
-```
-clif fsp uptime   --epoch EPOCH [--no-wait] [--yes/-y] [--retry STR]
-clif fsp rewards  --epoch EPOCH [--no-wait] [--yes/-y] [--retry STR]
-clif fsp status                # scrapable health + current epoch from chain
-clif fsp auto    [--interval SEC] [--from-epoch EPOCH]  # legacy sign-only loop (superseded by `clif epoch run`)
+```sh
+poetry run clif health
+poetry run clif rehearse
+poetry run clif claim --type fee
+poetry run clif claim --type direct --epoch <epoch>
+poetry run clif fsp uptime --epoch <epoch>
+poetry run clif fsp rewards --epoch <epoch>
 ```
 
-**Two distinct fwd caller tokens are required.** fwd's policy loader forbids
-the same `policy_path` key appearing in both `permissions` and
-`fsp_permissions` (cross-domain key reuse fails the boot), so one caller cannot
-span both legs:
+Daemons and health checks:
 
-- `FSP_SIGN_CALLER_TOKEN` — Leg-1 `/v1/sign-fsp-message`; operator provisions
-  the `clif-fsp-sign` caller in fwd's `fsp_permissions` block.
-- `FSP_SUBMIT_CALLER_TOKEN` — Leg-2 `/v1/sign-transaction` plus client broadcast
-  and per-caller-scoped tx poll; operator provisions the `clif-fsp-submit`
-  caller in fwd's `permissions` block for `FlareSystemsManager`.
+```sh
+poetry run clif epoch run
+poetry run clif epoch status
+```
 
-Signing is **hard-disabled by default** (D15): the canonical `clif epoch run` (and the
-legacy `clif fsp auto`) refuse to sign and exit 2 unless `FSP_AUTO_ENABLED=true`. The
-uptime phase of `clif epoch run` is additionally gated by `UPTIME_AUTO_ENABLED`
-(default false).
+Legacy loops still exist for manual/backward-compatible operation, but
+`clif epoch run` is the daemon entrypoint:
 
-See `docs/decisions.md` (D15, D17) and clif `CLAUDE.md` § Automation for full provisioning
-and the epoch-daemon lifecycle.
+```sh
+poetry run clif auto
+poetry run clif status
+poetry run clif fsp auto
+poetry run clif fsp status
+```
 
-## On `SIGNING_POLICY_PRIVATE_KEY`
+## Automation
 
-The FSP signing-policy key is **never a local key for clif to hold.** clif
-signs `signUptimeVote` and `signRewards` through fwd's structured
-`/v1/sign-fsp-message` endpoint, which reconstructs the protocol-message hash
-from typed fields and never accepts a caller-supplied raw digest. A free
-raw-ECDSA `eth_sign`-style path, and putting `SIGNING_POLICY_PRIVATE_KEY` into a
-local `.env`, remain out of scope and forbidden — that would re-introduce the
-exact anti-pattern fwd exists to kill.
+`clif epoch run` runs one state machine per network. For reward epoch `N`, it:
+
+1. optionally signs uptime after the epoch closes;
+2. waits for reward data publication;
+3. verifies reward data and signs rewards;
+4. waits for `FlareSystemsManager.rewardsHash(N)` to finalize;
+5. claims only epoch `N`;
+6. idles until the next epoch window.
+
+The daemon re-derives state from chain reads, so restarts resume safely. A
+terminal fwd error, on-chain revert, stale unclaimed epoch, or dead daemon is
+reported as degraded by `clif epoch status`.
+
+clif never treats a mined transaction as success by itself. A reward claim is
+successful only when the exact transaction emits a `RewardClaimed` event with
+amount greater than zero; an already-claimed epoch can mine as a no-op and is
+reported separately.
+
+## Docker
+
+Single-network daemon:
+
+```sh
+docker compose up -d clif-epoch
+docker compose run --rm clif claim --type fee
+```
+
+`clif-epoch` signs, so it stays up only when `FSP_AUTO_ENABLED=true` (see
+Configure); otherwise it exits by design.
+
+Multichain daemon:
+
+```sh
+docker compose --profile multichain up -d
+```
+
+Each multichain service reads its own `.env.<network>` file. Set
+`CLIF_STATE_DIR` per network, and set `FWD_NETWORK` if fwd's Docker network is
+not named `fwd_fwd-callers`.
+
+## Documentation
+
+Current operating references:
+
+- `docs/fwd-contract.md` - fwd HTTP contract and policy shape.
+- `docs/onchain-migration.md` - executor and recipient authorization flow.
+- `docs/verification.md` - what is proven, what is blocked, and rehearsal steps.
+- `docs/decisions.md` - settled design decisions, including the epoch daemon.
+- `docs/fwd-integration-spec.md` - generated operator handshake; regenerate with
+  `clif spec` for the active environment.
+
+Historical specs:
+
+- `docs/phase8b-spec.md`
+- `docs/fsp-signing-tool-spec.md`
+
+Those historical files preserve the original `/v1/sign-and-send` design record.
+The current fwd contract is `/v1/sign-transaction` plus client broadcast and
+report-back.
+
+## Development Checks
+
+```sh
+poetry run pytest -q
+poetry run ruff check .
+```
 
 ## License
 
-MIT.
+MIT

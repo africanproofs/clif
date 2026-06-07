@@ -38,7 +38,7 @@ services:
     restart: unless-stopped
     healthcheck:
       # `clif epoch status` exits non-zero when degraded or when the daemon is
-      # dead/stale — the scrapable money-path health signal.
+      # dead/stale — the scrapeable money-path health signal.
       test: ["CMD", "clif", "epoch", "status"]
       interval: 300s
       timeout: 15s
@@ -53,7 +53,7 @@ services:
     networks: [fwd-net, egress]
     entrypoint: ["clif"]
     # one-shot, e.g.:  docker compose run --rm clif claim --type fee
-    # rehearsal:        docker compose run --rm clif claim --type fee --epoch <N>
+    # rehearsal:        docker compose run --rm clif rehearse
 
   # --- Multichain (Flare ∥ Songbird ∥ Coston2), one shared fwd ---
   # Each service: own gitignored .env.<network> (NETWORK, CLIF_STATE_DIR,

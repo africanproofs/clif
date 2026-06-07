@@ -19,7 +19,8 @@
 > contract's own `currentRewardEpochExpectedEndTs()` exactly, and `voter_*_sign_info` /
 > reward-publication reads decode correctly (cross-checked vs flarestack). What is
 > **pending**: the end-to-end sign→finalize→claim execution at the next ended epoch
-> (same gate as rungs 4 / F2). See `clif/CLAUDE.md` § Automation.
+> (same gate as rungs 4 / F2). See `README.md` § Automation and
+> `docs/decisions.md` D17.
 
 ## Verification ladder
 

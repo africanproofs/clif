@@ -2,6 +2,10 @@
 
 > These are settled. Changing one requires explicit operator direction and a
 > matching update here + in code/docs (doctrine and code must not drift).
+>
+> Reading note: decisions are append-only. Later entries supersede earlier
+> implementation details where stated. In particular, D17 makes `clif epoch run`
+> the current daemon entrypoint, superseding D3's older `clif auto` framing.
 
 - **D1 — Keyless.** clif holds zero private keys. No `eth-account`,
   `eth-keys`, `pycryptodome`, `web3`, `argon2`. keccak-256 is vendored
@@ -95,7 +99,7 @@
   **(b) Two FSP caller tokens (MAJOR-2).** fwd's policy loader forbids the
   same `policy_path` key in both `permissions` and `fsp_permissions`
   (cross-domain key reuse = fail-fast boot), so one caller authorizes EITHER
-  `/v1/sign-fsp-message` OR `/v1/sign-and-send`, never both. clif replaces the
+  `/v1/sign-fsp-message` OR `/v1/sign-transaction`, never both. clif replaces the
   single `fsp_caller_token` with `fsp_sign_caller_token` (Leg-1) and
   `fsp_submit_caller_token` (Leg-2 + the per-caller-scoped tx poll), both
   distinct from the fee-claimer `fwd_caller_token`. The two FSP wallets are

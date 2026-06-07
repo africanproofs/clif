@@ -5,7 +5,7 @@ The fsp-rewards schema mirrors the upstream Zod schema in
 
 The fwd request/response models (SignTransaction*, BroadcastResult*, Receipt*,
 SignFspMessageResponse, TxStatus, Health) are now the single source of truth in
-the shared `fwd_client` package (gitlab.com/proofs.africa/fwd-client v0.1.0).
+the shared `fwd_client` package (github.com/africanproofs/fwd-client v0.1.0).
 They are re-exported here so existing callers (`from clif.models import …`)
 continue to work with no change.
 """
@@ -50,7 +50,7 @@ RawRewardClaim = tuple[list[str], RawClaimData]
 
 
 class RewardsData(BaseModel):
-    """One reward epoch's distribution file (GitHub/GitLab fsp-rewards)."""
+    """One reward epoch's distribution file (GitHub fsp-rewards)."""
 
     model_config = ConfigDict(populate_by_name=True)
 
