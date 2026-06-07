@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "clif"
 version = "0.5.17"
-description = "Keyless FTSO v2 reward claimer for African Proofs — signs via the fwd daemon, holds no private keys (Phase 8b)"
+description = "Keyless FTSO v2 reward claimer and FSP signer for Flare networks"
 authors = ["African Proofs <dev@proofs.africa>"]
 readme = "README.md"
 packages = [{include = "clif"}]
@@ -26,7 +26,7 @@ eth-abi = "^5.0"
 pydantic = "^2.10"
 pydantic-settings = "^2.6"
 # Shared fwd HTTP transport (pure httpx+pydantic; no crypto dep).
-fwd-client = {git = "https://gitlab.com/proofs.africa/fwd-client.git", tag = "v0.1.0"}
+fwd-client = {git = "https://github.com/africanproofs/fwd-client.git", tag = "v0.1.0"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"

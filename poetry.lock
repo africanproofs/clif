@@ -351,7 +351,7 @@ pydantic = "^2.9"
 
 [package.source]
 type = "git"
-url = "https://gitlab.com/proofs.africa/fwd-client.git"
+url = "https://github.com/africanproofs/fwd-client.git"
 reference = "v0.1.0"
 resolved_reference = "d456f66cee5df8f03555fb6cdbdaae18a961c734"
 
@@ -982,4 +982,4 @@ typing-extensions = ">=4.12.0"
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.12"
-content-hash = "0d4cfea0d0f12c0ab5e7a9d76b2bf286f3e0e468722d148b62a50538d3914eb7"
+content-hash = "56110aa728e8842ee18ca72623409f69fd38e6af1776ac56b22f4a3659935006"
