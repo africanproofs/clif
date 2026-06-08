@@ -119,17 +119,21 @@ def drive_epoch(
             actions.append(("uptime", uo.status.value, uo.detail))
 
     # --- REWARD phase ---
-    # rewardsHash(epoch) REVERTS with "not signed yet" before the epoch is finalized (Songbird
-    # FlareSystemsManager behaviour); treat that specific revert as finalized=False so we can
-    # proceed to the sign check below.  Any other RpcError propagates as before.
+    # Songbird's FlareSystemsManager reverts BOTH rewardsHash(epoch) AND
+    # getVoterRewardsSignInfo(epoch, voter) with "rewards hash not signed yet" before the epoch
+    # enters the active signing protocol (i.e. before rewards data is on-chain and the first
+    # signature lands).  Treat that specific revert on either call as: not finalized, not signed
+    # by us — fall through to the publication check and sign if the off-chain data is ready.
+    # Any other RpcError propagates as before.
     try:
         finalized = rpc.rewards_hash(fsm, epoch) != ZERO_BYTES32
+        signed_rewards = rpc.voter_rewards_sign_info(fsm, epoch, voter)[0] != 0
     except RpcError as exc:
         if "not signed yet" in str(exc).lower():
             finalized = False
+            signed_rewards = False
         else:
             raise
-    signed_rewards = rpc.voter_rewards_sign_info(fsm, epoch, voter)[0] != 0
 
     if not finalized and not signed_rewards:
         end_ts = epoch_end_ts(epoch)
