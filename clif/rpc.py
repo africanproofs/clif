@@ -66,23 +66,55 @@ class RpcError(RuntimeError):
     pass
 
 
-# FlareSystemsManager `RewardsSigned` event — emitted once per signer as reward
-# signatures land. rewardEpochId / signingPolicyAddress / voter are indexed
-# (topics 1-3); rewardsHash, noOfWeightBasedClaims[], timestamp, thresholdReached
-# live in `data`. The full keccak (NOT the 4-byte selector) is the topic0 filter.
+# FlareSystemsManager per-signer signing events — emitted once per signer as
+# signatures land. Both have rewardEpochId / signingPolicyAddress / voter indexed
+# (topics 1-3) and carry a signed-message hash + thresholdReached in `data`. The
+# full keccak (NOT the 4-byte selector) is the topic0 filter.
+#   RewardsSigned    data = (bytes32 rewardsHash, (uint256,uint256)[] claims, uint64 ts, bool thresholdReached)
+#   UptimeVoteSigned data = (bytes32 uptimeVoteHash,                       uint64 ts, bool thresholdReached)
 _REWARDS_SIGNED_SIG = (
     "RewardsSigned(uint24,address,address,bytes32,(uint256,uint256)[],uint64,bool)"
 )
+_UPTIME_VOTE_SIGNED_SIG = "UptimeVoteSigned(uint24,address,address,bytes32,uint64,bool)"
 REWARDS_SIGNED_TOPIC0 = "0x" + keccak256(_REWARDS_SIGNED_SIG.encode()).hex()
+UPTIME_VOTE_SIGNED_TOPIC0 = "0x" + keccak256(_UPTIME_VOTE_SIGNED_SIG.encode()).hex()
 
 
 @dataclass(frozen=True)
-class RewardSignedLog:
-    """One decoded `RewardsSigned` log (addresses 0x-prefixed, lowercased)."""
+class _EventSpec:
+    """How to filter + decode one signing event kind."""
+
+    topic0: str
+    data_types: list[str]
+    threshold_idx: int  # index of the bool thresholdReached within the decoded data tuple
+
+
+# message_hash is always data field [0] for both kinds.
+_EVENT_SPECS: dict[str, _EventSpec] = {
+    "rewards": _EventSpec(
+        REWARDS_SIGNED_TOPIC0,
+        ["bytes32", "(uint256,uint256)[]", "uint64", "bool"],
+        threshold_idx=3,
+    ),
+    "uptime": _EventSpec(
+        UPTIME_VOTE_SIGNED_TOPIC0,
+        ["bytes32", "uint64", "bool"],
+        threshold_idx=2,
+    ),
+}
+
+
+@dataclass(frozen=True)
+class SignedLog:
+    """One decoded signing-event log (addresses 0x-prefixed, lowercased).
+
+    `message_hash` is the candidate hash this voter signed (rewardsHash for the
+    rewards kind, uptimeVoteHash for the uptime kind).
+    """
 
     signing_policy_address: str
     voter: str
-    rewards_hash: str  # the candidate rewards hash this voter signed (0x-prefixed)
+    message_hash: str
     threshold_reached: bool
     timestamp: int
     block_number: int
@@ -391,27 +423,47 @@ class RpcClient:
         result = self._call("eth_blockNumber", [])
         return int(str(result), 16)
 
-    def reward_signed_logs(
-        self, flare_systems_manager: str, epoch_id: int, from_block: int, to_block: int
-    ) -> list[RewardSignedLog]:
-        """eth_getLogs for the FlareSystemsManager RewardsSigned event of ONE epoch.
+    def block_timestamp(self, block_number: int) -> int:
+        """eth_getBlockByNumber(n, false).timestamp → UNIX seconds (int). Keyless read.
 
-        Filters on topic0 (the event signature) AND topic1 (the indexed reward
-        epoch id), so the node returns only that epoch's per-signer signatures.
-        Decodes the indexed signer (topic2 = signingPolicyAddress, topic3 =
-        voter) and the non-indexed `thresholdReached` (+ timestamp) from `data`.
-        Keyless read; raises RpcError on transport / node error.
+        Used to anchor the signing-window scan to the epoch-end TIME rather than a
+        block-count estimate (block time drifts). Raises RpcError if the block is
+        missing.
         """
+        result = self._call("eth_getBlockByNumber", [hex(block_number), False])
+        if not result:
+            raise RpcError(f"block {block_number} not found")
+        return int(str(cast(dict, result)["timestamp"]), 16)
+
+    def signed_logs(
+        self,
+        flare_systems_manager: str,
+        epoch_id: int,
+        from_block: int,
+        to_block: int,
+        *,
+        kind: str = "rewards",
+    ) -> list[SignedLog]:
+        """eth_getLogs for a FlareSystemsManager signing event of ONE epoch.
+
+        `kind` is "rewards" (RewardsSigned) or "uptime" (UptimeVoteSigned). Filters
+        on topic0 (the event signature) AND topic1 (the indexed reward epoch id),
+        so the node returns only that epoch's per-signer signatures. Decodes the
+        indexed signer (topic2 = signingPolicyAddress, topic3 = voter) and, from
+        `data`, the signed message hash (field [0]) + `thresholdReached`. Keyless
+        read; raises RpcError on transport / node error.
+        """
+        spec = _EVENT_SPECS[kind]
         epoch_topic = "0x" + epoch_id.to_bytes(32, "big").hex()
         flt = {
             "address": flare_systems_manager,
-            "topics": [REWARDS_SIGNED_TOPIC0, epoch_topic],
+            "topics": [spec.topic0, epoch_topic],
             "fromBlock": hex(from_block),
             "toBlock": hex(to_block),
         }
         result = self._call("eth_getLogs", [flt])
         logs = cast(list, result) if result else []
-        out: list[RewardSignedLog] = []
+        out: list[SignedLog] = []
         for entry in logs:
             topics = entry.get("topics", [])
             if len(topics) < 4:
@@ -420,16 +472,17 @@ class RpcClient:
             voter = "0x" + topics[3][-40:]
             data_hex = str(entry.get("data", "0x"))
             data = bytes.fromhex(data_hex[2:] if data_hex.startswith("0x") else data_hex)
-            rewards_hash, _claims, ts, threshold_reached = self._abi_decode(
-                ["bytes32", "(uint256,uint256)[]", "uint64", "bool"], data
-            )
+            decoded = self._abi_decode(spec.data_types, data)
+            message_hash = decoded[0]
+            timestamp = decoded[spec.threshold_idx - 1]  # uint64 ts is always just before the bool
+            threshold_reached = decoded[spec.threshold_idx]
             out.append(
-                RewardSignedLog(
+                SignedLog(
                     signing_policy_address=spa.lower(),
                     voter=voter.lower(),
-                    rewards_hash="0x" + rewards_hash.hex(),
+                    message_hash="0x" + message_hash.hex(),
                     threshold_reached=bool(threshold_reached),
-                    timestamp=int(ts),
+                    timestamp=int(timestamp),
                     block_number=int(str(entry.get("blockNumber", "0x0")), 16),
                 )
             )

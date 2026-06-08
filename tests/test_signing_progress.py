@@ -1,4 +1,4 @@
-"""Reward-signing progress: topic0 anchor, log decode, weight aggregation, CLI.
+"""Signing progress (uptime + rewards): topic0 anchors, log decode, aggregation, CLI.
 
 The RPC-layer decode is exercised with httpx MockTransport (mirrors
 test_chain_nonce.py); the aggregation + block-window math with a FakeRpc
@@ -16,35 +16,51 @@ from eth_abi import encode as abi_encode
 
 from clif._keccak import keccak256
 from clif.config import _NETWORKS
-from clif.rpc import REWARDS_SIGNED_TOPIC0, RewardSignedLog, RpcClient, RpcError
-from clif.signing_progress import _scan_from_block, compute_signing_progress
+from clif.rpc import (
+    REWARDS_SIGNED_TOPIC0,
+    UPTIME_VOTE_SIGNED_TOPIC0,
+    RpcClient,
+    RpcError,
+    SignedLog,
+)
+from clif.signing_progress import compute_signing_progress
 
-# Independently-pinned anchor: full keccak of the canonical RewardsSigned signature.
-# A mismatch = a vendored-keccak regression OR a struct-canonicalization slip (the
-# (uint256,uint256)[] member) — either silently breaks the eth_getLogs topic filter.
-EXPECTED_TOPIC0 = "0x81b5504045130d3b82498ff414ad58271e85bbde420cc85aa66d91eff9af30fb"
+# Independently-pinned anchors: full keccak of each canonical event signature.
+# A mismatch = a vendored-keccak regression OR a struct-canonicalization slip (e.g.
+# the rewards (uint256,uint256)[] member) — either silently breaks the topic filter.
+EXPECTED_REWARDS_TOPIC0 = "0x81b5504045130d3b82498ff414ad58271e85bbde420cc85aa66d91eff9af30fb"
+EXPECTED_UPTIME_TOPIC0 = "0x5506337d1266599f8b64675a1c8321701657ca2f2f70be0e0c58302b6c22e797"
 
 SGB = _NETWORKS["songbird"]
 SPA_A = "0x" + "a1" * 20
 SPA_B = "0x" + "b2" * 20
 VOTER_A = "0x" + "c3" * 20
 VOTER_B = "0x" + "d4" * 20
+MHASH = b"\xab" * 32
+MHASH_HEX = "0x" + MHASH.hex()
 
 
-# ---- topic0 anchor ----
+# ---- topic0 anchors ----
 
 
-def test_topic0_matches_pinned_anchor():
-    assert REWARDS_SIGNED_TOPIC0 == EXPECTED_TOPIC0
-
-
-def test_topic0_is_full_keccak_not_selector():
+def test_rewards_topic0_matches_pinned_anchor():
+    assert REWARDS_SIGNED_TOPIC0 == EXPECTED_REWARDS_TOPIC0
     sig = b"RewardsSigned(uint24,address,address,bytes32,(uint256,uint256)[],uint64,bool)"
     assert REWARDS_SIGNED_TOPIC0 == "0x" + keccak256(sig).hex()
-    assert len(REWARDS_SIGNED_TOPIC0) == 66  # 0x + 64 hex = full 32 bytes (not a 4-byte selector)
 
 
-# ---- RpcClient.reward_signed_logs / block_number (httpx MockTransport) ----
+def test_uptime_topic0_matches_pinned_anchor():
+    assert UPTIME_VOTE_SIGNED_TOPIC0 == EXPECTED_UPTIME_TOPIC0
+    sig = b"UptimeVoteSigned(uint24,address,address,bytes32,uint64,bool)"
+    assert UPTIME_VOTE_SIGNED_TOPIC0 == "0x" + keccak256(sig).hex()
+
+
+def test_topic0s_are_full_keccak_not_selector():
+    for t in (REWARDS_SIGNED_TOPIC0, UPTIME_VOTE_SIGNED_TOPIC0):
+        assert len(t) == 66  # 0x + 64 hex = full 32 bytes (not a 4-byte selector)
+
+
+# ---- RpcClient.signed_logs / block_number (httpx MockTransport) ----
 
 
 def _rpc_client(handler) -> RpcClient:
@@ -57,19 +73,19 @@ def _topic_addr(addr: str) -> str:
     return "0x" + "00" * 12 + addr[2:]
 
 
-RHASH = b"\xab" * 32
-RHASH_HEX = "0x" + RHASH.hex()
-
-
-def _log_entry(spa: str, voter: str, *, threshold: bool, ts: int, block: int) -> dict:
-    data = abi_encode(
-        ["bytes32", "(uint256,uint256)[]", "uint64", "bool"],
-        [RHASH, [(1, 5)], ts, threshold],
-    )
+def _log_entry(spa: str, voter: str, *, threshold: bool, ts: int, block: int, kind="rewards") -> dict:
+    if kind == "uptime":
+        topic0 = UPTIME_VOTE_SIGNED_TOPIC0
+        data = abi_encode(["bytes32", "uint64", "bool"], [MHASH, ts, threshold])
+    else:
+        topic0 = REWARDS_SIGNED_TOPIC0
+        data = abi_encode(
+            ["bytes32", "(uint256,uint256)[]", "uint64", "bool"], [MHASH, [(1, 5)], ts, threshold]
+        )
     return {
         "address": SGB.flare_systems_manager,
         "topics": [
-            REWARDS_SIGNED_TOPIC0,
+            topic0,
             "0x" + (404).to_bytes(32, "big").hex(),
             _topic_addr(spa),
             _topic_addr(voter),
@@ -79,31 +95,38 @@ def _log_entry(spa: str, voter: str, *, threshold: bool, ts: int, block: int) ->
     }
 
 
-def test_reward_signed_logs_decode():
+def _decode_logs_test(kind: str, expected_topic0: str):
     captured: list[dict] = []
 
     def h(req: httpx.Request) -> httpx.Response:
         body = json.loads(req.content)
         captured.append(body)
         result = [
-            _log_entry(SPA_A, VOTER_A, threshold=False, ts=1_700_000_000, block=100),
-            _log_entry(SPA_B, VOTER_B, threshold=True, ts=1_700_000_500, block=110),
+            _log_entry(SPA_A, VOTER_A, threshold=False, ts=1_700_000_000, block=100, kind=kind),
+            _log_entry(SPA_B, VOTER_B, threshold=True, ts=1_700_000_500, block=110, kind=kind),
         ]
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
 
     with _rpc_client(h) as rpc:
-        logs = rpc.reward_signed_logs(SGB.flare_systems_manager, 404, 0, 200)
+        logs = rpc.signed_logs(SGB.flare_systems_manager, 404, 0, 200, kind=kind)
 
     assert captured[0]["method"] == "eth_getLogs"
     flt = captured[0]["params"][0]
-    assert flt["address"] == SGB.flare_systems_manager
-    assert flt["topics"] == [REWARDS_SIGNED_TOPIC0, "0x" + (404).to_bytes(32, "big").hex()]
+    assert flt["topics"] == [expected_topic0, "0x" + (404).to_bytes(32, "big").hex()]
     assert flt["fromBlock"] == "0x0" and flt["toBlock"] == hex(200)
-
     assert logs == [
-        RewardSignedLog(SPA_A.lower(), VOTER_A.lower(), RHASH_HEX, False, 1_700_000_000, 100),
-        RewardSignedLog(SPA_B.lower(), VOTER_B.lower(), RHASH_HEX, True, 1_700_000_500, 110),
+        SignedLog(SPA_A.lower(), VOTER_A.lower(), MHASH_HEX, False, 1_700_000_000, 100),
+        SignedLog(SPA_B.lower(), VOTER_B.lower(), MHASH_HEX, True, 1_700_000_500, 110),
     ]
+
+
+def test_signed_logs_decode_rewards():
+    _decode_logs_test("rewards", REWARDS_SIGNED_TOPIC0)
+
+
+def test_signed_logs_decode_uptime():
+    # Uptime data is (bytes32, uint64, bool) — no claims array; threshold at idx 2.
+    _decode_logs_test("uptime", UPTIME_VOTE_SIGNED_TOPIC0)
 
 
 def test_block_number_hex_to_int():
@@ -151,7 +174,7 @@ def test_weight_reads_decode_live_captured_raw():
 
 class FakeRpc:
     def __init__(self, *, signers, weights, latest=1_000_000, ppm=500_000, total=65_506):
-        self._signers = signers  # list[RewardSignedLog]
+        self._signers = signers  # list[SignedLog]
         self._weights = weights  # {spa(lower): weight}
         self._latest = latest
         self._ppm = ppm
@@ -160,7 +183,10 @@ class FakeRpc:
     def block_number(self):
         return self._latest
 
-    def reward_signed_logs(self, _fsm, _epoch, _lo, _hi):
+    def block_timestamp(self, _n):
+        return 0  # < any epoch_end_ts → scan stops after the first chunk
+
+    def signed_logs(self, _fsm, _epoch, _lo, _hi, *, kind="rewards"):
         # Return the full set on every chunk → also exercises dedup-by-spa.
         return list(self._signers)
 
@@ -174,8 +200,8 @@ class FakeRpc:
         return ("0x" + "ee" * 20, self._weights[spa.lower()])
 
 
-def _signer(spa, voter, threshold, block=100, rewards_hash=RHASH_HEX):
-    return RewardSignedLog(spa.lower(), voter.lower(), rewards_hash, threshold, 1_700_000_000, block)
+def _signer(spa, voter, threshold, block=100, message_hash=MHASH_HEX):
+    return SignedLog(spa.lower(), voter.lower(), message_hash, threshold, 1_700_000_000, block)
 
 
 def test_compute_below_threshold_not_finalized():
@@ -183,7 +209,8 @@ def test_compute_below_threshold_not_finalized():
         signers=[_signer(SPA_A, VOTER_A, False)],
         weights={SPA_A.lower(): 697},  # 697 / 65506 ≈ 1.06%
     )
-    sp = compute_signing_progress(rpc, SGB, 404, SPA_A, now=1_700_010_000, epoch_end_ts=1_700_000_000)
+    sp = compute_signing_progress(rpc, SGB, 404, SPA_A, epoch_end_ts=1_700_000_000)
+    assert sp.kind == "rewards"
     assert sp.signed_weight == 697
     assert sp.total_weight == 65506
     assert round(sp.signed_pct, 2) == 1.06
@@ -193,18 +220,31 @@ def test_compute_below_threshold_not_finalized():
     assert sp.signer_count == 1
 
 
+def test_compute_uptime_kind():
+    rpc = FakeRpc(
+        signers=[_signer(SPA_A, VOTER_A, True)],
+        weights={SPA_A.lower(): 40_000},  # > threshold AND thresholdReached flag
+    )
+    sp = compute_signing_progress(
+        rpc, SGB, 404, SPA_A, epoch_end_ts=1_700_000_000, kind="uptime"
+    )
+    assert sp.kind == "uptime"
+    assert sp.finalized is True
+    assert sp.our_signed is True
+    assert sp.message_hash == MHASH_HEX
+
+
 def test_compute_threshold_reached_event_finalizes():
     rpc = FakeRpc(
         signers=[_signer(SPA_A, VOTER_A, False), _signer(SPA_B, VOTER_B, True)],
         weights={SPA_A.lower(): 697, SPA_B.lower(): 40_000},
     )
-    sp = compute_signing_progress(rpc, SGB, 404, "0x" + "ff" * 20, now=1_700_010_000, epoch_end_ts=1_700_000_000)
+    sp = compute_signing_progress(rpc, SGB, 404, "0x" + "ff" * 20, epoch_end_ts=1_700_000_000)
     # 40697/65506 ≈ 62.1% AND an event carried thresholdReached=True
     assert sp.finalized is True
     assert sp.signer_count == 2
     assert sp.our_signed is False  # our spa not among signers
-    # signers sorted by weight desc
-    assert sp.signers[0].weight == 40_000
+    assert sp.signers[0].weight == 40_000  # sorted by weight desc
 
 
 def test_compute_finalized_by_accumulated_weight():
@@ -213,7 +253,7 @@ def test_compute_finalized_by_accumulated_weight():
         signers=[_signer(SPA_A, VOTER_A, False)],
         weights={SPA_A.lower(): 33_000},  # > ceil(65506*0.5)=32753
     )
-    sp = compute_signing_progress(rpc, SGB, 404, None, now=1_700_010_000, epoch_end_ts=1_700_000_000)
+    sp = compute_signing_progress(rpc, SGB, 404, None, epoch_end_ts=1_700_000_000)
     assert sp.finalized is True
     assert sp.our_signed is False  # our_spa None
 
@@ -223,24 +263,24 @@ def test_compute_dedups_repeated_signers():
         signers=[_signer(SPA_A, VOTER_A, False), _signer(SPA_A, VOTER_A, False)],
         weights={SPA_A.lower(): 697},
     )
-    sp = compute_signing_progress(rpc, SGB, 404, SPA_A, now=1_700_010_000, epoch_end_ts=1_700_000_000)
+    sp = compute_signing_progress(rpc, SGB, 404, SPA_A, epoch_end_ts=1_700_000_000)
     assert sp.signer_count == 1
     assert sp.signed_weight == 697  # counted once
 
 
-def test_compute_groups_by_rewards_hash_reports_leading():
+def test_compute_groups_by_message_hash_reports_leading():
     """Voters split across two candidate hashes → report the LEADING hash only."""
     hash_win = "0x" + "11" * 32
     hash_lose = "0x" + "22" * 32
     rpc = FakeRpc(
         signers=[
-            _signer(SPA_A, VOTER_A, False, rewards_hash=hash_win),  # 40000
-            _signer(SPA_B, VOTER_B, False, rewards_hash=hash_lose),  # 697
+            _signer(SPA_A, VOTER_A, False, message_hash=hash_win),  # 40000
+            _signer(SPA_B, VOTER_B, False, message_hash=hash_lose),  # 697
         ],
         weights={SPA_A.lower(): 40_000, SPA_B.lower(): 697},
     )
-    sp = compute_signing_progress(rpc, SGB, 404, SPA_B, now=1_700_010_000, epoch_end_ts=1_700_000_000)
-    assert sp.rewards_hash == hash_win
+    sp = compute_signing_progress(rpc, SGB, 404, SPA_B, epoch_end_ts=1_700_000_000)
+    assert sp.message_hash == hash_win
     assert sp.signed_weight == 40_000  # leading hash only — NOT 40697 (sum across hashes)
     assert sp.signer_count == 1
     assert sp.our_signed is False  # our spa signed the LOSING hash → not counted as signed
@@ -260,7 +300,10 @@ class FakeRpcCapped:
     def block_number(self):
         return self._latest
 
-    def reward_signed_logs(self, _fsm, _epoch, lo, hi):
+    def block_timestamp(self, n):
+        return n  # block-number == timestamp scale for deterministic stop tests
+
+    def signed_logs(self, _fsm, _epoch, lo, hi, *, kind="rewards"):
         if hi - lo + 1 > self._cap:
             raise RpcError(
                 f"eth_getLogs rpc error: requested too many blocks from {lo} to {hi}, "
@@ -287,8 +330,9 @@ def test_compute_adapts_to_range_cap_and_completes():
         latest=latest,
         cap=30,
     )
-    # ~1800s since epoch end → ~2000-block window → ~67 chunks of 30 < budget.
-    sp = compute_signing_progress(rpc, SGB, 404, SPA_A, now=1_700_001_800, epoch_end_ts=1_700_000_000)
+    # epoch_end at block latest-1000 → ~34 chunks of 30 (< budget) → completes.
+    # (FakeRpcCapped.block_timestamp(n)=n, so epoch_end_ts is on the block scale.)
+    sp = compute_signing_progress(rpc, SGB, 404, SPA_A, epoch_end_ts=latest - 1000)
     assert sp.complete is True
     assert sp.signer_count == 1
     assert sp.signed_weight == 697
@@ -303,45 +347,39 @@ def test_compute_budget_exhaustion_marks_incomplete():
         latest=latest,
         cap=30,
     )
-    # Epoch ended ~16h ago → window capped at 30000; at 30/req that's 1000 reqs > budget.
-    sp = compute_signing_progress(rpc, SGB, 404, SPA_A, now=1_700_057_600, epoch_end_ts=1_700_000_000)
+    # epoch_end at block 0 → never reached; at 30 blocks/req the budget (240) caps
+    # the scan at ~7200 recent blocks → complete=False.
+    sp = compute_signing_progress(rpc, SGB, 404, SPA_A, epoch_end_ts=0)
     assert sp.complete is False
-    assert sp.scanned_from_block > latest - 30_000  # stopped before the window start
+    assert sp.scanned_from_block > latest - 30_000  # budget cut off well before block 0
     assert sp.our_signed is True  # recent signer (near latest) still captured
 
 
 def test_compute_raises_without_voter_registry():
     with pytest.raises(ValueError, match="VoterRegistry"):
         compute_signing_progress(
-            FakeRpc(signers=[], weights={}), _NETWORKS["coston2"], 404, None,
-            now=1.0, epoch_end_ts=0.0,
+            FakeRpc(signers=[], weights={}), _NETWORKS["coston2"], 404, None, epoch_end_ts=0.0
         )
 
 
-# ---- block-window math (deterministic) ----
-
-
-def test_scan_from_block_covers_window_with_overscan():
-    # 2 hours since epoch end, 1.8s blocks → ~4000 blocks; over-scan(1.5)+margin → ~6500.
+def test_compute_stops_at_epoch_end_not_whole_chain():
+    """The scan terminates once a chunk predates epoch-end (block-time independent)."""
     latest = 1_000_000
-    frm = _scan_from_block(SGB, latest, now=7_200.0, epoch_end_ts=0.0)
-    # est = int(7200/1.8*1.5)+500 = 6000+500 = 6500
-    assert frm == latest - 6500
+    rpc = FakeRpcCapped(
+        signers=[_signer(SPA_A, VOTER_A, False, block=latest - 40)],
+        weights={SPA_A.lower(): 697},
+        latest=latest,
+        cap=5000,  # uncapped-ish: one chunk covers the window
+    )
+    sp = compute_signing_progress(rpc, SGB, 404, SPA_A, epoch_end_ts=latest - 100)
+    assert sp.complete is True
+    assert sp.scanned_from_block == latest - 4999  # one 5000-chunk reached past epoch-end
+    assert sp.our_signed is True
 
 
-def test_scan_from_block_capped():
-    # epoch ended very long ago → window capped at _MAX_WINDOW_BLOCKS (30k).
-    latest = 1_000_000
-    frm = _scan_from_block(SGB, latest, now=10**9, epoch_end_ts=0.0)
-    assert frm == latest - 30_000
+# ---- CLI: epoch signing-progress (both kinds + recipient) ----
 
-
-def test_scan_from_block_floor_zero():
-    frm = _scan_from_block(SGB, latest=100, now=10**9, epoch_end_ts=0.0)
-    assert frm == 0
-
-
-# ---- CLI: epoch signing-progress ----
+RECIPIENT = "0x" + "7c" * 20
 
 
 class _CliFakeRpc:
@@ -363,7 +401,10 @@ class _CliFakeRpc:
     def block_number(self):
         return 1_000_000
 
-    def reward_signed_logs(self, _fsm, _epoch, _lo, _hi):
+    def block_timestamp(self, _n):
+        return 0  # < epoch_end → scan stops after the first chunk
+
+    def signed_logs(self, _fsm, _epoch, _lo, _hi, *, kind="rewards"):
         return [_signer(SPA_A, VOTER_A, False)]
 
     def weights_sums(self, _vr, _epoch):
@@ -376,15 +417,22 @@ class _CliFakeRpc:
         return ("0x" + "ee" * 20, 697)
 
 
+def _cli_settings(**over):
+    from clif.config import Settings
+
+    base = dict(
+        _env_file=None, network="songbird", signing_policy_address=SPA_A,
+        claim_recipient_address=RECIPIENT,
+    )
+    base.update(over)
+    return Settings(**base)
+
+
 def test_cli_signing_progress_json(monkeypatch):
     from typer.testing import CliRunner
     from clif.cli import app
-    from clif.config import Settings
 
-    monkeypatch.setattr(
-        "clif.cli.load_settings",
-        lambda: Settings(_env_file=None, network="songbird", signing_policy_address=SPA_A),
-    )
+    monkeypatch.setattr("clif.cli.load_settings", lambda: _cli_settings())
     monkeypatch.setattr("clif.cli.RpcClient", _CliFakeRpc)
 
     result = CliRunner().invoke(app, ["epoch", "signing-progress", "--json"])
@@ -392,42 +440,39 @@ def test_cli_signing_progress_json(monkeypatch):
     parsed = json.loads(result.output)
     assert parsed["network"] == "songbird"
     assert parsed["epoch"] == 404  # default = current(405) - 1
-    assert parsed["signed_pct"] == 1.06
-    assert parsed["threshold_pct"] == 50.0
-    assert parsed["finalized"] is False
-    assert parsed["our_signed"] is True
-    assert parsed["signer_count"] == 1
-    assert parsed["complete"] is True
+    assert parsed["recipient"] == RECIPIENT
+    assert parsed["our_voter"].lower() == SPA_A
+    for kind in ("uptime", "rewards"):
+        blk = parsed[kind]
+        assert blk["kind"] == kind
+        assert blk["signed_pct"] == 1.06
+        assert blk["threshold_pct"] == 50.0
+        assert blk["our_signed"] is True
+        assert blk["signer_count"] == 1
+        assert blk["complete"] is True
     assert "[bold" not in result.output
 
 
-def test_cli_signing_progress_explicit_epoch_human(monkeypatch):
+def test_cli_signing_progress_human_shows_both_and_recipient(monkeypatch):
     from typer.testing import CliRunner
     from clif.cli import app
-    from clif.config import Settings
 
-    monkeypatch.setattr(
-        "clif.cli.load_settings",
-        lambda: Settings(_env_file=None, network="songbird", signing_policy_address=SPA_A),
-    )
+    monkeypatch.setattr("clif.cli.load_settings", lambda: _cli_settings())
     monkeypatch.setattr("clif.cli.RpcClient", _CliFakeRpc)
 
     result = CliRunner().invoke(app, ["epoch", "signing-progress", "--epoch", "404"])
     assert result.exit_code == 0, result.output
-    assert "epoch 404 reward-signing" in result.output
-    assert "signed" in result.output  # our vote present
+    assert "uptime-signing" in result.output
+    assert "reward-signing" in result.output
+    assert RECIPIENT in result.output
 
 
 def test_cli_signing_progress_coston2_exits_2(monkeypatch):
     """No VoterRegistry configured for coston2 → exit 2 (misconfig)."""
     from typer.testing import CliRunner
     from clif.cli import app
-    from clif.config import Settings
 
-    monkeypatch.setattr(
-        "clif.cli.load_settings",
-        lambda: Settings(_env_file=None, network="coston2"),
-    )
+    monkeypatch.setattr("clif.cli.load_settings", lambda: _cli_settings(network="coston2"))
     result = CliRunner().invoke(app, ["epoch", "signing-progress", "--network", "coston2"])
     assert result.exit_code == 2
 
@@ -435,16 +480,12 @@ def test_cli_signing_progress_coston2_exits_2(monkeypatch):
 def test_cli_signing_progress_rpc_error_exits_1(monkeypatch):
     from typer.testing import CliRunner
     from clif.cli import app
-    from clif.config import Settings
 
     class _FailRpc(_CliFakeRpc):
         def reward_epoch_timing(self, _fsm):
             raise RpcError("node down")
 
-    monkeypatch.setattr(
-        "clif.cli.load_settings",
-        lambda: Settings(_env_file=None, network="songbird", signing_policy_address=SPA_A),
-    )
+    monkeypatch.setattr("clif.cli.load_settings", lambda: _cli_settings())
     monkeypatch.setattr("clif.cli.RpcClient", _FailRpc)
     result = CliRunner().invoke(app, ["epoch", "signing-progress"])
     assert result.exit_code == 1

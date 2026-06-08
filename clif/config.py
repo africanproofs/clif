@@ -33,9 +33,6 @@ class NetworkConfig:
     default_rpc: str
     # `{epoch}` is substituted with the reward epoch id.
     reward_data_url_template: str
-    # Approx mean block time (s) — used only to size the backward eth_getLogs
-    # window for reward-signing progress. Flare/Songbird both ~1.8s.
-    block_time_sec: float = 1.8
 
 
 _NETWORKS: dict[str, NetworkConfig] = {

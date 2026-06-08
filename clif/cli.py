@@ -55,7 +55,6 @@ from clif.fsp_autostate import (
     fsp_stream_key,
 )
 from clif.epoch_auto import (
-    Phase,
     _fmt_dur,
     _fmt_ts,
     build_disabled_report,
@@ -1419,13 +1418,17 @@ def epoch_run(
             )
             raise typer.Exit(2)
 
+        recipient = s.claim_recipient_address or "[CLAIM_RECIPIENT_ADDRESS not set]"
         log.info(
-            "epoch start network=%s interval=%ss uptime=%s initial_delay=%ss voter=%s last_done=%s state=%s",
+            "epoch start network=%s interval=%ss uptime=%s initial_delay=%ss voter=%s "
+            "recipient=%s wrap=%s last_done=%s state=%s",
             s.network,
             iv,
             s.uptime_auto_enabled,
             s.epoch_reward_initial_delay_sec,
             voter,
+            recipient,
+            s.wrap_rewards,
             last_done,
             s.epoch_status_file,
         )
@@ -1477,43 +1480,56 @@ def epoch_run(
                                 o.detail,
                                 acts,
                             )
-                        # Live reward-signing % narration — only while awaiting the
-                        # network's >threshold finalization (we've signed / are signing).
-                        # Uses logs_rpc (archive node if set) on a short-lived client;
-                        # self-contained so an RPC hiccup here never disrupts the cycle.
-                        prog_obs = [
-                            o
-                            for o in observations
-                            if not o.done and o.phase in (Phase.REWARD_SIGN, Phase.CLAIM_WAIT)
-                        ]
-                        if s.net.voter_registry and prog_obs:
-                            try:
-                                with RpcClient(s.logs_rpc) as lrpc:
-                                    for o in prog_obs:
-                                        sp = compute_signing_progress(
-                                            lrpc,
-                                            s.net,
-                                            o.epoch,
-                                            voter,
-                                            now=time.time(),
-                                            epoch_end_ts=float(epoch_end_ts(o.epoch)),
-                                        )
-                                        log.info(
-                                            "epoch %s reward-signing %s%.2f%% signed (need %.0f%%); "
-                                            "our vote on-chain: %s; %s signers; finalized=%s%s",
-                                            o.epoch,
-                                            "" if sp.complete else "≥",
-                                            sp.signed_pct,
-                                            sp.threshold_pct,
-                                            "yes" if sp.our_signed else "no",
-                                            sp.signer_count,
-                                            sp.finalized,
-                                            ""
-                                            if sp.complete
-                                            else f" [partial — set {s.network.upper()}_LOGS_RPC]",
-                                        )
-                            except RpcError as exc:
-                                log.warning("epoch signing-progress unavailable: %s", exc)
+                        # Per-cycle narration: ALWAYS log the recipient (where claimed
+                        # funds go), then — for EVERY active epoch — both uptime% and
+                        # reward% signing progress. The % scans need a full/archive node
+                        # (the public RPC caps eth_getLogs at 30 blocks AND uptime events
+                        # sit near epoch-end, so a public-RPC partial would misread 0%):
+                        # gate on a configured <NET>_LOGS_RPC and otherwise log one notice.
+                        # Self-contained so an RPC hiccup never disrupts the cycle.
+                        active = [o for o in observations if not o.done]
+                        if active:
+                            log.info(
+                                "epoch recipient=%s wrap=%s beneficiaries: %s",
+                                recipient,
+                                s.wrap_rewards,
+                                ", ".join(
+                                    f"{ClaimType(int(ct)).name}={b}" for ct, b in claimers
+                                ),
+                            )
+                        if active and s.net.voter_registry:
+                            if s.logs_rpc == s.rpc_url:
+                                log.warning(
+                                    "epoch signing-%% logging disabled — set %s_LOGS_RPC to a "
+                                    "full/archive node (public RPC caps eth_getLogs at 30 blocks)",
+                                    s.network.upper(),
+                                )
+                            else:
+                                try:
+                                    with RpcClient(s.logs_rpc) as lrpc:
+                                        for o in active:
+                                            for knd in ("uptime", "rewards"):
+                                                sp = compute_signing_progress(
+                                                    lrpc, s.net, o.epoch, voter,
+                                                    epoch_end_ts=float(epoch_end_ts(o.epoch)),
+                                                    kind=knd,
+                                                )
+                                                log.info(
+                                                    "epoch %s %s-signing %s%.2f%% signed "
+                                                    "(need %.0f%%); our vote on-chain: %s; "
+                                                    "%s signers; finalized=%s%s",
+                                                    o.epoch,
+                                                    knd,
+                                                    "" if sp.complete else "≥",
+                                                    sp.signed_pct,
+                                                    sp.threshold_pct,
+                                                    "yes" if sp.our_signed else "no",
+                                                    sp.signer_count,
+                                                    sp.finalized,
+                                                    "" if sp.complete else " [partial]",
+                                                )
+                                except RpcError as exc:
+                                    log.warning("epoch signing-progress unavailable: %s", exc)
                         _now2 = time.time()
                         sleep_s = next_sleep_seconds(
                             observations,
@@ -1586,6 +1602,40 @@ def epoch_status() -> None:
     raise typer.Exit(code)
 
 
+def _sp_dict(sp) -> dict:
+    """Serialize a SigningProgress to a JSON-friendly dict."""
+    return {
+        "kind": sp.kind,
+        "signed_pct": round(sp.signed_pct, 2),
+        "threshold_pct": round(sp.threshold_pct, 2),
+        "signed_weight": sp.signed_weight,
+        "total_weight": sp.total_weight,
+        "threshold_weight": sp.threshold_weight,
+        "finalized": sp.finalized,
+        "our_signed": sp.our_signed,
+        "message_hash": sp.message_hash,
+        "complete": sp.complete,
+        "scanned_from_block": sp.scanned_from_block,
+        "signer_count": sp.signer_count,
+        "signers": [
+            {"signing_policy_address": e.signing_policy_address, "voter": e.voter, "weight": e.weight}
+            for e in sp.signers
+        ],
+    }
+
+
+def _sp_line(sp, voter: str | None) -> str:
+    """One human-readable progress line for a SigningProgress (uptime or rewards)."""
+    ours = f"{voter[:8]}…: {'signed' if sp.our_signed else 'absent'}" if voter else "—"
+    pct = f"{sp.signed_pct:.2f}%" if sp.complete else f"≥{sp.signed_pct:.2f}%"
+    label = "uptime-signing" if sp.kind == "uptime" else "reward-signing"
+    return (
+        f"{label} [bold]{pct}[/] / threshold {sp.threshold_pct:.0f}% — "
+        f"{sp.signer_count} signers — finalized: {'yes' if sp.finalized else 'no'} — "
+        f"our vote ({ours})"
+    )
+
+
 @epoch_app.command(name="signing-progress")
 def epoch_signing_progress(
     epoch: Annotated[
@@ -1603,13 +1653,13 @@ def epoch_signing_progress(
         bool, typer.Option("--json", help="emit machine-readable JSON to stdout")
     ] = False,
 ) -> None:
-    """Live reward-signing progress for an epoch — % of signing weight that has signed.
+    """Live signing progress for an epoch — uptime AND reward % of signing weight signed.
 
-    Aggregates the FlareSystemsManager `RewardsSigned` events for the epoch and sums each
-    signer's normalised signing-policy weight (the same basis the >50% finalization
-    threshold uses), answering what the on-chain view functions cannot: how close an epoch
-    is to finalizing, and whether OUR signature is on-chain yet. Keyless.
-    Exit: 0 ok; 1 RPC error; 2 keyless / misconfig.
+    Aggregates the FlareSystemsManager `UptimeVoteSigned` + `RewardsSigned` events for the
+    epoch and sums each signer's normalised signing-policy weight (the same basis the >50%
+    finalization threshold uses), answering what the on-chain view functions cannot: how close
+    each vote is to finalizing, and whether OUR signature is on-chain yet. Also shows the claim
+    recipient. Keyless. Exit: 0 ok; 1 RPC error; 2 keyless / misconfig.
     """
     s = _settings()
     if network:
@@ -1619,6 +1669,7 @@ def epoch_signing_progress(
             f"[bold red]signing-progress: VoterRegistry not configured for network {s.network}[/]"
         )
         raise typer.Exit(2)
+    recipient = s.claim_recipient_address or "[CLAIM_RECIPIENT_ADDRESS not set]"
     try:
         # getLogs scan uses logs_rpc (a full/archive node if <NET>_LOGS_RPC is set —
         # the public RPC caps getLogs at ~30 blocks → partial coverage).
@@ -1627,49 +1678,37 @@ def epoch_signing_progress(
             fsm = s.net.flare_systems_manager
             epoch_end_ts = make_epoch_end_ts(*rpc.reward_epoch_timing(fsm))
             target = epoch if epoch is not None else rpc.get_current_reward_epoch_id(fsm) - 1
-            sp = compute_signing_progress(
-                rpc, s.net, target, voter, now=time.time(), epoch_end_ts=float(epoch_end_ts(target))
+            up = compute_signing_progress(
+                rpc, s.net, target, voter,
+                epoch_end_ts=float(epoch_end_ts(target)), kind="uptime",
+            )
+            rw = compute_signing_progress(
+                rpc, s.net, target, voter,
+                epoch_end_ts=float(epoch_end_ts(target)), kind="rewards",
             )
     except RpcError as exc:
         err.print(f"[bold red]RPC error: {exc}[/]")
         raise typer.Exit(1) from exc
     out = {
         "network": s.network,
-        "epoch": sp.epoch,
-        "signed_pct": round(sp.signed_pct, 2),
-        "threshold_pct": round(sp.threshold_pct, 2),
-        "signed_weight": sp.signed_weight,
-        "total_weight": sp.total_weight,
-        "threshold_weight": sp.threshold_weight,
-        "finalized": sp.finalized,
-        "rewards_hash": sp.rewards_hash,
-        "complete": sp.complete,
-        "scanned_from_block": sp.scanned_from_block,
+        "epoch": target,
+        "recipient": recipient,
         "our_voter": voter,
-        "our_signed": sp.our_signed,
-        "signer_count": sp.signer_count,
-        "signers": [
-            {"signing_policy_address": e.signing_policy_address, "voter": e.voter, "weight": e.weight}
-            for e in sp.signers
-        ],
+        "uptime": _sp_dict(up),
+        "rewards": _sp_dict(rw),
     }
     if json_out:
         # Raw stdout — NOT rich/console — so the host can capture byte-clean JSON.
         print(json.dumps(out))
     else:
-        ours = f"{voter[:8]}…: {'signed' if sp.our_signed else 'absent'}" if voter else "—"
-        pct = f"{sp.signed_pct:.2f}%" if sp.complete else f"≥{sp.signed_pct:.2f}%"
-        console.print(
-            f"{s.network} epoch {sp.epoch} reward-signing "
-            f"[bold]{pct}[/] / threshold {sp.threshold_pct:.0f}% — "
-            f"{sp.signer_count} signers — finalized: {'yes' if sp.finalized else 'no'} — "
-            f"our vote ({ours})"
-        )
-        if not sp.complete:
-            console.print(
-                f"  [yellow]partial scan from block {sp.scanned_from_block} — set "
-                f"{s.network.upper()}_LOGS_RPC to a full/archive node for exact %[/]"
-            )
+        console.print(f"{s.network} epoch {target} — recipient [bold green]{recipient}[/]")
+        for sp in (up, rw):
+            console.print("  " + _sp_line(sp, voter))
+            if not sp.complete:
+                console.print(
+                    f"    [yellow]partial scan from block {sp.scanned_from_block} — set "
+                    f"{s.network.upper()}_LOGS_RPC to a full/archive node for exact %[/]"
+                )
 
 
 @chain_app.command()
