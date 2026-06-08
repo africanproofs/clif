@@ -67,7 +67,7 @@ from clif.epoch_auto import (
 )
 from clif.reward_data import get_reward_distribution_data
 from clif.rpc import RpcClient, RpcError
-from clif.signing_progress import compute_signing_progress
+from clif.signing_progress import compute_signing_progress, refresh_signing_progress
 
 logging.Formatter.converter = (
     time.gmtime
@@ -1443,6 +1443,10 @@ def epoch_run(
         # math (apgateway's model). Read lazily inside the loop so a startup RPC
         # blip just retries next cycle instead of crashing.
         timing: tuple[int, int] | None = None
+        # Per-(epoch,kind) signing-progress cache — persists across cycles so the
+        # narration scan is incremental (immutable weights/total/threshold fetched
+        # once; only new blocks + new signers cost RPC calls each cycle).
+        prog_cache: dict = {}
         try:
             while True:
                 now = time.time()
@@ -1518,8 +1522,8 @@ def epoch_run(
                                     with RpcClient(s.logs_rpc) as lrpc:
                                         for o in active:
                                             for knd in ("uptime", "rewards"):
-                                                sp = compute_signing_progress(
-                                                    lrpc, s.net, o.epoch, voter,
+                                                sp = refresh_signing_progress(
+                                                    prog_cache, lrpc, s.net, o.epoch, voter,
                                                     epoch_end_ts=float(epoch_end_ts(o.epoch)),
                                                     kind=knd,
                                                 )

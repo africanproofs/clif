@@ -71,42 +71,23 @@ class SigningProgress:
     signers: list[SignerEntry] = field(default_factory=list)
 
 
-def compute_signing_progress(
-    rpc: RpcClient,
-    net: NetworkConfig,
-    epoch: int,
-    our_spa: str | None,
-    *,
-    epoch_end_ts: float,
-    kind: str = "rewards",
-) -> SigningProgress:
-    """Aggregate signing-event logs for `epoch` into a weight-weighted progress %.
+def _merge(by_hash: dict, logs: list) -> None:
+    # by_hash: message_hash -> {signing_policy_address: threshold_reached}
+    for entry in logs:
+        by_hash.setdefault(entry.message_hash, {})[entry.signing_policy_address] = (
+            entry.threshold_reached
+        )
 
-    `kind` selects the event: "rewards" (RewardsSigned) or "uptime"
-    (UptimeVoteSigned). Both use the same VoterRegistry normalised weights and the
-    same signing-policy threshold. The scan is anchored to `epoch_end_ts` (signing
-    can only occur after the epoch ends): it walks blocks RECENT→older and stops
-    once a chunk predates epoch-end — block-time-independent, so it never under- or
-    over-reaches regardless of chain cadence. `our_spa` is the caller's FSP
-    signing-policy address (used to set `our_signed`); None if unresolved. Raises
-    RpcError on transport / node error; raises ValueError if no VoterRegistry.
-    """
-    fsm = net.flare_systems_manager
-    vr = net.voter_registry
-    if not vr:
-        raise ValueError(f"VoterRegistry not configured for network {net.name}")
 
-    latest = rpc.block_number()
+def _scan_window(
+    rpc: RpcClient, fsm: str, epoch: int, kind: str, latest: int, epoch_end_ts: float
+) -> tuple[dict, int, bool]:
+    """Backward chunked getLogs from `latest`, stopping once a chunk predates
+    epoch-end (the signing-window start) — block-time-independent. Cap-adaptive;
+    budget-bounded (small-cap RPC → complete=False, a recent-window floor).
+    Returns (by_hash, scanned_from_block, complete)."""
     target = int(epoch_end_ts)
-
-    # Chunked getLogs scanning RECENT→older, stopping once a chunk reaches back
-    # before epoch-end (the signing-window start). A budget cutoff (small-cap RPC)
-    # leaves the most-relevant recent signatures covered + complete=False. Auto-adapt
-    # the chunk to the node's range cap on a "too many blocks" error.
-    # Group signers by the message hash they signed: the >threshold finalization is
-    # per-messageHash, so progress is the LEADING hash's weight, not the sum across
-    # competing hashes (matches the contract + the Explorer's per-hash view).
-    by_hash: dict[str, dict[str, bool]] = {}  # message_hash -> {spa: threshold_reached}
+    by_hash: dict = {}
     chunk = _CHUNK_BLOCKS
     reqs = 0
     hi = latest
@@ -123,34 +104,59 @@ def compute_signing_progress(
                 continue
             raise
         reqs += 1
-        for entry in logs:
-            by_hash.setdefault(entry.message_hash, {})[entry.signing_policy_address] = (
-                entry.threshold_reached
-            )
+        _merge(by_hash, logs)
         scanned_from = lo
-        # Stop once this chunk's earliest block predates epoch-end — the whole
-        # signing window is then covered (no signatures exist before epoch end).
         if lo == 0 or rpc.block_timestamp(lo) < target:
             complete = True
             break
         hi = lo - 1
+    return by_hash, scanned_from, complete
 
-    total_weight = rpc.weights_sums(vr, epoch)[1]
-    ppm = rpc.signing_policy_threshold_ppm(fsm)
+
+def _scan_forward(rpc: RpcClient, fsm: str, epoch: int, kind: str, lo: int, hi: int, by_hash: dict) -> None:
+    """Chunked getLogs over a bounded NEW range [lo, hi], merging signers into
+    `by_hash`. Cap-adaptive; no timestamp stop (the whole range is in-window).
+    Used for the incremental refresh — events are append-only, so only blocks
+    above the last-scanned high-water mark can contain new signatures."""
+    if lo > hi:
+        return
+    chunk = _CHUNK_BLOCKS
+    reqs = 0
+    cur = lo
+    while cur <= hi and reqs < _MAX_REQUESTS:
+        top = min(hi, cur + chunk - 1)
+        try:
+            logs = rpc.signed_logs(fsm, epoch, cur, top, kind=kind)
+        except RpcError as exc:
+            cap = _parse_block_cap(str(exc))
+            if cap and cap < chunk:
+                chunk = cap
+                continue
+            raise
+        reqs += 1
+        _merge(by_hash, logs)
+        cur = top + 1
+
+
+def _aggregate(
+    epoch: int,
+    kind: str,
+    by_hash: dict,
+    weight_of: dict,
+    voter_of: dict,
+    total_weight: int,
+    ppm: int,
+    our_spa: str | None,
+    complete: bool,
+    scanned_from: int,
+) -> SigningProgress:
+    """Reduce accumulated signers → SigningProgress. The >threshold finalization is
+    per-messageHash, so progress is the LEADING hash's weight (matches the contract
+    + the Explorer's per-hash view), not the sum across competing hashes."""
     threshold_weight = math.ceil(total_weight * ppm / 1_000_000)
     threshold_pct = ppm / 1_000_000 * 100
 
-    # One weight lookup per distinct signer (across all hashes — usually one hash).
-    all_spas = {spa for m in by_hash.values() for spa in m}
-    weight_of: dict[str, int] = {}
-    voter_of: dict[str, str] = {}
-    for spa in all_spas:
-        v, w = rpc.voter_normalised_weight(vr, epoch, spa)
-        weight_of[spa] = w
-        voter_of[spa] = v.lower()
-
-    # Leading hash = greatest accumulated weight (the one finalizing / finalized).
-    def _hash_weight(spas: dict[str, bool]) -> int:
+    def _hash_weight(spas: dict) -> int:
         return sum(weight_of[s] for s in spas)
 
     if by_hash:
@@ -168,8 +174,6 @@ def compute_signing_progress(
     signed_pct = (100.0 * signed_weight / total_weight) if total_weight else 0.0
     finalized = any(lead.values()) or signed_weight > threshold_weight
     our = our_spa.lower() if our_spa else None
-    our_signed = bool(our and our in lead)
-
     return SigningProgress(
         epoch=epoch,
         signed_weight=signed_weight,
@@ -178,11 +182,110 @@ def compute_signing_progress(
         signed_pct=signed_pct,
         threshold_pct=threshold_pct,
         finalized=finalized,
-        our_signed=our_signed,
+        our_signed=bool(our and our in lead),
         signer_count=len(lead),
         kind=kind,
         message_hash=message_hash,
         complete=complete,
         scanned_from_block=scanned_from,
         signers=entries,
+    )
+
+
+def _lookup_weights(rpc: RpcClient, vr: str, epoch: int, by_hash: dict, weight_of: dict, voter_of: dict) -> None:
+    """Fill weight_of/voter_of for any signer not already cached (weights are
+    IMMUTABLE per epoch, so a cached signer is never re-fetched)."""
+    seen = {spa for m in by_hash.values() for spa in m}
+    for spa in seen - weight_of.keys():
+        v, w = rpc.voter_normalised_weight(vr, epoch, spa)
+        weight_of[spa] = w
+        voter_of[spa] = v.lower()
+
+
+def compute_signing_progress(
+    rpc: RpcClient,
+    net: NetworkConfig,
+    epoch: int,
+    our_spa: str | None,
+    *,
+    epoch_end_ts: float,
+    kind: str = "rewards",
+) -> SigningProgress:
+    """Aggregate signing-event logs for `epoch` into a weight-weighted progress %.
+
+    Stateless one-shot (used by the `epoch signing-progress` command). `kind`
+    selects the event: "rewards" (RewardsSigned) or "uptime" (UptimeVoteSigned) —
+    both use the same VoterRegistry normalised weights + signing-policy threshold.
+    The daemon uses `refresh_signing_progress` (cached/incremental) instead. Raises
+    RpcError on transport / node error; ValueError if no VoterRegistry.
+    """
+    vr = net.voter_registry
+    if not vr:
+        raise ValueError(f"VoterRegistry not configured for network {net.name}")
+    fsm = net.flare_systems_manager
+    latest = rpc.block_number()
+    by_hash, scanned_from, complete = _scan_window(rpc, fsm, epoch, kind, latest, epoch_end_ts)
+    total_weight = rpc.weights_sums(vr, epoch)[1]
+    ppm = rpc.signing_policy_threshold_ppm(fsm)
+    weight_of: dict = {}
+    voter_of: dict = {}
+    _lookup_weights(rpc, vr, epoch, by_hash, weight_of, voter_of)
+    return _aggregate(
+        epoch, kind, by_hash, weight_of, voter_of, total_weight, ppm, our_spa, complete, scanned_from
+    )
+
+
+def refresh_signing_progress(
+    cache: dict,
+    rpc: RpcClient,
+    net: NetworkConfig,
+    epoch: int,
+    our_spa: str | None,
+    *,
+    epoch_end_ts: float,
+    kind: str = "rewards",
+) -> SigningProgress:
+    """Cached/incremental signing-progress for the daemon (called every cycle).
+
+    `cache` is a dict the caller persists across cycles. The immutable per-epoch
+    facts (total weight, threshold, per-signer normalised weight) are fetched ONCE
+    and reused; each subsequent refresh scans ONLY blocks above the last high-water
+    mark (events are append-only) and looks up weights ONLY for newly-seen signers.
+    Steady state (no new signers) ≈ 2 calls/cycle vs ~95 for a full scan. Falls back
+    to a full scan if the initial backward scan was incomplete (capped-RPC only).
+    Raises RpcError on transport / node error; ValueError if no VoterRegistry.
+    """
+    vr = net.voter_registry
+    if not vr:
+        raise ValueError(f"VoterRegistry not configured for network {net.name}")
+    fsm = net.flare_systems_manager
+    key = (net.name, epoch, kind)
+    st = cache.get(key)
+    latest = rpc.block_number()
+
+    if st is None or not st["base_complete"]:
+        by_hash, scanned_from, complete = _scan_window(rpc, fsm, epoch, kind, latest, epoch_end_ts)
+        st = {
+            "total": rpc.weights_sums(vr, epoch)[1],
+            "ppm": rpc.signing_policy_threshold_ppm(fsm),
+            "weight_of": {},
+            "voter_of": {},
+            "by_hash": by_hash,
+            "scanned_hi": latest,
+            "scanned_from": scanned_from,
+            "base_complete": complete,
+        }
+        cache[key] = st
+        # Bound cache growth on a long-running daemon (epochs accrue ~every 3.5d).
+        for k in [k for k in cache if k[0] == net.name and k[1] < epoch - 4]:
+            del cache[k]
+    else:
+        # Incremental: only blocks ABOVE the last high-water mark can hold new sigs.
+        _scan_forward(rpc, fsm, epoch, kind, st["scanned_hi"] + 1, latest, st["by_hash"])
+        st["scanned_hi"] = latest
+
+    _lookup_weights(rpc, vr, epoch, st["by_hash"], st["weight_of"], st["voter_of"])
+    return _aggregate(
+        epoch, kind, st["by_hash"], st["weight_of"], st["voter_of"],
+        st["total"], st["ppm"], our_spa, st["base_complete"], st["scanned_from"],
     )

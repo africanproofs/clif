@@ -23,7 +23,7 @@ from clif.rpc import (
     RpcError,
     SignedLog,
 )
-from clif.signing_progress import compute_signing_progress
+from clif.signing_progress import compute_signing_progress, refresh_signing_progress
 
 # Independently-pinned anchors: full keccak of each canonical event signature.
 # A mismatch = a vendored-keccak regression OR a struct-canonicalization slip (e.g.
@@ -385,6 +385,88 @@ def test_httpx_request_logging_is_silenced():
 
     assert logging.getLogger("httpx").level == logging.WARNING
     assert logging.getLogger("httpcore").level == logging.WARNING
+
+
+# ---- refresh_signing_progress (cached/incremental) ----
+
+
+class CountingRpc:
+    """Counts RPC calls + supports an advancing chain head for incremental tests."""
+
+    def __init__(self, signers, latest):
+        import collections
+
+        self.signers = signers  # list[SignedLog]
+        self.latest = latest
+        self.counts = collections.Counter()
+
+    def block_number(self):
+        self.counts["block_number"] += 1
+        return self.latest
+
+    def block_timestamp(self, n):
+        self.counts["block_timestamp"] += 1
+        return n  # block-number == timestamp scale
+
+    def signed_logs(self, _fsm, _epoch, lo, hi, *, kind="rewards"):
+        self.counts["signed_logs"] += 1
+        return [s for s in self.signers if lo <= s.block_number <= hi]
+
+    def weights_sums(self, _vr, _epoch):
+        self.counts["weights_sums"] += 1
+        return (10**20, 65506, 65506)
+
+    def signing_policy_threshold_ppm(self, _fsm):
+        self.counts["threshold_ppm"] += 1
+        return 500_000
+
+    def voter_normalised_weight(self, _vr, _epoch, spa):
+        self.counts["weight"] += 1
+        return ("0x" + "ee" * 20, 1000)
+
+
+def test_refresh_caches_immutable_facts_and_scans_incrementally():
+    cache: dict = {}
+    rpc = CountingRpc(signers=[_signer(SPA_A, VOTER_A, False, block=3000)], latest=4000)
+
+    # cycle 1 — full scan: fetches total + threshold + weight(A) once.
+    sp1 = refresh_signing_progress(cache, rpc, SGB, 404, SPA_A, epoch_end_ts=0)
+    assert sp1.signer_count == 1 and sp1.our_signed is True
+    assert rpc.counts["weights_sums"] == 1
+    assert rpc.counts["threshold_ppm"] == 1
+    assert rpc.counts["weight"] == 1
+    rpc.counts.clear()
+
+    # cycle 2 — chain advanced 500 blocks, NO new signer: immutable facts NOT re-fetched,
+    # only a forward getLogs over the new range + block_number. (~2 calls vs ~5.)
+    rpc.latest = 4500
+    sp2 = refresh_signing_progress(cache, rpc, SGB, 404, SPA_A, epoch_end_ts=0)
+    assert sp2.signer_count == 1
+    assert rpc.counts["weights_sums"] == 0  # cached
+    assert rpc.counts["threshold_ppm"] == 0  # cached
+    assert rpc.counts["weight"] == 0  # A already cached
+    assert rpc.counts["signed_logs"] == 1  # one forward chunk over (4001..4500)
+    rpc.counts.clear()
+
+    # cycle 3 — a NEW signer appears above the high-water mark: incremental scan picks
+    # it up, and ONLY its weight is looked up (A stays cached).
+    rpc.signers.append(_signer(SPA_B, VOTER_B, False, block=4800))
+    rpc.latest = 5000
+    sp3 = refresh_signing_progress(cache, rpc, SGB, 404, SPA_A, epoch_end_ts=0)
+    assert sp3.signer_count == 2
+    assert rpc.counts["weight"] == 1  # only the new signer B
+    assert rpc.counts["weights_sums"] == 0 and rpc.counts["threshold_ppm"] == 0
+
+
+def test_refresh_matches_compute_on_first_pass():
+    """A fresh refresh == a stateless compute over the same signers."""
+    signers = [_signer(SPA_A, VOTER_A, True, block=3000)]
+    a = compute_signing_progress(
+        FakeRpc(signers=signers, weights={SPA_A.lower(): 1000}), SGB, 404, SPA_A, epoch_end_ts=1_700_000_000
+    )
+    rpc = CountingRpc(signers=signers, latest=4000)
+    b = refresh_signing_progress({}, rpc, SGB, 404, SPA_A, epoch_end_ts=0)
+    assert (a.signer_count, a.finalized, a.our_signed) == (b.signer_count, b.finalized, b.our_signed)
 
 
 # ---- CLI: epoch signing-progress (both kinds + recipient) ----
