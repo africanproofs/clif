@@ -23,12 +23,14 @@ loop would add plumbing without benefit (Behavioural guideline 2).
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any, cast
 
 import httpx
 from eth_abi import decode as abi_decode
 from eth_abi import encode as abi_encode
 
+from clif._keccak import keccak256
 from clif.calldata import selector
 
 _CB58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -62,6 +64,28 @@ _MAX_GAS_CAP = 10_000_000  # 10M — well under fwd's FWD_MAX_GAS default (15M)
 
 class RpcError(RuntimeError):
     pass
+
+
+# FlareSystemsManager `RewardsSigned` event — emitted once per signer as reward
+# signatures land. rewardEpochId / signingPolicyAddress / voter are indexed
+# (topics 1-3); rewardsHash, noOfWeightBasedClaims[], timestamp, thresholdReached
+# live in `data`. The full keccak (NOT the 4-byte selector) is the topic0 filter.
+_REWARDS_SIGNED_SIG = (
+    "RewardsSigned(uint24,address,address,bytes32,(uint256,uint256)[],uint64,bool)"
+)
+REWARDS_SIGNED_TOPIC0 = "0x" + keccak256(_REWARDS_SIGNED_SIG.encode()).hex()
+
+
+@dataclass(frozen=True)
+class RewardSignedLog:
+    """One decoded `RewardsSigned` log (addresses 0x-prefixed, lowercased)."""
+
+    signing_policy_address: str
+    voter: str
+    rewards_hash: str  # the candidate rewards hash this voter signed (0x-prefixed)
+    threshold_reached: bool
+    timestamp: int
+    block_number: int
 
 
 class RpcClient:
@@ -359,6 +383,97 @@ class RpcClient:
             ["uint64", "uint64"], self.eth_call(flare_systems_manager, data)
         )
         return int(ts), int(blk)
+
+    # ---- reward-signing progress reads (keyless) ----
+
+    def block_number(self) -> int:
+        """eth_blockNumber → latest block height (int). Keyless read."""
+        result = self._call("eth_blockNumber", [])
+        return int(str(result), 16)
+
+    def reward_signed_logs(
+        self, flare_systems_manager: str, epoch_id: int, from_block: int, to_block: int
+    ) -> list[RewardSignedLog]:
+        """eth_getLogs for the FlareSystemsManager RewardsSigned event of ONE epoch.
+
+        Filters on topic0 (the event signature) AND topic1 (the indexed reward
+        epoch id), so the node returns only that epoch's per-signer signatures.
+        Decodes the indexed signer (topic2 = signingPolicyAddress, topic3 =
+        voter) and the non-indexed `thresholdReached` (+ timestamp) from `data`.
+        Keyless read; raises RpcError on transport / node error.
+        """
+        epoch_topic = "0x" + epoch_id.to_bytes(32, "big").hex()
+        flt = {
+            "address": flare_systems_manager,
+            "topics": [REWARDS_SIGNED_TOPIC0, epoch_topic],
+            "fromBlock": hex(from_block),
+            "toBlock": hex(to_block),
+        }
+        result = self._call("eth_getLogs", [flt])
+        logs = cast(list, result) if result else []
+        out: list[RewardSignedLog] = []
+        for entry in logs:
+            topics = entry.get("topics", [])
+            if len(topics) < 4:
+                continue  # not the indexed shape we expect — skip defensively
+            spa = "0x" + topics[2][-40:]
+            voter = "0x" + topics[3][-40:]
+            data_hex = str(entry.get("data", "0x"))
+            data = bytes.fromhex(data_hex[2:] if data_hex.startswith("0x") else data_hex)
+            rewards_hash, _claims, ts, threshold_reached = self._abi_decode(
+                ["bytes32", "(uint256,uint256)[]", "uint64", "bool"], data
+            )
+            out.append(
+                RewardSignedLog(
+                    signing_policy_address=spa.lower(),
+                    voter=voter.lower(),
+                    rewards_hash="0x" + rewards_hash.hex(),
+                    threshold_reached=bool(threshold_reached),
+                    timestamp=int(ts),
+                    block_number=int(str(entry.get("blockNumber", "0x0")), 16),
+                )
+            )
+        return out
+
+    def voter_normalised_weight(
+        self, voter_registry: str, epoch_id: int, signing_policy_address: str
+    ) -> tuple[str, int]:
+        """getVoterWithNormalisedWeight(uint256,address) → (voter, normalisedWeight).
+
+        Maps an FSP signing-policy address to its registered voter (entity) and
+        the uint16 normalised signing-policy weight used for the reward-signing
+        threshold. Keyless read.
+        """
+        data = (
+            "0x"
+            + selector("getVoterWithNormalisedWeight(uint256,address)").hex()
+            + abi_encode(["uint256", "address"], [epoch_id, signing_policy_address]).hex()
+        )
+        voter, weight = self._abi_decode(
+            ["address", "uint16"], self.eth_call(voter_registry, data)
+        )
+        return str(voter), int(weight)
+
+    def weights_sums(self, voter_registry: str, epoch_id: int) -> tuple[int, int, int]:
+        """getWeightsSums(uint256) → (weightsSum, normalisedWeightsSum, normalisedWeightsSumWithPublicKeys).
+
+        The reward-signing % denominator is normalisedWeightsSum (field [1]). Keyless read.
+        """
+        data = (
+            "0x"
+            + selector("getWeightsSums(uint256)").hex()
+            + abi_encode(["uint256"], [epoch_id]).hex()
+        )
+        ws, nws, nws_pk = self._abi_decode(
+            ["uint128", "uint16", "uint16"], self.eth_call(voter_registry, data)
+        )
+        return int(ws), int(nws), int(nws_pk)
+
+    def signing_policy_threshold_ppm(self, flare_systems_manager: str) -> int:
+        """signingPolicyThresholdPPM() → uint24 (e.g. 500000 = 50%). Keyless read."""
+        data = "0x" + selector("signingPolicyThresholdPPM()").hex()
+        (out,) = self._abi_decode(["uint24"], self.eth_call(flare_systems_manager, data))
+        return int(out)
 
     def get_revert_reason(self, tx_hash: str) -> str | None:
         """Attempt to decode the revert reason for a mined-reverted tx by replaying it.

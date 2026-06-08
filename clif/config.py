@@ -27,9 +27,15 @@ class NetworkConfig:
     flare_systems_manager: str
     claim_setup_manager: str
     entity_manager: str
+    # VoterRegistry — per-voter normalised signing weight + the epoch weight sums
+    # (reward-signing progress). "" = not configured (e.g. coston2 testnet).
+    voter_registry: str
     default_rpc: str
     # `{epoch}` is substituted with the reward epoch id.
     reward_data_url_template: str
+    # Approx mean block time (s) — used only to size the backward eth_getLogs
+    # window for reward-signing progress. Flare/Songbird both ~1.8s.
+    block_time_sec: float = 1.8
 
 
 _NETWORKS: dict[str, NetworkConfig] = {
@@ -40,6 +46,7 @@ _NETWORKS: dict[str, NetworkConfig] = {
         flare_systems_manager="0x89e50DC0380e597ecE79c8494bAAFD84537AD0D4",
         claim_setup_manager="0xD56c0Ea37B848939B59e6F5Cda119b3fA473b5eB",
         entity_manager="0x134b3311C6BdeD895556807a30C7f047D99DfdC2",
+        voter_registry="0x2580101692366e2f331e891180d9ffdF861Fce83",
         default_rpc="https://flare-api.flare.network/ext/bc/C/rpc",
         reward_data_url_template=(
             "https://raw.githubusercontent.com/flare-foundation/fsp-rewards/"
@@ -53,6 +60,7 @@ _NETWORKS: dict[str, NetworkConfig] = {
         flare_systems_manager="0x421c69E22f48e14Fc2d2Ee3812c59bfb81c38516",
         claim_setup_manager="0xDD138B38d87b0F95F6c3e13e78FFDF2588F1732d",
         entity_manager="0x46C417D0760198E94fee455CE0e223262a3D0049",
+        voter_registry="0x31B9EC65C731c7D973a33Ef3FC83B653f540dC8D",
         default_rpc="https://songbird-api.flare.network/ext/bc/C/rpc",
         reward_data_url_template=(
             "https://raw.githubusercontent.com/flare-foundation/fsp-rewards/"
@@ -66,6 +74,7 @@ _NETWORKS: dict[str, NetworkConfig] = {
         flare_systems_manager="0xbC1F76CEB521Eb5484b8943B5462D08ea96617A1",
         claim_setup_manager="",  # not needed for testnet onboarding; verify before use
         entity_manager="",  # not yet known
+        voter_registry="",  # not yet known on coston2; signing-progress degrades gracefully
         default_rpc="https://coston2-api.flare.network/ext/bc/C/rpc",
         reward_data_url_template=(
             "https://gitlab.com/timivesel/ftsov2-testnet-rewards/-/raw/main/"
@@ -136,6 +145,15 @@ class Settings(BaseSettings):
     flare_rpc: str | None = None
     songbird_rpc: str | None = None
     coston2_rpc: str | None = None
+
+    # Optional separate RPC for eth_getLogs scans (reward-signing progress only).
+    # The public Flare/Songbird RPCs cap eth_getLogs at ~30 blocks/request, which
+    # makes a full signing-window scan infeasible; point these at a full/archive
+    # node for complete coverage. Unset ⇒ fall back to the main rpc_url
+    # (best-effort partial scan).
+    flare_logs_rpc: str | None = None
+    songbird_logs_rpc: str | None = None
+    coston2_logs_rpc: str | None = None
 
     identity_address: str | None = None
     signing_policy_address: str | None = None
@@ -208,6 +226,14 @@ class Settings(BaseSettings):
     def rpc_url(self) -> str:
         override = getattr(self, f"{self.network}_rpc", None)
         return override or self.net.default_rpc
+
+    @property
+    def logs_rpc(self) -> str:
+        """RPC for eth_getLogs scans (reward-signing progress). Prefer
+        <NET>_LOGS_RPC (a full/archive node — the public RPC caps getLogs at ~30
+        blocks/request); else fall back to the main rpc_url (partial)."""
+        override = getattr(self, f"{self.network}_logs_rpc", None)
+        return override or self.rpc_url
 
     def reward_data_url(self, epoch: int) -> str:
         return self.net.reward_data_url_template.format(epoch=epoch)
