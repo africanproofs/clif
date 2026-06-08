@@ -50,6 +50,8 @@ case "$cmd" in
     exec docker compose --profile multichain build "$@" ;;
   up)
     _net="${1:?clifctl up needs a network}"; _net_ok "$_net"; _envf "$_net"; shift
+    grep -qiE '^FSP_AUTO_ENABLED=true([[:space:]]|$)' ".env.$_net" 2>/dev/null \
+      || printf 'note: FSP_AUTO_ENABLED is not true in .env.%s — the daemon will IDLE (not sign), logging one disabled line + an hourly heartbeat. Set FSP_AUTO_ENABLED=true to enable signing.\n' "$_net" >&2
     set +e; docker compose --profile multichain up -d "clif-epoch-$_net" "$@"; _rc=$?; set -e
     [ "$_rc" -eq 0 ] && printf 'requested: clif-epoch-%s (epoch sign→claim daemon)\n  up -d returning 0 does not prove it stayed up — confirm: clifctl status %s | clifctl logs %s\n' "$_net" "$_net" "$_net"
     exit "$_rc" ;;

@@ -263,3 +263,50 @@ def test_sleep_floor_when_overdue():
     obs = [EpochObs(5, Phase.REWARD_WAIT, "holding", wait_until=9_900.0)]  # already past
     s = next_sleep_seconds(obs, 6, lambda _e: 0, now=10_000.0, poll_interval=1800, initial_delay=3600)
     assert s == 60.0  # floor
+
+
+# ---- daemon log narrative helpers (v0.5.22) ----
+
+def test_fmt_ts_utc():
+    assert ea._fmt_ts(0) == "1970-01-01T00:00:00Z"
+    assert ea._fmt_ts(3661) == "1970-01-01T01:01:01Z"
+
+
+def test_fmt_dur_buckets():
+    assert ea._fmt_dur(0) == "0s"
+    assert ea._fmt_dur(45) == "45s"
+    assert ea._fmt_dur(90) == "1m30s"
+    assert ea._fmt_dur(3600 + 13 * 60) == "1h13m"
+    assert ea._fmt_dur(2 * 86400 + 3 * 3600) == "2d3h"
+    assert ea._fmt_dur(-5) == "0s"  # negatives clamp to 0
+
+
+def test_schedule_line_idle_names_next_window():
+    end = make_epoch_end_ts(0, 1000)  # end(7) = 8000
+    obs = [EpochObs(7, Phase.DONE, "done", done=True)]
+    line = ea.schedule_line(obs, 7, end, now=1000.0, poll_interval=1800, initial_delay=100)
+    assert "idle — caught up" in line
+    assert ea._fmt_ts(8100.0) in line  # end(7)=8000 + initial_delay 100
+    assert "(in " in line
+
+
+def test_schedule_line_too_early_uses_wait_until():
+    obs = [EpochObs(5, Phase.REWARD_WAIT, "holding", wait_until=10_500.0)]
+    line = ea.schedule_line(obs, 5, lambda _e: 0, now=10_000.0, poll_interval=1800, initial_delay=3600)
+    assert "epoch 5 reward-wait" in line
+    assert "actionable " + ea._fmt_ts(10_500.0) in line
+
+
+def test_schedule_line_polling_uses_poll_interval():
+    obs = [EpochObs(5, Phase.CLAIM_WAIT, "awaiting finalization")]  # wait_until None
+    line = ea.schedule_line(obs, 5, lambda _e: 0, now=10_000.0, poll_interval=1800, initial_delay=3600)
+    assert "next check " + ea._fmt_ts(11_800.0) in line  # now + poll_interval
+
+
+def test_build_disabled_report_shape():
+    rep = ea.build_disabled_report("songbird", 1800, now=42.0)
+    assert rep["disabled"] is True
+    assert rep["degraded"] is False
+    assert rep["network"] == "songbird"
+    assert rep["updated_at_ts"] == 42.0
+    assert rep["epochs"] == []

@@ -85,3 +85,12 @@ def test_report_roundtrip_and_exit_codes(tmp_path):
     # no state at all
     code, _ = status_exit_code(None)
     assert code == EXIT_NO_STATE
+
+
+def test_status_exit_code_disabled_is_healthy():
+    # A disabled daemon idles intentionally → healthy, and the staleness check is bypassed
+    # (the report is ages-stale here, but `disabled` wins).
+    rep = {"disabled": True, "network": "songbird", "updated_at_ts": 0.0, "poll_interval_sec": 1800}
+    code, line = status_exit_code(rep, now=1.0e12)
+    assert code == EXIT_HEALTHY
+    assert "DISABLED" in line

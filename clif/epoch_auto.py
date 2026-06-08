@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 
 from clif.autostate import AutoState, _ts_iso
@@ -125,34 +126,39 @@ def drive_epoch(
         end_ts = epoch_end_ts(epoch)
         if now < end_ts + initial_delay:
             return EpochObs(
-                epoch, Phase.REWARD_WAIT,
+                epoch,
+                Phase.REWARD_WAIT,
                 f"holding until epoch_end+{initial_delay}s (end_ts={end_ts})",
                 wait_until=float(end_ts + initial_delay),
                 actions=actions,
             )
         if get_reward_distribution_data(settings, epoch) is None:
-            return EpochObs(
-                epoch, Phase.REWARD_WAIT, "rewards not yet published", actions=actions
-            )
+            return EpochObs(epoch, Phase.REWARD_WAIT, "rewards not yet published", actions=actions)
         ro = run_sign_rewards(settings, epoch, wait=True, rpc=rpc)
         actions.append(("rewards", ro.status.value, ro.detail))
         if ro.status == OutcomeStatus.FAILED_TERMINAL:
             return EpochObs(
-                epoch, Phase.REWARD_SIGN, f"reward sign TERMINAL: {ro.detail}",
-                terminal=True, actions=actions,
+                epoch,
+                Phase.REWARD_SIGN,
+                f"reward sign TERMINAL: {ro.detail}",
+                terminal=True,
+                actions=actions,
             )
         if ro.status == OutcomeStatus.ALREADY_FINALIZED:
             finalized = True  # network finalized before us → fall through to claim
         else:
             # signed / pending / transient → wait for the network to finalize
             return EpochObs(
-                epoch, Phase.REWARD_SIGN,
+                epoch,
+                Phase.REWARD_SIGN,
                 f"reward sign {ro.status.value}; awaiting finalization",
                 actions=actions,
             )
     elif not finalized and signed_rewards:
         return EpochObs(
-            epoch, Phase.CLAIM_WAIT, "signed; awaiting network finalization (>threshold)",
+            epoch,
+            Phase.CLAIM_WAIT,
+            "signed; awaiting network finalization (>threshold)",
             actions=actions,
         )
 
@@ -170,8 +176,11 @@ def drive_epoch(
     if all_done:
         return EpochObs(epoch, Phase.DONE, "claimed (only this epoch)", done=True, actions=actions)
     return EpochObs(
-        epoch, Phase.CLAIM, "claim incomplete; retry next cycle",
-        terminal=any_terminal, actions=actions,
+        epoch,
+        Phase.CLAIM,
+        "claim incomplete; retry next cycle",
+        terminal=any_terminal,
+        actions=actions,
     )
 
 
@@ -210,7 +219,9 @@ def run_cycle(
     if start > last_done_epoch + 1:
         log.warning(
             "epoch: catch-up capped — skipping epochs %s..%s (>%s behind)",
-            last_done_epoch + 1, start - 1, _MAX_CATCHUP,
+            last_done_epoch + 1,
+            start - 1,
+            _MAX_CATCHUP,
         )
 
     observations: list[EpochObs] = []
@@ -224,8 +235,15 @@ def run_cycle(
             advancing = False
             continue
         obs = drive_epoch(
-            settings, rpc, fwd, voter, claimers, epoch, now,
-            uptime_enabled=uptime_enabled, initial_delay=initial_delay,
+            settings,
+            rpc,
+            fwd,
+            voter,
+            claimers,
+            epoch,
+            now,
+            uptime_enabled=uptime_enabled,
+            initial_delay=initial_delay,
             epoch_end_ts=epoch_end_ts,
         )
         observations.append(obs)
@@ -286,8 +304,10 @@ def make_epoch_end_ts(first_reward_epoch_start_ts: int, reward_epoch_duration_se
     """Closure: epoch_end_ts(N) = first + (N+1)*duration — the EXPECTED end of any
     reward epoch (apgateway's constant-derived model). Works for the current/next
     (not-yet-closed) epoch, unlike a per-epoch getRewardEpochStartInfo read."""
+
     def _end(epoch: int) -> int:
         return first_reward_epoch_start_ts + (epoch + 1) * reward_epoch_duration_sec
+
     return _end
 
 
@@ -315,10 +335,87 @@ def next_sleep_seconds(
     active = [o for o in observations if not o.done]
     if not active:
         # Nothing to do until the current epoch ends and its window opens.
-        wake = (epoch_end_ts(current_epoch) + initial_delay) if current_epoch is not None else now + poll_interval
+        wake = (
+            (epoch_end_ts(current_epoch) + initial_delay)
+            if current_epoch is not None
+            else now + poll_interval
+        )
     else:
         candidates: list[float] = []
         for o in active:
             candidates.append(o.wait_until if o.wait_until is not None else now + poll_interval)
         wake = min(candidates)
     return max(floor, min(wake - now, ceiling))
+
+
+def _fmt_ts(ts: float) -> str:
+    """UNIX ts → 'YYYY-MM-DDTHH:MM:SSZ' (UTC, second precision) — matches the log clock."""
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _fmt_dur(seconds: float) -> str:
+    """Seconds → compact human countdown: 'NdNh' / 'NhNm' / 'NmNs' / 'Ns'."""
+    s = int(max(0, seconds))
+    d, r = divmod(s, 86400)
+    h, r = divmod(r, 3600)
+    m, sec = divmod(r, 60)
+    if d:
+        return f"{d}d{h}h"
+    if h:
+        return f"{h}h{m}m"
+    if m:
+        return f"{m}m{sec}s"
+    return f"{sec}s"
+
+
+def schedule_line(
+    observations: list[EpochObs],
+    current_epoch: int | None,
+    epoch_end_ts: Callable[[int], int],
+    now: float,
+    *,
+    poll_interval: int,
+    initial_delay: int,
+) -> str:
+    """One-line 'what to expect and when' for the daemon log: what each active epoch is
+    waiting for + the ABSOLUTE next-action time + a countdown. Mirrors next_sleep_seconds'
+    wake logic so the narrative and the actual sleep agree."""
+    active = [o for o in observations if not o.done]
+    if not active:
+        if current_epoch is None:
+            return f"idle — no current epoch resolved yet; re-checking in {_fmt_dur(poll_interval)}"
+        wake = float(epoch_end_ts(current_epoch) + initial_delay)
+        return (
+            f"idle — caught up; next reward window (epoch {current_epoch} end +{initial_delay}s) "
+            f"opens {_fmt_ts(wake)} (in {_fmt_dur(wake - now)})"
+        )
+    parts: list[str] = []
+    for o in active:
+        if o.wait_until is not None:
+            parts.append(
+                f"epoch {o.epoch} {o.phase.value} — {o.detail}; actionable {_fmt_ts(o.wait_until)} "
+                f"(in {_fmt_dur(o.wait_until - now)})"
+            )
+        else:
+            nxt = now + poll_interval
+            parts.append(
+                f"epoch {o.epoch} {o.phase.value} — {o.detail}; polling, next check "
+                f"{_fmt_ts(nxt)} (in {_fmt_dur(poll_interval)})"
+            )
+    return " | ".join(parts)
+
+
+def build_disabled_report(network: str, poll_interval_sec: int, now: float) -> dict:
+    """Status snapshot for a daemon idling because FSP_AUTO_ENABLED!=true. `disabled` is
+    treated as HEALTHY by autostate.status_exit_code (intentionally off, not broken) and
+    bypasses the staleness check, so an idle daemon's docker healthcheck stays green."""
+    return {
+        "updated_at": _ts_iso(now),
+        "updated_at_ts": now,
+        "network": network,
+        "poll_interval_sec": poll_interval_sec,
+        "disabled": True,
+        "degraded": False,
+        "reasons": [],
+        "epochs": [],
+    }

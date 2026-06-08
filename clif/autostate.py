@@ -180,6 +180,10 @@ def status_exit_code(report: dict | None, now: float | None = None) -> tuple[int
     """Map a status report to (exit_code, human_line) for `clif status`."""
     if report is None:
         return EXIT_NO_STATE, "no daemon status found (clif auto has not run)"
+    if report.get("disabled"):
+        # Daemon is intentionally idling (FSP_AUTO_ENABLED!=true) — healthy, not broken.
+        # Returned before the staleness check so an idle daemon's healthcheck stays green.
+        return EXIT_HEALTHY, "epoch daemon DISABLED (FSP_AUTO_ENABLED!=true) — idling, not signing"
     now = time.time() if now is None else now
     interval = int(report.get("poll_interval_sec", 900))
     # Support both the new updated_at_ts (float) and old updated_at (float) fields;

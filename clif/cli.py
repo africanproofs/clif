@@ -55,16 +55,27 @@ from clif.fsp_autostate import (
     fsp_stream_key,
 )
 from clif.epoch_auto import (
+    _fmt_dur,
+    _fmt_ts,
+    build_disabled_report,
     build_epoch_report,
     make_epoch_end_ts,
     next_sleep_seconds,
     resolve_voter,
     run_cycle,
+    schedule_line,
 )
 from clif.reward_data import get_reward_distribution_data
 from clif.rpc import RpcClient, RpcError
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s clif %(message)s")
+logging.Formatter.converter = (
+    time.gmtime
+)  # all clif log timestamps in UTC (match on-chain/epoch times)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)sZ %(levelname)s clif %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 log = logging.getLogger("clif")
 
 app = typer.Typer(
@@ -1322,11 +1333,14 @@ def fsp_auto(
 @epoch_app.command(name="run")
 def epoch_run(
     interval: Annotated[
-        Optional[int], typer.Option("--interval", help="poll seconds (default EPOCH_POLL_INTERVAL_SEC=1800)")
+        Optional[int],
+        typer.Option("--interval", help="poll seconds (default EPOCH_POLL_INTERVAL_SEC=1800)"),
     ] = None,
     from_epoch: Annotated[
         Optional[int],
-        typer.Option("--from-epoch", help="backfill start (default: only epochs that close while running)"),
+        typer.Option(
+            "--from-epoch", help="backfill start (default: only epochs that close while running)"
+        ),
     ] = None,
 ) -> None:
     """Epoch-anchored sign→claim daemon — one flow per reward epoch.
@@ -1344,12 +1358,32 @@ def epoch_run(
     # Hard-off gate (D15): the state machine SIGNS. A valid signature over wrong
     # data is irreversible on-chain, so signing is opt-in.
     if not s.fsp_auto_enabled:
-        err.print(
-            "[bold red]clif epoch is HARD-DISABLED by default (it signs). Set "
-            "FSP_AUTO_ENABLED=true to run it (decisions.md D15). The UPTIME phase "
-            "is additionally gated by UPTIME_AUTO_ENABLED (default false).[/]"
+        # D15 hard-off gate: the state machine SIGNS, so signing is opt-in. Rather than
+        # exit (which makes `restart: unless-stopped` re-run + re-log the notice forever),
+        # IDLE: one clear timestamped line + a fresh "disabled" status (healthcheck stays
+        # green) + an hourly heartbeat. Enable with FSP_AUTO_ENABLED=true then `clifctl
+        # restart <net>` (env is read at startup).
+        log.warning(
+            "epoch daemon DISABLED — FSP_AUTO_ENABLED is not true; idling (NOT signing). "
+            "Set FSP_AUTO_ENABLED=true in .env.%s and run `clifctl restart %s` to enable "
+            "(decisions.md D15; UPTIME additionally gated by UPTIME_AUTO_ENABLED).",
+            s.network,
+            s.network,
         )
-        raise typer.Exit(2)
+        try:
+            while True:
+                write_status_atomic(
+                    s.epoch_status_file,
+                    build_disabled_report(s.network, s.epoch_poll_interval_sec, time.time()),
+                )
+                time.sleep(3600)
+                log.info(
+                    "epoch daemon still DISABLED (FSP_AUTO_ENABLED!=true) — network=%s; idling",
+                    s.network,
+                )
+        except KeyboardInterrupt:
+            log.info("epoch stopped")
+        return
 
     # One signer at a time (shared with fsp auto — both sign → double-sign risk).
     _acquire_fsp_auto_lock()
@@ -1383,8 +1417,13 @@ def epoch_run(
 
         log.info(
             "epoch start network=%s interval=%ss uptime=%s initial_delay=%ss voter=%s last_done=%s state=%s",
-            s.network, iv, s.uptime_auto_enabled, s.epoch_reward_initial_delay_sec,
-            voter, last_done, s.epoch_status_file,
+            s.network,
+            iv,
+            s.uptime_auto_enabled,
+            s.epoch_reward_initial_delay_sec,
+            voter,
+            last_done,
+            s.epoch_status_file,
         )
         # Reward-epoch timing constants (firstRewardEpochStartTs +
         # rewardEpochDurationSeconds) — read once, then epoch boundaries are pure
@@ -1398,18 +1437,27 @@ def epoch_run(
                 current = None
                 sleep_s = float(iv)  # fallback when timing/RPC unavailable this cycle
                 try:
-                    with RpcClient(s.rpc_url) as rpc, FwdClient(
-                        s.fwd_endpoint, s.fwd_caller_token
-                    ) as fwd:
+                    with (
+                        RpcClient(s.rpc_url) as rpc,
+                        FwdClient(s.fwd_endpoint, s.fwd_caller_token) as fwd,
+                    ):
                         if timing is None:
                             timing = rpc.reward_epoch_timing(s.net.flare_systems_manager)
                             log.info(
                                 "epoch timing: first_reward_epoch_start_ts=%s reward_epoch_duration_sec=%s",
-                                timing[0], timing[1],
+                                timing[0],
+                                timing[1],
                             )
                         epoch_end_ts = make_epoch_end_ts(*timing)
                         last_done, current, observations = run_cycle(
-                            s, rpc, fwd, voter, claimers, state, last_done, now,
+                            s,
+                            rpc,
+                            fwd,
+                            voter,
+                            claimers,
+                            state,
+                            last_done,
+                            now,
                             uptime_enabled=s.uptime_auto_enabled,
                             initial_delay=s.epoch_reward_initial_delay_sec,
                             terminal_cooldown=s.epoch_terminal_cooldown_sec,
@@ -1419,11 +1467,31 @@ def epoch_run(
                             acts = "".join(f" [{leg}={st}]" for leg, st, _ in o.actions)
                             log.info(
                                 "epoch %s phase=%s done=%s: %s%s",
-                                o.epoch, o.phase.value, o.done, o.detail, acts,
+                                o.epoch,
+                                o.phase.value,
+                                o.done,
+                                o.detail,
+                                acts,
                             )
+                        _now2 = time.time()
                         sleep_s = next_sleep_seconds(
-                            observations, current, epoch_end_ts, time.time(),
-                            poll_interval=iv, initial_delay=s.epoch_reward_initial_delay_sec,
+                            observations,
+                            current,
+                            epoch_end_ts,
+                            _now2,
+                            poll_interval=iv,
+                            initial_delay=s.epoch_reward_initial_delay_sec,
+                        )
+                        log.info(
+                            "epoch schedule: %s",
+                            schedule_line(
+                                observations,
+                                current,
+                                epoch_end_ts,
+                                _now2,
+                                poll_interval=iv,
+                                initial_delay=s.epoch_reward_initial_delay_sec,
+                            ),
                         )
                 except RpcError as exc:
                     log.warning("epoch rpc failure: %s (retry next cycle)", exc)
@@ -1431,13 +1499,23 @@ def epoch_run(
                     log.warning("epoch fwd retryable: %s (retry next cycle)", exc)
 
                 report = build_epoch_report(
-                    state, s.network, iv, s.epoch_stale_after_sec,
-                    last_done, current, observations, time.time(),
+                    state,
+                    s.network,
+                    iv,
+                    s.epoch_stale_after_sec,
+                    last_done,
+                    current,
+                    observations,
+                    time.time(),
                 )
                 write_status_atomic(s.epoch_status_file, report)
                 if report["degraded"]:
                     log.error("epoch DEGRADED: %s", "; ".join(report["reasons"]))
-                log.info("epoch sleeping %.0fs", sleep_s)
+                log.info(
+                    "epoch sleeping %s (until %s)",
+                    _fmt_dur(sleep_s),
+                    _fmt_ts(time.time() + sleep_s),
+                )
                 time.sleep(sleep_s)
         except KeyboardInterrupt:
             log.info("epoch stopped")

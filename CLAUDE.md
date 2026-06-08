@@ -141,6 +141,18 @@ error classification is **class-based** (`FwdRetryableError`/`FwdTerminalError`,
 
 **Changelog (condensed):**
 
+- **v0.5.22 (2026-06-08) — epoch daemon logs: timestamps + a clear "what to expect and when" narrative.**
+  Three fixes to `clif epoch run` (logging/UX only — no signing/timing logic change). (1) **Disabled
+  state no longer restart-loop-spams:** when `FSP_AUTO_ENABLED!=true` the daemon logged via
+  `err.print()` (no timestamp) + `typer.Exit(2)` → `restart: unless-stopped` re-ran it forever. Now it
+  logs ONE timestamped line, writes a `disabled` status, and idles (hourly heartbeat) — `clif epoch
+  status` reports healthy-disabled (exit 0), reboot-resilience preserved. (2) **UTC ISO-8601
+  timestamps** on every line (`%(asctime)sZ` + `Formatter.converter=gmtime`) — matches on-chain/epoch
+  times. (3) **Narrative:** new `schedule_line()`/`_fmt_ts`/`_fmt_dur` in epoch_auto; per cycle the
+  daemon logs what each active epoch is waiting for + the ABSOLUTE next-action time + countdown, and
+  the sleep line is "sleeping <dur> (until <ts>)" not raw seconds. `autostate.status_exit_code` treats
+  `disabled` as healthy; `clifctl up` pre-warns if the daemon would idle. Live-verified (one disabled
+  line, healthy-disabled status, exit 0) + 6 unit tests; 223 pass.
 - **v0.5.21 (2026-06-08) — `clifctl nonce-sync` (automated chain-truth nonce seeding).**
   Restores the no-hand-typing nonce seed the fwd de-intermingling regressed (onboard no longer
   reads chain, since fwd is zero-egress). `clifctl nonce-sync [<net>]` reads each imported
