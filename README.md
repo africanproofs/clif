@@ -20,37 +20,31 @@ Read-only commands use public RPC and do not need fwd credentials.
 
 ## Install
 
-### Full reward-provider stack (fwd + clif)
+clif is the FTSO reward AUTOMATION (the epoch sign→claim daemon + manual ops),
+deployed **separately** from the fwd signer. fwd and clif are two independent
+compose projects: fwd is zero-egress (signer only); clif has its own egress and
+joins fwd's internal callers network to reach `fwd:8080`.
 
-For a full FTSO reward-provider stack, install fwd with the optional clif
-claim/FSP layer:
-
-```sh
-curl -sfL https://get.proofs.africa/fwd | sudo sh -s -- --with-clif
-```
-
-Until `get.proofs.africa` hosting is live, run the public source installer
-directly:
+### 1. Install fwd (the signer) first
 
 ```sh
 git clone https://github.com/africanproofs/fwd.git
-sudo sh fwd/install/install.sh --with-clif
+sudo sh fwd/install/install.sh      # fwd-only; builds /opt/fwd, starts inert
 ```
 
-The installer builds from source, creates `/opt/fwd`, starts only fwd and
-litestream, and leaves the stack inert: empty default-deny policy, zero wallets,
-no signable custody.
+(Until `get.proofs.africa` is live: `curl -sfL https://get.proofs.africa/fwd | sudo sh -`.)
 
-### clif only (from source)
-
-Build clif on its own — for development, or to run against an existing fwd:
+### 2. Install clif (this deployment)
 
 ```sh
 git clone https://github.com/africanproofs/clif.git
-cd clif
-poetry install
-poetry run clif version
+sudo sh clif/install/install.sh     # clones /opt/clif, builds, installs `clifctl`
 ```
+
+This builds the clif image from source and installs the `clifctl` host wrapper.
+clif's compose joins fwd's `${FWD_NETWORK:-fwd_fwd-callers}` network (external) plus
+its own `egress` bridge — fwd must be up first (it creates that network). For local
+development without the daemon: `cd clif && poetry install && poetry run clif version`.
 
 ## Onboard rewards
 
@@ -64,12 +58,14 @@ sudo fwd onboard rewards \
   --networks songbird
 ```
 
-The wizard creates or imports the reward wallets, writes the policy, mints
-caller tokens into clif's env files, reads sender nonces from chain truth
-through keyless clif, and prints the on-chain authorizations you must perform
-from the offline identity key (`setClaimExecutors` + allowed recipients — see
-`docs/onchain-migration.md`). It is compact by default; add `--guided` for the
-full walk-through.
+The wizard creates or imports the reward wallets, writes the policy, mints caller
+tokens into clif's per-network env files at `/opt/clif` (`--clif-env-dir`), seeds
+fresh wallets' nonces to 0, and prints the on-chain authorizations you perform from
+the offline identity key (`setClaimExecutors` + allowed recipients — see
+`docs/onchain-migration.md`). It **never invokes clif**; on-chain preflight and
+seeding an *imported* wallet's nonce from chain truth are clif steps you run
+(`clifctl run <net> preflight` / `chain nonce`). Compact by default; `--guided` for
+the walk-through.
 
 Migrating an existing provider uses the same wizard with `--import-existing`.
 Stop the old claimer/submitter before fwd takes over those keys, or the two
@@ -170,27 +166,28 @@ successful only when the exact transaction emits a `RewardClaimed` event with
 amount greater than zero; an already-claimed epoch can mine as a no-op and is
 reported separately.
 
-## Docker
+## Deploy & operate — `clifctl`
 
-Single-network daemon:
-
-```sh
-docker compose up -d clif-epoch
-docker compose run --rm clif claim --type fee
-```
-
-`clif-epoch` signs, so it stays up only when `FSP_AUTO_ENABLED=true` (see
-Configure); otherwise it exits by design.
-
-Multichain daemon:
+clif is its own compose project (`clif`), joining fwd's callers network (external)
+plus its own `egress` bridge. The `clifctl` host wrapper (installed by `install.sh`)
+is the operator surface — fwd never launches clif:
 
 ```sh
-docker compose --profile multichain up -d
+clifctl up songbird            # start that network's epoch sign→claim daemon
+clifctl status songbird        # compose state + `clif epoch status`
+clifctl logs songbird          # follow the daemon
+clifctl run songbird claim --type fee     # one-shot manual op (reuses .env.songbird)
+clifctl down songbird          # stop + remove
 ```
 
-Each multichain service reads its own `.env.<network>` file. Set
-`CLIF_STATE_DIR` per network, and set `FWD_NETWORK` if fwd's Docker network is
-not named `fwd_fwd-callers`.
+`clif-epoch-<net>` SIGNS, so `clifctl up <net>` stays up only when
+`FSP_AUTO_ENABLED=true` in that network's `.env.<net>` (see Configure); otherwise it
+exits by design. Each per-network service reads its own `.env.<network>` (set
+`CLIF_STATE_DIR` per network). Set `FWD_NETWORK` if fwd's Docker network is not named
+`fwd_fwd-callers`.
+
+Under the hood `clifctl` is `docker compose -p clif --profile multichain …`; run those
+directly (e.g. `docker compose --profile multichain up -d clif-epoch-flare`) if you prefer.
 
 ## Documentation
 

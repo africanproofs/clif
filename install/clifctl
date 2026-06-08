@@ -1,0 +1,81 @@
+#!/bin/sh
+# clifctl — lifecycle + one-shot control for the clif deployment.
+#
+# clif is the FTSO reward AUTOMATION (the epoch-anchored sign→claim daemon) plus the
+# manual reward ops (claim / FSP / preflight / chain reads). It is a SEPARATE deployment
+# from the fwd signer: its own compose project (`clif`) with its own `egress` bridge,
+# joining fwd's `internal: true` callers network as an `external` network to reach
+# `fwd:8080`. clif holds ZERO private keys — it signs via fwd and broadcasts itself.
+#
+#   clifctl up <net>        # start that network's epoch sign→claim daemon (clif-epoch-<net>)
+#   clifctl down <net>      # stop + remove it
+#   clifctl restart <net>
+#   clifctl status [<net>]  # compose state (+ `clif epoch status` when <net> is given)
+#   clifctl logs <net>      # follow the daemon's logs
+#   clifctl run <net> …     # one-shot manual op: claim / fsp / preflight / chain nonce / rehearse
+#   clifctl build           # build the clif image from source
+#
+# <net> = flare | songbird | coston2  (selects the gitignored .env.<net> written by
+# `fwd onboard … --clif-env-dir <CLIF_DIR>`). The daemon SIGNS, so it stays hard-off
+# unless FSP_AUTO_ENABLED=true in that network's .env.<net> (D15).
+set -eu
+
+CLIF_DIR="${CLIF_DIR:-/opt/clif}"
+# fwd's callers network (external). Must match fwd's compose project name (default `fwd`
+# → `fwd_fwd-callers`). fwd must be up first — it creates the network clif attaches to.
+export FWD_NETWORK="${FWD_NETWORK:-fwd_fwd-callers}"
+# clif's own compose project — independent of fwd's project.
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-clif}"
+cd "$CLIF_DIR" 2>/dev/null || { echo "clifctl: $CLIF_DIR not found (set CLIF_DIR or run clif's install.sh)" >&2; exit 2; }
+
+_net_ok() {
+  case "${1:-}" in
+    flare|songbird|coston2) ;;
+    *) echo "clifctl: network must be flare|songbird|coston2 (got: '${1:-}')" >&2; exit 2 ;;
+  esac
+}
+_envf() {
+  [ -f ".env.$1" ] || { echo "clifctl: .env.$1 not found in $CLIF_DIR — run 'sudo fwd onboard rewards … --clif-env-dir $CLIF_DIR' on the fwd host first" >&2; exit 2; }
+}
+
+cmd="${1:-}"; [ "$#" -gt 0 ] && shift
+case "$cmd" in
+  build)
+    exec docker compose --profile multichain build "$@" ;;
+  up)
+    _net="${1:?clifctl up needs a network}"; _net_ok "$_net"; _envf "$_net"; shift
+    set +e; docker compose --profile multichain up -d "clif-epoch-$_net" "$@"; _rc=$?; set -e
+    [ "$_rc" -eq 0 ] && printf 'requested: clif-epoch-%s (epoch sign→claim daemon)\n  up -d returning 0 does not prove it stayed up — confirm: clifctl status %s | clifctl logs %s\n' "$_net" "$_net" "$_net"
+    exit "$_rc" ;;
+  down)
+    _net="${1:?clifctl down needs a network}"; _net_ok "$_net"; shift
+    exec docker compose --profile multichain rm -sf "clif-epoch-$_net" "$@" ;;
+  restart)
+    _net="${1:?clifctl restart needs a network}"; _net_ok "$_net"; shift
+    exec docker compose --profile multichain restart "clif-epoch-$_net" "$@" ;;
+  status)
+    if [ -n "${1:-}" ]; then
+      _net="$1"; _net_ok "$_net"; shift
+      docker compose --profile multichain ps "clif-epoch-$_net"
+      docker exec "clif-epoch-$_net" clif epoch status 2>/dev/null || true
+    else
+      exec docker compose --profile multichain ps
+    fi ;;
+  logs)
+    _net="${1:?clifctl logs needs a network}"; _net_ok "$_net"; shift
+    exec docker compose --profile multichain logs -f "clif-epoch-$_net" "$@" ;;
+  run)
+    # one-shot: override the daemon's command with the given clif args, reusing .env.<net>
+    # (NETWORK + caller tokens). `docker compose run` generates its own container name, so
+    # it never collides with a running daemon. e.g. clifctl run songbird claim --type fee
+    _net="${1:?clifctl run needs a network}"; _net_ok "$_net"; _envf "$_net"; shift
+    exec docker compose --profile multichain run --rm "clif-epoch-$_net" "$@" ;;
+  ""|help|-h|--help)
+    echo "usage: clifctl {up|down|restart|status|logs|run} <net> [args] | build" >&2
+    echo "       <net> = flare | songbird | coston2 ; clif is the SEPARATE reward-automation deployment" >&2
+    echo "       up <net>    start the epoch sign→claim daemon (needs FSP_AUTO_ENABLED=true in .env.<net>)" >&2
+    echo "       run <net> … one-shot: claim --type fee | fsp uptime --epoch N | preflight --identity 0x… | chain nonce --address 0x…" >&2
+    [ "$cmd" = "" ] && exit 2 || exit 0 ;;
+  *)
+    echo "clifctl: unknown command '$cmd' (try: clifctl help)" >&2; exit 2 ;;
+esac

@@ -91,8 +91,11 @@ the next epoch.
   pre-flight + `MINED_NOOP`. A restart re-derives each epoch's phase and resumes.
 - **Gates:** signs only when `FSP_AUTO_ENABLED=true` (hard-off, D15); the uptime phase is
   additionally gated by `UPTIME_AUTO_ENABLED` (default false). Claim scope = the signed epoch only.
-- **Deploy:** compose service `clif-epoch-<net>` (`command: ["epoch","run"]`, healthcheck
-  `clif epoch status`), launched by `sudo fwd start <net>` (fwd install overlay).
+- **Deploy:** clif is its OWN compose project (`clif`) — separate from the zero-egress fwd
+  signer. Service `clif-epoch-<net>` (`command: ["epoch","run"]`, healthcheck `clif epoch
+  status`), brought up by `clifctl up <net>` (clif's own host wrapper, `install/clifctl`).
+  clif joins fwd's `${FWD_NETWORK:-fwd_fwd-callers}` network (external) + its own `egress`
+  bridge; fwd never launches it (fwd a92 dropped the bundled overlay + `fwd start <net>`).
 - **No live signing-weight %** is on-chain (only the binary finalized flip); a live-% readout
   would self-index `RewardsSigned` events + the Relay signing policy (deferred Phase-2).
 
@@ -138,13 +141,22 @@ error classification is **class-based** (`FwdRetryableError`/`FwdTerminalError`,
 
 **Changelog (condensed):**
 
+- **v0.5.18 (2026-06-08) — clif deployed standalone (`clifctl`); de-intermingled from fwd.**
+  fwd a92 made its installer fwd-only and dropped the bundled `docker-compose.clif.yml` overlay +
+  `fwd start <net>`. clif now ships its OWN deployment: `install/clifctl` (up/down/restart/status/
+  logs/run; project `clif`; joins fwd's `${FWD_NETWORK:-fwd_fwd-callers}` network external + its own
+  `egress`) + `install/install.sh` (clone `/opt/clif` → build → install `clifctl`). No daemon code
+  change — `docker-compose.yml` already declared `fwd-net` external + its own `egress`. The epoch
+  daemon is launched by `clifctl up <net>`; manual ops via `clifctl run <net> …`. fwd's onboarding
+  still provisions clif's `.env.<net>` (`fwd onboard … --clif-env-dir /opt/clif`).
 - **v0.5.16–0.5.17 (2026-06-06) — epoch-anchored sign→claim daemon.** New `clif epoch run`
   (`clif/epoch_auto.py`, D17) replaces `clif auto` + `clif fsp auto` as the daemon: one
   per-network state machine sequencing uptime?→reward-sign→claim per reward epoch (§ Automation).
   0.5.17 adopts apgateway's timing model — FSM constants (`firstRewardEpochStartTs` +
   `rewardEpochDurationSeconds`) read once → `epoch_end_ts(N)` math + `next_sleep_seconds` precise
   idle/poll scheduling. Reads live-validated SGB+FLR (cross-checked vs `currentRewardEpochExpectedEndTs`).
-  fwd install wiring (`clif-epoch-<net>`, `fwd start <net>`) shipped fwd a88.
+  fwd install wiring shipped fwd a88; fwd a92 then de-intermingled clif into its OWN
+  deployment, so the daemon is launched by `clifctl up <net>`, not `fwd start <net>`.
 - **v0.5.8 (2026-05-31)** — docs-only professionalization (cross-repo pass with fwd):
   corrected "What clif is NOT" to the present (FSP signing is live + keyless via
   fwd's `/v1/sign-fsp-message` + `/v1/sign-transaction` — not "deferred"; dropped the
