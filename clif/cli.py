@@ -1466,6 +1466,24 @@ def epoch_run(
                                 timing[1],
                             )
                         epoch_end_ts = make_epoch_end_ts(*timing)
+
+                        def _our_signed(ep: int) -> bool:
+                            """Chain-truth 'have we already signed rewards for ep' via the
+                            RewardsSigned events — so a restart before finalization (when
+                            getVoterRewardsSignInfo reverts) doesn't re-sign and hit fwd's
+                            idempotency_conflict → false TERMINAL. Needs a logs/archive RPC;
+                            unavailable ⇒ False (prior behaviour: may re-sign)."""
+                            if s.logs_rpc == s.rpc_url or not s.net.voter_registry:
+                                return False
+                            try:
+                                with RpcClient(s.logs_rpc) as lrpc:
+                                    return refresh_signing_progress(
+                                        prog_cache, lrpc, s.net, ep, voter,
+                                        epoch_end_ts=float(epoch_end_ts(ep)), kind="rewards",
+                                    ).our_signed
+                            except RpcError:
+                                return False
+
                         last_done, current, observations = run_cycle(
                             s,
                             rpc,
@@ -1479,6 +1497,7 @@ def epoch_run(
                             initial_delay=s.epoch_reward_initial_delay_sec,
                             terminal_cooldown=s.epoch_terminal_cooldown_sec,
                             epoch_end_ts=epoch_end_ts,
+                            our_signed_fn=_our_signed,
                         )
                         for o in observations:
                             acts = "".join(f" [{leg}={st}]" for leg, st, _ in o.actions)
@@ -1507,9 +1526,10 @@ def epoch_run(
                                     f"{ClaimType(int(ct)).name}={b}" for ct, b in claimers
                                 ),
                             )
-                        # Scan signing % only for epochs still PROGRESSING — skip done and
-                        # terminal/cooldown epochs (a stuck epoch must not re-scan every cycle).
-                        active = [o for o in active if not o.terminal]
+                        # Narrate signing % for every non-done epoch (incl. a terminal/cooldown
+                        # one — cheap with the 0.5.30 cache, and useful: shows where a stuck
+                        # epoch's signing stands). The restart re-sign no longer goes terminal
+                        # (event-based already-signed check), so this is the genuine-failure case.
                         if active and s.net.voter_registry:
                             if s.logs_rpc == s.rpc_url:
                                 log.warning(

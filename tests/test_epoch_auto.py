@@ -19,6 +19,7 @@ from clif.epoch_auto import (
     run_cycle,
 )
 from clif.fsp import FspOutcome
+from clif.rpc import RpcError
 
 NONZERO = "0x" + "ab" * 32
 VOTER = "0x" + "11" * 20
@@ -35,13 +36,17 @@ def _settings(**over):
 
 class FakeRpc:
     def __init__(self, *, current=10, end_ts=1_000, rewards_hash=ZERO_BYTES32,
-                 signed_rewards=False, uptime_hash=ZERO_BYTES32, signed_uptime=False):
+                 signed_rewards=False, uptime_hash=ZERO_BYTES32, signed_uptime=False,
+                 revert=False):
         self.current = current
         self.end_ts = end_ts
         self._rh = rewards_hash
         self._sr = signed_rewards
         self._uh = uptime_hash
         self._su = signed_uptime
+        # revert=True simulates the pre-finalization FSM behaviour: rewardsHash AND
+        # getVoterRewardsSignInfo both revert with "rewards hash not signed yet".
+        self._revert = revert
 
     def get_current_reward_epoch_id(self, _fsm):
         return self.current
@@ -50,9 +55,13 @@ class FakeRpc:
         return self.end_ts
 
     def rewards_hash(self, _fsm, _epoch):
+        if self._revert:
+            raise RpcError("execution reverted: rewards hash not signed yet")
         return self._rh
 
     def voter_rewards_sign_info(self, _fsm, _epoch, _voter):
+        if self._revert:
+            raise RpcError("execution reverted: rewards hash not signed yet")
         return (1, 1) if self._sr else (0, 0)
 
     def uptime_vote_hash(self, _fsm, _epoch):
@@ -86,6 +95,7 @@ def _drive(rpc, **kw):
         uptime_enabled=kw.pop("uptime_enabled", False),
         initial_delay=kw.pop("initial_delay", 3600),
         epoch_end_ts=kw.pop("epoch_end_ts", lambda _e: rpc.end_ts),
+        our_signed_fn=kw.pop("our_signed_fn", None),
     )
 
 
@@ -136,6 +146,37 @@ def test_signed_awaiting_finalization(monkeypatch):
     rpc = FakeRpc(rewards_hash=ZERO_BYTES32, signed_rewards=True)
     obs = _drive(rpc)
     assert obs.phase is Phase.CLAIM_WAIT and not obs.done
+
+
+# --- pre-finalization revert: event-based "already signed" (no spurious re-sign) ---
+
+def test_revert_with_event_signed_goes_to_claim_wait(monkeypatch):
+    # View reverts pre-finalization; the RewardsSigned event check says WE already
+    # signed → CLAIM_WAIT, NOT a re-sign (which would hit fwd's idempotency_conflict
+    # → a false TERMINAL). run_sign_rewards must NOT be called.
+    calls = []
+    monkeypatch.setattr(
+        ea, "run_sign_rewards",
+        lambda *a, **k: calls.append(1) or _fsp(OutcomeStatus.SUBMITTED_MINED),
+    )
+    obs = _drive(FakeRpc(revert=True, end_ts=1_000), now=10_000, our_signed_fn=lambda _e: True)
+    assert obs.phase is Phase.CLAIM_WAIT and not obs.terminal and not obs.done
+    assert calls == []  # never re-attempted the sign
+
+
+def test_revert_with_event_not_signed_attempts_sign(monkeypatch):
+    # View reverts; event check says NOT signed → proceeds to sign (current behaviour).
+    _patch(monkeypatch, sign=_fsp(OutcomeStatus.SUBMITTED_MINED))
+    obs = _drive(FakeRpc(revert=True, end_ts=1_000), now=10_000, our_signed_fn=lambda _e: False)
+    assert obs.phase is Phase.REWARD_SIGN and not obs.done
+    assert any(a[0] == "rewards" for a in obs.actions)
+
+
+def test_revert_no_signed_fn_attempts_sign(monkeypatch):
+    # No event check available (None) → assume not-signed → sign (no regression).
+    _patch(monkeypatch, sign=_fsp(OutcomeStatus.SUBMITTED_MINED))
+    obs = _drive(FakeRpc(revert=True, end_ts=1_000), now=10_000)  # our_signed_fn defaults None
+    assert obs.phase is Phase.REWARD_SIGN and not obs.done
 
 
 # --- CLAIM phase (finalized) -------------------------------------------------
@@ -222,6 +263,26 @@ def test_run_cycle_stops_advance_on_stuck(monkeypatch):
     )
     assert seen == [7, 8]  # newer epoch still processed
     assert new_last == 6  # watermark did NOT advance past the stuck 7
+
+
+def test_run_cycle_threads_our_signed_fn(monkeypatch):
+    seen = {}
+
+    def fake_drive(*a, **k):
+        seen["fn"] = k.get("our_signed_fn")
+        return EpochObs(a[5], Phase.CLAIM_WAIT, "x", done=False)
+
+    monkeypatch.setattr(ea, "drive_epoch", fake_drive)
+
+    def sentinel(_e):
+        return True
+
+    run_cycle(
+        _settings(), FakeRpc(current=8), object(), VOTER, CLAIMERS, ea.AutoState(), 6, 100.0,
+        uptime_enabled=False, initial_delay=3600, terminal_cooldown=3600,
+        epoch_end_ts=lambda _e: 0, our_signed_fn=sentinel,
+    )
+    assert seen["fn"] is sentinel
 
 
 # --- apgateway-informed timing + smart sleep --------------------------------

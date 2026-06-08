@@ -104,8 +104,14 @@ def drive_epoch(
     uptime_enabled: bool,
     initial_delay: int,
     epoch_end_ts: Callable[[int], int],
+    our_signed_fn: Callable[[int], bool] | None = None,
 ) -> EpochObs:
-    """Advance a single closed reward epoch through its phases (one cycle)."""
+    """Advance a single closed reward epoch through its phases (one cycle).
+
+    `our_signed_fn(epoch) -> bool` is an optional chain-truth check (RewardsSigned
+    events) for "have WE already signed rewards for this epoch", used only when the
+    on-chain view reverts pre-finalization (see the REWARD phase). None ⇒ the prior
+    behaviour (assume not-signed on revert)."""
     fsm = settings.net.flare_systems_manager
     actions: list[tuple[str, str, str]] = []
 
@@ -131,7 +137,12 @@ def drive_epoch(
     except RpcError as exc:
         if "not signed yet" in str(exc).lower():
             finalized = False
-            signed_rewards = False
+            # The view reverts pre-finalization, so it can't report whether WE
+            # already signed. Fall back to the RewardsSigned event log (chain truth,
+            # via our_signed_fn) to avoid a spurious re-sign that collides on fwd's
+            # idempotency guard (→ false TERMINAL/DEGRADED). No check available
+            # (logs RPC not configured) ⇒ assume not-signed (prior behaviour).
+            signed_rewards = bool(our_signed_fn and our_signed_fn(epoch))
         else:
             raise
 
@@ -211,6 +222,7 @@ def run_cycle(
     initial_delay: int,
     terminal_cooldown: int,
     epoch_end_ts: Callable[[int], int],
+    our_signed_fn: Callable[[int], bool] | None = None,
 ) -> tuple[int | None, int, list[EpochObs]]:
     """One poll cycle: process all closed-but-unhandled epochs (oldest first).
 
@@ -259,6 +271,7 @@ def run_cycle(
             uptime_enabled=uptime_enabled,
             initial_delay=initial_delay,
             epoch_end_ts=epoch_end_ts,
+            our_signed_fn=our_signed_fn,
         )
         observations.append(obs)
         if obs.terminal:
