@@ -141,6 +141,14 @@ error classification is **class-based** (`FwdRetryableError`/`FwdTerminalError`,
 
 **Changelog (condensed):**
 
+- **v0.5.21 (2026-06-08) — `clifctl nonce-sync` (automated chain-truth nonce seeding).**
+  Restores the no-hand-typing nonce seed the fwd de-intermingling regressed (onboard no longer
+  reads chain, since fwd is zero-egress). `clifctl nonce-sync [<net>]` reads each imported
+  tx-wallet's (claimer + FSP sender) on-chain tx count via clif (egress) and writes fwd's nonce
+  via the `clifwd` host wrapper (admin) — fwd never touches the chain. Idempotent (skips seeded
+  wallets via `clifwd nonce get` rc). clif's `install.sh` runs it automatically (step 5,
+  best-effort, non-fatal). Components live-verified: address resolve from `clifwd wallets list`,
+  idempotent skip (rc=4), JSON `latest` parse.
 - **v0.5.20 (2026-06-08) — `install.sh` clone-into-place fix.** `fwd onboard --clif-env-dir
   /opt/clif` writes `.env.<net>` into `/opt/clif` BEFORE clif is installed, so the installer's
   empty-dir clone check failed → "no configuration file provided." Fixed: `install.sh` now

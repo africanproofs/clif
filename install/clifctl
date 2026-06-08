@@ -26,6 +26,9 @@ CLIF_DIR="${CLIF_DIR:-/opt/clif}"
 export FWD_NETWORK="${FWD_NETWORK:-fwd_fwd-callers}"
 # clif's own compose project — independent of fwd's project.
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-clif}"
+# fwd's container name — `nonce-sync` writes fwd's nonce (via the clifwd host wrapper) and
+# parses clif's chain-read JSON with fwd's bundled python.
+FWD_CONTAINER="${FWD_CONTAINER:-fwd}"
 cd "$CLIF_DIR" 2>/dev/null || { echo "clifctl: $CLIF_DIR not found (set CLIF_DIR or run clif's install.sh)" >&2; exit 2; }
 
 _net_ok() {
@@ -33,6 +36,9 @@ _net_ok() {
     flare|songbird|coston2) ;;
     *) echo "clifctl: network must be flare|songbird|coston2 (got: '${1:-}')" >&2; exit 2 ;;
   esac
+}
+_chain_id() {  # net -> EVM chain id
+  case "$1" in flare) echo 14 ;; songbird) echo 19 ;; coston2) echo 114 ;; *) return 1 ;; esac
 }
 _envf() {
   [ -f ".env.$1" ] || { echo "clifctl: .env.$1 not found in $CLIF_DIR — run 'sudo fwd onboard rewards … --clif-env-dir $CLIF_DIR' on the fwd host first" >&2; exit 2; }
@@ -70,11 +76,46 @@ case "$cmd" in
     # it never collides with a running daemon. e.g. clifctl run songbird claim --type fee
     _net="${1:?clifctl run needs a network}"; _net_ok "$_net"; _envf "$_net"; shift
     exec docker compose --profile multichain run --rm "clif-epoch-$_net" "$@" ;;
+  nonce-sync)
+    # Seed fwd's nonce from CHAIN TRUTH for the tx-sending wallets onboard imported (claimer +
+    # FSP sender — fsp-signing has no nonce). fwd is zero-egress, so this bridges: clif reads
+    # the on-chain tx count, the clifwd host wrapper writes fwd's nonce. Idempotent — already
+    # seeded wallets are skipped. `clifctl nonce-sync [<net>]` (default: every onboarded
+    # .env.<net>). clif's install.sh runs this automatically after install.
+    command -v clifwd >/dev/null 2>&1 || { echo "clifctl nonce-sync: clifwd not on PATH — is fwd installed here?" >&2; exit 2; }
+    if [ -n "${1:-}" ]; then _net_ok "$1"; _ns_nets="$1"
+    else _ns_nets=""; for _nf in flare songbird coston2; do [ -f ".env.$_nf" ] && _ns_nets="$_ns_nets $_nf"; done; fi
+    [ -n "$_ns_nets" ] || { echo "clifctl nonce-sync: no .env.<net> in $CLIF_DIR — nothing to seed"; exit 0; }
+    for _n in $_ns_nets; do
+      _cid=$(_chain_id "$_n") || continue
+      printf 'nonce-sync %s (chain %s):\n' "$_n" "$_cid"
+      for _wv in FWD_WALLET_NAME FSP_SENDER_WALLET_NAME; do
+        _wn=$(sed -n "s/^$_wv=//p" ".env.$_n" 2>/dev/null | head -n1)
+        [ -n "$_wn" ] || continue
+        if clifwd nonce get --wallet "$_wn" --chain "$_cid" >/dev/null 2>&1; then
+          printf '  ok: %s already seeded\n' "$_wn"; continue
+        fi
+        _addr=$(clifwd wallets list 2>/dev/null | awk -v n="$_wn" '$1==n{print $2; exit}')
+        [ -n "$_addr" ] || { printf '  ! %s: address not found in fwd (skipped)\n' "$_wn"; continue; }
+        _j=$(docker compose --profile multichain run --rm "clif-epoch-$_n" chain nonce --address "$_addr" --json 2>/dev/null || true)
+        _cnt=$(printf '%s' "$_j" | docker exec -i "$FWD_CONTAINER" python -c 'import sys,json;print(json.load(sys.stdin)["latest"])' 2>/dev/null || true)
+        case "$_cnt" in
+          ''|*[!0-9]*) printf '  ! %s (%s): chain nonce read failed — seed manually\n' "$_wn" "$_addr"; continue ;;
+        esac
+        if clifwd nonce init --wallet "$_wn" --chain "$_cid" --starting-nonce "$_cnt" >/dev/null 2>&1; then
+          printf '  seeded: %s @ chain %s = %s (chain truth)\n' "$_wn" "$_cid" "$_cnt"
+        else
+          printf '  ! %s: nonce init failed — run: clifwd nonce init --wallet %s --chain %s --starting-nonce %s\n' "$_wn" "$_wn" "$_cid" "$_cnt"
+        fi
+      done
+    done
+    ;;
   ""|help|-h|--help)
-    echo "usage: clifctl {up|down|restart|status|logs|run} <net> [args] | build" >&2
+    echo "usage: clifctl {up|down|restart|status|logs|run} <net> [args] | nonce-sync [<net>] | build" >&2
     echo "       <net> = flare | songbird | coston2 ; clif is the SEPARATE reward-automation deployment" >&2
     echo "       up <net>    start the epoch sign→claim daemon (needs FSP_AUTO_ENABLED=true in .env.<net>)" >&2
     echo "       run <net> … one-shot: claim --type fee | fsp uptime --epoch N | preflight --identity 0x… | chain nonce --address 0x…" >&2
+    echo "       nonce-sync  seed fwd's nonce from chain truth for imported wallets (clif reads, clifwd writes)" >&2
     [ "$cmd" = "" ] && exit 2 || exit 0 ;;
   *)
     echo "clifctl: unknown command '$cmd' (try: clifctl help)" >&2; exit 2 ;;

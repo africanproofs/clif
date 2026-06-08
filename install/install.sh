@@ -104,14 +104,25 @@ else
   log "NOTE: $CLIF_BIN_DIR not writable — run clifctl from $CLIF_DIR/install/clifctl"
 fi
 
+# --- 5. seed fwd nonces from chain truth (best-effort; non-fatal) ---------
+# fwd is zero-egress: clif reads the on-chain tx count, the clifwd host wrapper writes fwd's
+# nonce. Idempotent; no-ops cleanly if onboarding hasn't written .env.<net> yet (re-run later
+# with `clifctl nonce-sync`). This restores the no-hand-typing nonce seeding without giving
+# fwd egress.
+_clifctl="$CLIF_BIN_DIR/clifctl"; [ -x "$_clifctl" ] || _clifctl="$CLIF_DIR/install/clifctl"
+if [ "$BUILD" -eq 1 ]; then
+  log "seeding fwd nonces from chain truth (clifctl nonce-sync)"
+  ( env CLIF_DIR="$CLIF_DIR" FWD_NETWORK="$FWD_NETWORK" FWD_CONTAINER="${FWD_CONTAINER:-fwd}" "$_clifctl" nonce-sync ) \
+    || log "nonce-sync incomplete — after fwd is onboarded + reachable, run: clifctl nonce-sync"
+fi
+
 cat <<EOF
 
 clif is installed (separate from fwd; joins the '$FWD_NETWORK' network to reach fwd:8080).
 next:
-  1. Ensure fwd is running + onboarded: sudo fwd onboard rewards --identity 0x… --recipient 0x… \\
-       --networks songbird --clif-env-dir $CLIF_DIR   (writes $CLIF_DIR/.env.<net>)
-  2. Rehearse:  clifctl run songbird preflight --identity 0x… --recipient 0x…
-                clifctl run songbird claim --type fee
-  3. Enable automation (AFTER rehearsal): set FSP_AUTO_ENABLED=true in $CLIF_DIR/.env.songbird,
-     then:  clifctl up songbird
+  1. (if not yet onboarded) sudo fwd onboard rewards --identity 0x… --recipient 0x… --networks songbird
+       writes $CLIF_DIR/.env.<net>; then re-run this installer (or 'clifctl nonce-sync') to seed nonces.
+  2. verify on-chain auth:  clifctl run songbird preflight --identity 0x… --recipient 0x…
+  3. rehearse:              clifctl run songbird claim --type fee   (then verify the RewardClaimed event)
+  4. enable (AFTER rehearsal): set FSP_AUTO_ENABLED=true in $CLIF_DIR/.env.songbird, then: clifctl up songbird
 EOF
