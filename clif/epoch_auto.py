@@ -224,9 +224,10 @@ def run_cycle(
     key = f"{settings.network}:epoch"
 
     if last_done_epoch is None:
-        # Fresh start: only handle epochs that close while we run (no retro-claim
-        # of history). Operator backfills explicitly via --from-epoch.
-        last_done_epoch = current - 1
+        # Fresh start: check the just-closed epoch (current-1) in case it needs
+        # signing — don't skip it.  History further back stays skipped (no retro-
+        # claim beyond one epoch); operator uses --from-epoch for deeper backfill.
+        last_done_epoch = current - 2
 
     start = max(last_done_epoch + 1, current - _MAX_CATCHUP, 0)
     if start > last_done_epoch + 1:
