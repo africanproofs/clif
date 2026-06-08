@@ -57,14 +57,22 @@ mkdir -p "$CLIF_DIR"
 if [ -d "$CLIF_DIR/.git" ]; then
   log "source present at $CLIF_DIR — fetching $CLIF_REF"
   git -C "$CLIF_DIR" fetch --depth 1 origin "$CLIF_REF" >/dev/null 2>&1 || die "git fetch failed"
-  git -C "$CLIF_DIR" checkout -q FETCH_HEAD
-elif [ -z "$(ls -A "$CLIF_DIR" 2>/dev/null)" ]; then
-  log "cloning $CLIF_REPO @ $CLIF_REF -> $CLIF_DIR"
-  git clone --depth 1 --branch "$CLIF_REF" "$CLIF_REPO" "$CLIF_DIR" 2>/dev/null \
-    || git clone "$CLIF_REPO" "$CLIF_DIR" 2>/dev/null \
-    || die "git clone failed: $CLIF_REPO (clif must be public)"
+  git -C "$CLIF_DIR" checkout -q -f FETCH_HEAD
+elif [ -f "$CLIF_DIR/docker-compose.yml" ]; then
+  log "using existing clif source at $CLIF_DIR (no .git — building in place)"
 else
-  log "using existing checkout at $CLIF_DIR (not a git clone — building in place)"
+  # Empty, OR contains only operator config — e.g. the .env.<net> that
+  # `fwd onboard --clif-env-dir $CLIF_DIR` writes BEFORE clif is installed.
+  # `git clone` refuses a non-empty target, so init + fetch + checkout INTO the dir:
+  # this lays the source down ALONGSIDE the gitignored .env.<net> files
+  # (`checkout -f` overwrites tracked files only; it never touches untracked ones).
+  log "fetching $CLIF_REPO @ $CLIF_REF -> $CLIF_DIR (clone-into-place; preserves .env.<net>)"
+  git -C "$CLIF_DIR" init -q
+  git -C "$CLIF_DIR" remote add origin "$CLIF_REPO" 2>/dev/null \
+    || git -C "$CLIF_DIR" remote set-url origin "$CLIF_REPO"
+  git -C "$CLIF_DIR" fetch --depth 1 origin "$CLIF_REF" >/dev/null 2>&1 \
+    || die "git fetch failed: $CLIF_REPO (clif must be public)"
+  git -C "$CLIF_DIR" checkout -q -f FETCH_HEAD
 fi
 
 # clif's compose validates env_file even for stopped services. Seed a placeholder .env

@@ -141,6 +141,13 @@ error classification is **class-based** (`FwdRetryableError`/`FwdTerminalError`,
 
 **Changelog (condensed):**
 
+- **v0.5.20 (2026-06-08) — `install.sh` clone-into-place fix.** `fwd onboard --clif-env-dir
+  /opt/clif` writes `.env.<net>` into `/opt/clif` BEFORE clif is installed, so the installer's
+  empty-dir clone check failed → "no configuration file provided." Fixed: `install.sh` now
+  `git init`+`fetch`+`checkout -f`s the source INTO a non-empty `/opt/clif`, preserving the
+  gitignored `.env.<net>` (branches on `docker-compose.yml` presence for build-in-place).
+  Verified offline (source laid down + `.env.songbird` preserved). Installer-only — no image
+  or runtime change.
 - **v0.5.19 (2026-06-08) — build-from-source network resilience (Dockerfile only).** Mirrors
   fwd a93 after the operator's fresh build hit an intermittent external link: runtime `apt`
   gains `Acquire::Retries=5`, and the runtime `pip install -r requirements.txt` + clif-wheel
