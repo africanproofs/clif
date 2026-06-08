@@ -77,6 +77,12 @@ logging.basicConfig(
     format="%(asctime)sZ %(levelname)s clif %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
+# httpx/httpcore log one INFO "HTTP Request: …" line per RPC call. The epoch daemon
+# (esp. the per-signer signing-progress scan: one eth_call per signer × 2 kinds) makes
+# ~100 calls/cycle, which floods the log and drowns clif's own lines. Silence them to
+# WARNING — clif logs every meaningful outcome (signing %, phase, fwd denials) itself.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 log = logging.getLogger("clif")
 
 app = typer.Typer(
@@ -1497,6 +1503,9 @@ def epoch_run(
                                     f"{ClaimType(int(ct)).name}={b}" for ct, b in claimers
                                 ),
                             )
+                        # Scan signing % only for epochs still PROGRESSING — skip done and
+                        # terminal/cooldown epochs (a stuck epoch must not re-scan every cycle).
+                        active = [o for o in active if not o.terminal]
                         if active and s.net.voter_registry:
                             if s.logs_rpc == s.rpc_url:
                                 log.warning(

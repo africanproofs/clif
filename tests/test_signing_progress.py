@@ -377,6 +377,16 @@ def test_compute_stops_at_epoch_end_not_whole_chain():
     assert sp.our_signed is True
 
 
+def test_httpx_request_logging_is_silenced():
+    """Importing the CLI silences httpx/httpcore per-request INFO spam (daemon log flood)."""
+    import logging
+
+    import clif.cli  # noqa: F401  (import has the side effect of configuring logging)
+
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
+
+
 # ---- CLI: epoch signing-progress (both kinds + recipient) ----
 
 RECIPIENT = "0x" + "7c" * 20
