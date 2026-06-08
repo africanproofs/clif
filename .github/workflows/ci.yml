@@ -1,0 +1,35 @@
+name: ci
+
+# CI for the clif money-mover (lint + unit tests + build-from-source verification).
+# clif lives on GitHub, so this is GitHub Actions (a .gitlab-ci.yml would be inert here).
+# Live tests (real fwd / RPC / archive node) are env-gated and skip cleanly with no
+# secrets present, so CI runs the full unit suite without touching the chain or fwd.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Poetry
+        run: pipx install poetry==1.8.5
+      - name: Install dependencies
+        run: poetry install --with dev
+      - name: Ruff
+        run: poetry run ruff check .
+      - name: Pytest
+        run: poetry run pytest -q
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker build (verifies build-from-source + the fwd-client git dep resolves)
+        run: docker build -t clif:ci .

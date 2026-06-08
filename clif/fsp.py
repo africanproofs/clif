@@ -270,6 +270,22 @@ def run_sign_uptime(
                 idempotency_key=leg2_key,
             )
         except FwdTerminalError as exc:
+            # A leg-2 idempotency_conflict means we ALREADY submitted this epoch's
+            # sign (deterministic key, fee-drifted body) — fwd's guard correctly
+            # refused the duplicate. That is NOT an operator-action terminal: retry
+            # next cycle to pick up the prior submission's receipt / the network's
+            # finalization, rather than wedging the epoch in a false TERMINAL +
+            # cooldown after a restart-before-finalization. error_code is reliable
+            # as of fwd-client v0.1.2 (docs/fwd-contract.md § Error taxonomy).
+            if exc.error_code == "idempotency_conflict":
+                return _out(
+                    mt,
+                    reward_epoch_id,
+                    OutcomeStatus.FAILED_RETRYABLE,
+                    f"fwd leg-2 already submitted (idempotency_conflict; awaiting prior result): {exc}",
+                    message_hash=sig.message_hash,
+                    leg1_sig=(sig.v, sig.r, sig.s),
+                )
             hint = f" — {_OPERATOR_PROVISION_HINT}" if exc.status in (403, 404) else ""
             return _out(
                 mt,
@@ -511,6 +527,22 @@ def run_sign_rewards(
                 idempotency_key=leg2_key,
             )
         except FwdTerminalError as exc:
+            # A leg-2 idempotency_conflict means we ALREADY submitted this epoch's
+            # sign (deterministic key, fee-drifted body) — fwd's guard correctly
+            # refused the duplicate. That is NOT an operator-action terminal: retry
+            # next cycle to pick up the prior submission's receipt / the network's
+            # finalization, rather than wedging the epoch in a false TERMINAL +
+            # cooldown after a restart-before-finalization. error_code is reliable
+            # as of fwd-client v0.1.2 (docs/fwd-contract.md § Error taxonomy).
+            if exc.error_code == "idempotency_conflict":
+                return _out(
+                    mt,
+                    reward_epoch_id,
+                    OutcomeStatus.FAILED_RETRYABLE,
+                    f"fwd leg-2 already submitted (idempotency_conflict; awaiting prior result): {exc}",
+                    message_hash=sig.message_hash,
+                    leg1_sig=(sig.v, sig.r, sig.s),
+                )
             hint = f" — {_OPERATOR_PROVISION_HINT}" if exc.status in (403, 404) else ""
             return _out(
                 mt,

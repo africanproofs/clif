@@ -1438,6 +1438,15 @@ def epoch_run(
             last_done,
             s.epoch_status_file,
         )
+        if s.logs_rpc == s.rpc_url and s.net.voter_registry:
+            log.warning(
+                "%s_LOGS_RPC not set — live signing-%% logging AND the event-based "
+                "already-signed check (restart re-sign prevention) are INERT (a 409 "
+                "idempotency_conflict then falls back to retryable). Set %s_LOGS_RPC to a "
+                "full/archive node (e.g. AP's Songbird/Flare archive) to enable both.",
+                s.network.upper(),
+                s.network.upper(),
+            )
         # Reward-epoch timing constants (firstRewardEpochStartTs +
         # rewardEpochDurationSeconds) — read once, then epoch boundaries are pure
         # math (apgateway's model). Read lazily inside the loop so a startup RPC
@@ -1561,6 +1570,25 @@ def epoch_run(
                                                     sp.finalized,
                                                     "" if sp.complete else " [partial]",
                                                 )
+                                                # Turn a SILENT miss loud: if the epoch
+                                                # finalized WITHOUT our vote for a kind we
+                                                # sign, we lost that reward — alarm (the
+                                                # benign-vs-missed distinction is definitive
+                                                # once finalized: signing is closed).
+                                                if (
+                                                    sp.complete
+                                                    and sp.finalized
+                                                    and not sp.our_signed
+                                                    and (knd == "rewards" or s.uptime_auto_enabled)
+                                                ):
+                                                    log.warning(
+                                                        "epoch %s %s FINALIZED WITHOUT OUR VOTE — "
+                                                        "missed signing window (lost this epoch's %s "
+                                                        "reward); investigate fwd/RPC/timing",
+                                                        o.epoch,
+                                                        knd,
+                                                        knd,
+                                                    )
                                 except RpcError as exc:
                                     log.warning("epoch signing-progress unavailable: %s", exc)
                         _now2 = time.time()

@@ -360,6 +360,30 @@ def test_leg2_retryable_is_failed_retryable(monkeypatch):
     assert o.status == OutcomeStatus.FAILED_RETRYABLE
 
 
+def test_leg2_idempotency_conflict_is_retryable_not_terminal(monkeypatch):
+    """A 409 idempotency_conflict (we already submitted this epoch's sign) must be
+    RETRYABLE, not TERMINAL — else a restart-before-finalization wedges the epoch in a
+    false TERMINAL + cooldown. Relies on the v0.1.2 reliable error_code."""
+    sign_fwd = FakeFwdFsp(sign_fsp=SIG)
+    submit_fwd = FakeFwdFsp(
+        sign_tx_exc=FwdTerminalError(409, "idempotency_conflict", "reused with different body")
+    )
+    _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
+    o = run_sign_uptime(_settings(), 0)
+    assert o.status == OutcomeStatus.FAILED_RETRYABLE
+
+
+def test_leg2_other_409_still_terminal(monkeypatch):
+    """A non-idempotency_conflict 409 (e.g. nonce_not_initialized) stays TERMINAL."""
+    sign_fwd = FakeFwdFsp(sign_fsp=SIG)
+    submit_fwd = FakeFwdFsp(
+        sign_tx_exc=FwdTerminalError(409, "nonce_not_initialized", "run clifwd nonce-init")
+    )
+    _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
+    o = run_sign_uptime(_settings(), 0)
+    assert o.status == OutcomeStatus.FAILED_TERMINAL
+
+
 def test_broadcast_nonce_too_low_is_retryable(monkeypatch):
     """Broadcast rejection with 'nonce too low' → FAILED_RETRYABLE for FSP Leg-2."""
     rpc = FakeRpc(send_raw_raises=RpcError("nonce too low: next 5, tx 4"))

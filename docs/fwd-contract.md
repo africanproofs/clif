@@ -129,12 +129,16 @@ on signing (`clif health`).
 
 Envelope (FastAPI-nested): `{ "detail": { "error": str, "message": str } }`.
 
-> **Known gap (fwd-client Python ≤ v0.1.1):** `raise_for_fwd_error` reads
-> top-level `body["error"]`, not `body["detail"]["error"]`, so
-> `FwdError.error_code` is `"unknown"` for daemon errors. **Harmless for clif** —
-> classification is by exception **class** (`FwdRetryableError` vs
-> `FwdTerminalError`), which is **HTTP-status-driven**; clif never branches on
-> `error_code`, and must not start.
+> **error_code (fwd-client ≥ v0.1.2):** `raise_for_fwd_error` parses the nested
+> `body["detail"]["error"]` (the real FastAPI wire), so `FwdError.error_code` is
+> reliable (a golden test pins Python↔Go parity). General classification is still by
+> exception **class** (`FwdRetryableError` vs `FwdTerminalError`, HTTP-status-driven).
+> clif additionally branches on `error_code` for ONE specific recoverable case: a
+> leg-2 `409 idempotency_conflict` (we already submitted this epoch's sign — same
+> deterministic key, fee-drifted body) is reclassified from terminal to
+> **retryable**, so a restart-before-finalization retries to pick up the prior
+> submission instead of wedging the epoch in a false `FAILED_TERMINAL` + cooldown.
+> (Before v0.1.2 `error_code` was always `"unknown"` and this branch was impossible.)
 
 | HTTP | examples | class |
 |---|---|---|
