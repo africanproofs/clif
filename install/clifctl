@@ -59,8 +59,11 @@ case "$cmd" in
     _net="${1:?clifctl down needs a network}"; _net_ok "$_net"; shift
     exec docker compose --profile multichain rm -sf "clif-epoch-$_net" "$@" ;;
   restart)
-    _net="${1:?clifctl restart needs a network}"; _net_ok "$_net"; shift
-    exec docker compose --profile multichain restart "clif-epoch-$_net" "$@" ;;
+    # Recreate (NOT `docker compose restart`) so the container RE-READS .env.<net>: a plain
+    # restart keeps the env captured at creation, so an FSP_AUTO_ENABLED / FROM_EPOCH change
+    # would NOT take effect. --force-recreate guarantees the current env (+ rebuilt image) is used.
+    _net="${1:?clifctl restart needs a network}"; _net_ok "$_net"; _envf "$_net"; shift
+    exec docker compose --profile multichain up -d --force-recreate "clif-epoch-$_net" "$@" ;;
   status)
     if [ -n "${1:-}" ]; then
       _net="$1"; _net_ok "$_net"; shift

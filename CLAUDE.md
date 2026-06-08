@@ -141,6 +141,7 @@ error classification is **class-based** (`FwdRetryableError`/`FwdTerminalError`,
 
 **Changelog (condensed):**
 
+- **v0.5.23 (2026-06-08) — `clifctl restart` reloads env (force-recreate) + `FROM_EPOCH` env for the daemon's backfill point.** Two gaps surfaced bringing up the Songbird canary. (1) **`clifctl restart` didn't pick up an env change:** it ran `docker compose restart` (restarts the SAME container with the env captured at creation), so flipping `FSP_AUTO_ENABLED=true` in `.env.<net>` had no effect — the daemon still logged DISABLED. Now `clifctl restart` = `docker compose up -d --force-recreate` → re-reads `.env.<net>` (and the rebuilt image). (2) **The daemon couldn't be pointed at the just-closed epoch:** it runs via a fixed compose command (`epoch run`), so `--from-epoch` couldn't be passed; a fresh start (`last_done=None`) sets `last_done=current-1` and SKIPS the just-closed epoch — e.g. with epoch 405 open it idled 3d8h waiting for 405 instead of polling for **404**'s reward publication. Added `envvar="FROM_EPOCH"` to `--from-epoch` (verified: `[env var: FROM_EPOCH]`), so `FROM_EPOCH=N` in `.env.<net>` backfills the daemon from N. Both live-confirmed.
 - **v0.5.22 (2026-06-08) — epoch daemon logs: timestamps + a clear "what to expect and when" narrative.**
   Three fixes to `clif epoch run` (logging/UX only — no signing/timing logic change). (1) **Disabled
   state no longer restart-loop-spams:** when `FSP_AUTO_ENABLED!=true` the daemon logged via

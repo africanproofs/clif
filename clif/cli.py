@@ -1339,7 +1339,9 @@ def epoch_run(
     from_epoch: Annotated[
         Optional[int],
         typer.Option(
-            "--from-epoch", help="backfill start (default: only epochs that close while running)"
+            "--from-epoch",
+            envvar="FROM_EPOCH",
+            help="backfill start (default: only epochs that close while running). Env: FROM_EPOCH=N",
         ),
     ] = None,
 ) -> None:
