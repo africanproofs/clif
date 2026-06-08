@@ -141,6 +141,13 @@ error classification is **class-based** (`FwdRetryableError`/`FwdTerminalError`,
 
 **Changelog (condensed):**
 
+- **v0.5.19 (2026-06-08) — build-from-source network resilience (Dockerfile only).** Mirrors
+  fwd a93 after the operator's fresh build hit an intermittent external link: runtime `apt`
+  gains `Acquire::Retries=5`, and the runtime `pip install -r requirements.txt` + clif-wheel
+  install (incl. the `fwd-client` git dep) are wrapped in a 3× retry at `--timeout 300`, so a
+  transient unreachable/timeout on one package doesn't fail the image build. Build images
+  SEQUENTIALLY (parallel fwd+clif builds saturate a constrained link). No code change; validated
+  `docker compose build` → exit 0, `clif version` → `clif 0.5.19`.
 - **v0.5.18 (2026-06-08) — clif deployed standalone (`clifctl`); de-intermingled from fwd.**
   fwd a92 made its installer fwd-only and dropped the bundled `docker-compose.clif.yml` overlay +
   `fwd start <net>`. clif now ships its OWN deployment: `install/clifctl` (up/down/restart/status/
