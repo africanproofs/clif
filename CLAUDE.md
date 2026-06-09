@@ -111,13 +111,13 @@ Read these before non-trivial work; they are the binding references:
 | file | what |
 |---|---|
 | `docs/phase8b-spec.md` | **Binding spec** (vendored canonical prompt). Authoritative; decisions adjudicated. |
-| `docs/decisions.md` | Settled decisions — **do not relitigate** (D1–D16). |
+| `docs/decisions.md` | Settled decisions — **do not relitigate** (D1–D18). |
 | `docs/fwd-contract.md` | Verified fwd HTTP + ABI contract; the policy block; the `policy.example.yaml` trap. |
 | `docs/onchain-migration.md` | Networks/addresses, actors, the >50% trigger, the operator-gated rotation, the `setClaimExecutors` drift. |
 | `docs/verification.md` | Verification ladder (proven vs blocked), rehearsal ladder, pre-flight traps, local checks. |
 | `docs/fwd-integration-spec.md` | The operator handshake artifact (regenerate with `clif spec`). |
 
-## Status — current: v0.5.17
+## Status — current: v0.5.32
 
 clif is on the public `github.com/africanproofs/clif` (build-from-source). The
 reward-claim and FSP signing paths are code complete and keyless. The clif ↔ fwd ↔
@@ -135,12 +135,15 @@ inferred via the registered `0xfB021c…` voter key, not demonstrated). See
 Current contract: clif asks fwd to SIGN (`/v1/sign-transaction`), then **broadcasts
 the returned `signed_raw_tx` itself** and **reports the outcome back** to fwd. 216
 tests green. Build via the shared `fwd-client` lib
-(`github.com/africanproofs/fwd-client`, `subdirectory=python`, tag **v0.1.1**); fwd
-error classification is **class-based** (`FwdRetryableError`/`FwdTerminalError`, never
-`error_code`) — see `docs/fwd-contract.md` § Error taxonomy and `docs/decisions.md` D18.
+(`github.com/africanproofs/fwd-client`, `subdirectory=python`, tag **v0.1.2**);
+fwd error classification is **class-based** (`FwdRetryableError` /
+`FwdTerminalError`) with one deliberate code-specific recovery for a Leg-2
+`409 idempotency_conflict` restart path — see `docs/fwd-contract.md` § Error
+taxonomy and `docs/decisions.md` D18.
 
 **Changelog (condensed):**
 
+- **v0.5.33 (2026-06-09) — FSP acceptance + claim PROVEN (epoch 404); verification ladder all-green; fwd-client v0.1.3.** Reward epoch 404 closed every open verification rung end-to-end, unattended, on BOTH chains: REWARD_DISTRIBUTION signed + accepted on-chain (our `RewardsSigned` events landed + the epoch finalized — Songbird `0x8eb571…eab5` 50.43%, Flare `0xff02f8…095dd` 51.77%) and the rewards claimed. `docs/verification.md` reconciled: claim rungs 2/4/5 and FSP rung **F2** go from ⛔ to ✅ **proven** (was the dominant deferred item across two readiness audits). Also: bumped the `fwd-client` dep to **v0.1.3** (`health()` 503 now raises `FwdRetryableError`, not a raw httpx error) + relocked; added a **rewards-leg** `409 idempotency_conflict`→retryable test (prior round only covered the uptime leg). No signing/timing logic change.
 - **v0.5.32 (2026-06-09) — deployment-readiness audit fixes (defense-in-depth on the restart/409 path + CI + observability).** Five confirmed audit findings: (1) **arch-02** — a leg-2 `409 idempotency_conflict` (we already submitted this epoch's sign) now maps to `FAILED_RETRYABLE`, not `FAILED_TERMINAL`, so a restart-before-finalization can't wedge the epoch in a false terminal + cooldown (complements 0.5.31's event-based prevention; relies on the now-reliable `error_code` from **fwd-client v0.1.2**). (2) **fwd-client v0.1.2** consumed (`tag` bump + `poetry update`): its Python error parser now reads the nested `detail.error`, so `FwdError.error_code` is accurate — `docs/fwd-contract.md` § Error taxonomy updated (clif now branches on `error_code` for that one recoverable case). (3) **arch-06** — `<NET>_LOGS_RPC` added to `.env.example` + a startup WARNING when it's unset (the 0.5.31 fix + live signing-% are otherwise silently inert). (4) **FSP silent-miss alarm** — when an epoch finalizes WITHOUT our vote for a kind we sign, a WARNING fires (a missed window = lost reward is no longer silent). (5) **CI** — GitHub Actions (`.github/workflows/ci.yml`: ruff + pytest + docker build); clif is github-hosted so a `.gitlab-ci.yml` would be inert. No signing/timing logic change beyond the 409 reclassification.
 - **v0.5.31 (2026-06-08) — no false-TERMINAL re-sign on restart (event-based "already signed"); % logs unblocked.** A restart before an epoch finalizes made the daemon re-attempt the reward sign — `getVoterRewardsSignInfo` reverts pre-finalization, so the revert branch set `signed_rewards=False` even though we'd already signed → leg-2 hit fwd's `idempotency_conflict` (same deterministic key, fee-drifted body) → `FAILED_TERMINAL` → `DEGRADED`+cooldown, and the 0.5.29 skip-terminal filter then hid the % lines. Fix: `drive_epoch`/`run_cycle` take `our_signed_fn`; on the pre-finalization revert the daemon consults the **RewardsSigned events** (chain truth, via `refresh_signing_progress(...).our_signed` on the archive RPC) — if we already signed → `CLAIM_WAIT`, never re-attempting (no conflict, no false TERMINAL). NOT a fwd-error-taxonomy change (clif must not branch on `error_code`). Also dropped the skip-terminal narration filter (cheap with the 0.5.30 cache) so % shows for every non-done epoch. Safe: `our_signed=true` only comes from an on-chain event, so it can never skip a sign we haven't done. No event check (logs RPC unset) ⇒ prior behaviour.
 - **v0.5.30 (2026-06-08) — signing-progress: cached + incremental scan (daemon RPC volume ~95→~2 calls/cycle).** The per-signer normalised weight, the epoch total, and the threshold are IMMUTABLE for an epoch, yet 0.5.28's full scan re-fetched all ~65 weight reads (of ~95 calls) every 30-min cycle. New `refresh_signing_progress(cache, …)` (daemon) persists a per-(epoch,kind) cache across cycles: immutable facts fetched ONCE; each cycle scans only blocks ABOVE the last high-water mark (events are append-only) and looks up weights ONLY for newly-seen signers. Steady state (no new signers) ≈ 2 calls/cycle. The stateless `compute_signing_progress` (the one-shot `epoch signing-progress` command) is unchanged; both now share `_scan_window`/`_scan_forward`/`_aggregate`. Falls back to a full scan if the initial backward scan was incomplete (capped-RPC only). No signing/timing logic change.

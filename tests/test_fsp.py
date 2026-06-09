@@ -384,6 +384,19 @@ def test_leg2_other_409_still_terminal(monkeypatch):
     assert o.status == OutcomeStatus.FAILED_TERMINAL
 
 
+def test_leg2_rewards_idempotency_conflict_is_retryable(monkeypatch):
+    """The REWARDS leg-2 path (run_sign_rewards) maps a 409 idempotency_conflict to
+    RETRYABLE too — same branch as uptime, exercised on the rewards path."""
+    sign_fwd = FakeFwdFsp(sign_fsp=SIG)
+    submit_fwd = FakeFwdFsp(
+        sign_tx_exc=FwdTerminalError(409, "idempotency_conflict", "reused with different body")
+    )
+    _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
+    monkeypatch.setattr("clif.fsp.get_reward_distribution_data", lambda *_: RDD)
+    o = run_sign_rewards(_settings(), 3)
+    assert o.status == OutcomeStatus.FAILED_RETRYABLE
+
+
 def test_broadcast_nonce_too_low_is_retryable(monkeypatch):
     """Broadcast rejection with 'nonce too low' → FAILED_RETRYABLE for FSP Leg-2."""
     rpc = FakeRpc(send_raw_raises=RpcError("nonce too low: next 5, tx 4"))

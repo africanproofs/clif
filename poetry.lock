@@ -338,7 +338,7 @@ test = ["hypothesis (>=4.43.0)", "mypy (==1.18.2)", "pytest (>=7.0.0)", "pytest-
 
 [[package]]
 name = "fwd-client"
-version = "0.1.2"
+version = "0.1.3"
 description = "Keyless HTTP client for the fwd signing daemon (fwd v1.1.0a9+ zero-egress / sign-only API). Pure transport: no crypto, no calldata, no broadcast."
 optional = false
 python-versions = "^3.12"
@@ -352,8 +352,8 @@ pydantic = "^2.9"
 [package.source]
 type = "git"
 url = "https://github.com/africanproofs/fwd-client.git"
-reference = "v0.1.2"
-resolved_reference = "bac29affcce6bed3d3e456fe6d0b18c60fc41373"
+reference = "v0.1.3"
+resolved_reference = "ff79bd9df981c3186bfdbbd40415d0751076eb11"
 subdirectory = "python"
 
 [[package]]
@@ -983,4 +983,4 @@ typing-extensions = ">=4.12.0"
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.12"
-content-hash = "725ca18ea5c967988af9c874fc736ae61d349aeefaba352dab30d054a93064ac"
+content-hash = "132ec58a7215d5fe8a659acc7509fdf70c8a7c44d5bf9031ececad34ed50a791"

@@ -28,18 +28,19 @@
 |---|---|---|---|
 | 0 | unit logic (encode, classify, selector) | ✅ done | — ruff clean, selector anchored `0x8e33aba5` |
 | 1 | keyless discovery vs live chain, empty case | ✅ done | — `list`/`spec` ran vs live Flare |
-| 2 | keyless discovery with a **real reward** (fsp-rewards fetch + real proofs + real calldata) | ⛔ unproven | timing/data: needs a live claimable Flare epoch — the `docs/fwd-integration-spec.md §3` sample is still pending |
+| 2 | keyless discovery with a **real reward** (fsp-rewards fetch + real proofs + real calldata) | ✅ **proven** | reward epoch 404: the automated claim fetched the real reward distribution, built real proofs + real calldata, and claimed on both chains |
 | 3 | clif ↔ fwd transport (health/auth/sign/deny) | ✅ done | — proven in the epoch-400 mainnet drill |
-| 4 | end-to-end claim, mined, on-chain `from` == fwd wallet | ⛔ unproven | on-chain `setClaimExecutors` (operator) + a claimable epoch |
-| 5 | real Flare production claim | ⛔ unproven | rung 4 + operator approval (Core inv #15) |
+| 4 | end-to-end claim, mined, on-chain `from` == fwd wallet | ✅ **proven** | reward epoch 404: claimed end-to-end, unattended, on both chains (executor `setClaimExecutors`-authorized) |
+| 5 | real Flare production claim | ✅ **proven** | reward epoch 404: real production reward claim on both Flare + Songbird mainnets, automated |
 | 6 | daemon/Docker/healthcheck in situ | ✅ done | — fwd daemon reached over its Docker network in the drill |
 
-The open rungs are not clif **code** defects. Rung 2 waits on a live claimable
-Flare epoch; rungs 4–5 wait on the on-chain `setClaimExecutors` authorization,
-the deliberate operator gate (Core inv #15), and a ~3.5-day reward-epoch cadence
-outside clif's control. The epoch-400/401 mainnet drills proved the transport,
-the client-broadcast, the report-back, and the daemon-in-situ paths against live
-fwd + chain.
+All rungs are now proven. Reward epoch 404 closed the last open ones end-to-end:
+rung 2 (real reward fetch + real proofs + real calldata), rungs 4–5 (end-to-end +
+real production claim, mined, on both Flare + Songbird mainnets) — all in one
+unattended `clif epoch run` cycle (executor `setClaimExecutors`-authorized; the
+Core-inv-#15 operator gate satisfied at the production cutover). The earlier
+epoch-400/401 mainnet drills had already proved the transport, client-broadcast,
+report-back, and daemon-in-situ paths against live fwd + chain.
 
 ## The one lever available without the operator gate
 
@@ -113,22 +114,24 @@ clif rehearse  # rehearsal-ladder fwd-custody proof (needs fwd + caller token)
 |---|---|---|---|
 | F0 | FSP unit logic: selectors, UPTIME_VOTE_HASH, calldata builders, cross-field validation (merkleRoot regex, n≥0), epoch-bind (`rdd.reward_epoch_id==signing_epoch`), two-caller per-leg mapping, oracle vector parse | ✅ done | — both selectors anchored `0xdc5a4225`/`0xc00a1a97` |
 | F1 | clif ↔ fwd FSP transport (Leg-1 `/v1/sign-fsp-message` with `FSP_SIGN_CALLER_TOKEN`; Leg-2 `/v1/sign-transaction` + client broadcast + client-side `eth_getTransactionReceipt` poll + report-back, with `FSP_SUBMIT_CALLER_TOKEN`) | ✅ done | — both legs exercised in the epoch-400 mainnet drill (uptime + rewards signed, broadcast, reported back) |
-| F2 | end-to-end FSP **accepted** on-chain by the `FlareSystemsManager` (mined, correct `from`, no revert, signature recovered to a registered voter) | ⛔ deferred | a clean **ended-but-not-yet-signed** reward epoch to submit into; AP's signing wallet registered on-chain as the FSP voter; a sole-submitter sender wallet for Leg-2 |
+| F2 | end-to-end FSP **accepted** on-chain by the `FlareSystemsManager` (mined, correct `from`, no revert, signature recovered to a registered voter) | ✅ **proven** | reward epoch 404 (2026-06): our signing-policy key's `RewardsSigned` events landed + the epoch finalized on Songbird (`0x8eb571…eab5`, 50.43%) and Flare (`0xff02f8…095dd`, 51.77%), then rewards claimed — all unattended; the imported key is an accepted registered voter |
 
-The clif ↔ fwd ↔ chain **integration** is proven (F1): fwd produces valid EIP-191
-`v,r,s` the `FlareSystemsManager` recovers, clif broadcasts the Leg-2 submission,
-and the receipt drives the report-back. On-chain **protocol acceptance** is not
-independently demonstrated end-to-end: the last live submit hit the FSM window
-guard (`epoch not ended yet`), which fires **before** the signer-registration
-check — so it does not prove fwd's signer is an accepted, registered voter.
-Acceptance is **inferred** (the FSP signing-policy key `0xfB021c…` is the
-registered voter) but stays **deferred** until a clean ended-but-not-yet-signed
-epoch lets a submit pass the window guard and reach the registration check. A
-`rewards hash already signed` revert means the epoch finalized (>50% aggregate
-weight) before our signature landed — benign, and **not** proof our key was
-accepted.
+The clif ↔ fwd ↔ chain **integration** is proven (F1) AND on-chain **protocol
+acceptance** is now proven (F2): for reward epoch 404 the daemon signed
+REWARD_DISTRIBUTION via fwd, broadcast the Leg-2 submission, and our signing-policy
+key's `RewardsSigned` event landed and the epoch finalized on **both** Songbird and
+Flare (leading hash == on-chain `rewardsHash`), then the rewards were claimed — all
+in one unattended `clif epoch run` cycle. That a `signRewards` was accepted proves
+the imported key (`0xfB021c…` SGB / `0x3FA07a…` FLR) is an accepted registered voter
+(it passes the same signer-registration check `signUptimeVote` does). Evidence:
+`clif epoch signing-progress --epoch 404` (our_signed = true both chains; leading
+hash == on-chain `rewardsHash(404)`). Note: a live `signUptimeVote` still reverts on
+the FSM **window guard** (`epoch not ended yet`) when submitted too early, and a
+`rewards hash already signed` revert just means the epoch finalized before our sig
+landed (benign) — neither bears on acceptance, which is now demonstrated by the
+landed reward signature.
 
-F2 is blocked on-chain, not in code. Operator items (see D15 MAJOR-2):
+Historical operator items that gated F2 (now satisfied — kept for reference):
 - Provision `FSP_SIGN_CALLER_TOKEN` (`clif-fsp-sign` caller → `fsp_permissions`
   block in fwd; authorizes Leg-1 `/v1/sign-fsp-message`)
 - Provision `FSP_SUBMIT_CALLER_TOKEN` (`clif-fsp-submit` caller → `permissions`
