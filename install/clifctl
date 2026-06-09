@@ -65,13 +65,23 @@ case "$cmd" in
     _net="${1:?clifctl restart needs a network}"; _net_ok "$_net"; _envf "$_net"; shift
     exec docker compose --profile multichain up -d --force-recreate "clif-epoch-$_net" "$@" ;;
   status)
-    if [ -n "${1:-}" ]; then
+    if [ -n "${1:-}" ] && [ "$1" != "--json" ]; then
       _net="$1"; _net_ok "$_net"; shift
+      case " $* " in
+        *" --json "*) exec docker exec "clif-epoch-$_net" clif epoch status --json ;;
+      esac
       docker compose --profile multichain ps "clif-epoch-$_net"
       docker exec "clif-epoch-$_net" clif epoch status 2>/dev/null || true
     else
       exec docker compose --profile multichain ps
     fi ;;
+  doctor)
+    # Consumer self-check for the coordinator seam (ADR-0001): keyless, fwd
+    # reachability, configured capabilities, compat, daemon status. One-shot (probes
+    # fwd live + reads the status file), so it works with or without a running
+    # daemon. Pass --json for the machine-readable scrape surface.
+    _net="${1:?clifctl doctor needs a network}"; _net_ok "$_net"; _envf "$_net"; shift
+    exec docker compose --profile multichain run --rm "clif-epoch-$_net" doctor "$@" ;;
   logs)
     _net="${1:?clifctl logs needs a network}"; _net_ok "$_net"; shift
     exec docker compose --profile multichain logs -f "clif-epoch-$_net" "$@" ;;
@@ -116,11 +126,13 @@ case "$cmd" in
     done
     ;;
   ""|help|-h|--help)
-    echo "usage: clifctl {up|down|restart|status|logs|run} <net> [args] | nonce-sync [<net>] | build" >&2
+    echo "usage: clifctl {up|down|restart|status|logs|run|doctor} <net> [args] | nonce-sync [<net>] | build" >&2
     echo "       <net> = flare | songbird | coston2 ; clif is the SEPARATE reward-automation deployment" >&2
-    echo "       up <net>    start the epoch sign→claim daemon (needs FSP_AUTO_ENABLED=true in .env.<net>)" >&2
-    echo "       run <net> … one-shot: claim --type fee | fsp uptime --epoch N | preflight --identity 0x… | chain nonce --address 0x…" >&2
-    echo "       nonce-sync  seed fwd's nonce from chain truth for imported wallets (clif reads, clifwd writes)" >&2
+    echo "       up <net>      start the epoch sign→claim daemon (needs FSP_AUTO_ENABLED=true in .env.<net>)" >&2
+    echo "       status <net> [--json]   compose + daemon health (--json = machine-readable scrape)" >&2
+    echo "       doctor <net> [--json]   consumer self-check: keyless, fwd, capabilities, compat (ADR-0001)" >&2
+    echo "       run <net> …   one-shot: claim --type fee | fsp uptime --epoch N | preflight --identity 0x… | chain nonce --address 0x…" >&2
+    echo "       nonce-sync    seed fwd's nonce from chain truth for imported wallets (clif reads, clifwd writes)" >&2
     [ "$cmd" = "" ] && exit 2 || exit 0 ;;
   *)
     echo "clifctl: unknown command '$cmd' (try: clifctl help)" >&2; exit 2 ;;

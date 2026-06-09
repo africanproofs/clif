@@ -175,6 +175,107 @@ def health() -> None:
     console.print("[bold green]fwd ready[/]")
 
 
+def _compat() -> dict:
+    """The per-consumer compatibility tuple (ADR-0001 §7)."""
+    return {
+        "fwd_contract_expected": FWD_CONTRACT_EXPECTED,
+        "fwd_client": fwd_client.__version__,
+        "clif": __version__,
+    }
+
+
+@app.command()
+def doctor(
+    network: Annotated[Optional[str], typer.Option("--network", help="Override NETWORK")] = None,
+    json_out: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON to stdout")] = False,
+) -> None:
+    """Consumer self-check for the coordinator seam (ADR-0001).
+
+    Aggregates keyless status, fwd reachability, configured capabilities (clif's
+    imported view — caller-token presence, NAMES only), the compat tuple, and the
+    epoch daemon status. Exit: 0 healthy; 2 fwd unreachable or a running daemon
+    degraded. The machine-readable form (`--json`) is the coordinator scrape surface.
+    """
+    s = _settings()
+    if network:
+        s.network = network  # type: ignore[assignment]
+
+    fwd_info: dict = {"endpoint": s.fwd_endpoint, "reachable": False, "master": None}
+    try:
+        with FwdClient(s.fwd_endpoint, s.fwd_caller_token) as fwd:
+            h = fwd.health()
+        fwd_info["reachable"] = True
+        fwd_info["master"] = h.master
+    except Exception as exc:  # noqa: BLE001 — any transport failure ⇒ unreachable
+        fwd_info["error"] = str(exc)
+    fwd_ok = bool(fwd_info["reachable"]) and fwd_info.get("master") == "ok"
+
+    # Configured = clif holds the caller token (its "imported" view). NAMES only.
+    token_by_role = {
+        "claim": s.fwd_caller_token,
+        "fsp-sign": s.fsp_sign_caller_token,
+        "fsp-submit": s.fsp_submit_caller_token,
+    }
+    cap_status = [
+        {
+            "capability_id": c.capability_id,
+            "role": c.role,
+            "configured": bool(token_by_role.get(c.role)),
+        }
+        for c in capabilities(s)
+    ]
+
+    report = read_status(s.epoch_status_file)
+    daemon_code, daemon_line = status_exit_code(report)
+    daemon = {
+        "present": report is not None,
+        "degraded": bool(report.get("degraded")) if report else None,
+        "summary": daemon_line,
+        "exit_code": daemon_code,
+    }
+    daemon_fail = report is not None and daemon_code != 0  # absence is not a failure
+
+    overall_ok = fwd_ok and not daemon_fail
+    code = 0 if overall_ok else 2
+
+    if json_out:
+        print(
+            json.dumps(
+                {
+                    "consumer": "clif",
+                    "network": s.network,
+                    "ok": overall_ok,
+                    "keyless": True,
+                    "compat": _compat(),
+                    "fwd": fwd_info,
+                    "capabilities": cap_status,
+                    "daemon": daemon,
+                },
+                indent=2,
+            )
+        )
+        raise typer.Exit(code)
+
+    head = "[green]" if overall_ok else "[bold red]"
+    (console.print if overall_ok else err.print)(
+        f"{head}clif doctor — {s.network} — {'OK' if overall_ok else 'ISSUES'}[/]"
+    )
+    console.print("  keyless  : yes")
+    console.print(
+        f"  fwd      : {s.fwd_endpoint} reachable={fwd_info['reachable']} "
+        f"master={fwd_info.get('master')}"
+    )
+    for cs in cap_status:
+        console.print(f"  {cs['capability_id']}: configured={cs['configured']}")
+    console.print(f"  daemon   : {daemon_line}")
+    c = _compat()
+    console.print(
+        f"  compat   : fwd_contract={c['fwd_contract_expected']} "
+        f"fwd_client={c['fwd_client']} clif={c['clif']}"
+    )
+    raise typer.Exit(code)
+
+
 @app.command(name="list")
 def list_claimable(
     network: Annotated[Optional[str], typer.Option(help="Override NETWORK")] = None,
@@ -265,11 +366,7 @@ def spec(
     """
     s = _settings()
     caps = capabilities(s)
-    compat = {
-        "fwd_contract_expected": FWD_CONTRACT_EXPECTED,
-        "fwd_client": fwd_client.__version__,
-        "clif": __version__,
-    }
+    compat = _compat()
     if json_output:
         payload = {
             "consumer": "clif",
@@ -1094,7 +1191,11 @@ def auto(
 
 
 @app.command()
-def status() -> None:
+def status(
+    json_out: Annotated[
+        bool, typer.Option("--json", help="Emit machine-readable JSON to stdout")
+    ] = False,
+) -> None:
     """Health for the legacy claim-only daemon.
 
     Exit: 0 healthy; 2 degraded or daemon dead/stale; 3 no daemon state.
@@ -1102,6 +1203,13 @@ def status() -> None:
     s = _settings()
     report = read_status(s.status_file)
     code, line = status_exit_code(report)
+    if json_out:
+        print(
+            json.dumps(
+                {"ok": code == 0, "exit_code": code, "summary": line, "report": report}, indent=2
+            )
+        )
+        raise typer.Exit(code)
     (console.print if code == 0 else err.print)(
         f"[{'green' if code == 0 else 'bold red'}]{line}[/]"
     )
@@ -1193,7 +1301,11 @@ def rewards(
 
 
 @fsp_app.command(name="status")
-def fsp_status() -> None:
+def fsp_status(
+    json_out: Annotated[
+        bool, typer.Option("--json", help="Emit machine-readable JSON to stdout")
+    ] = False,
+) -> None:
     """Health for the legacy FSP signing daemon.
 
     Exit: 0 healthy; 2 degraded or daemon dead/stale; 3 no daemon state.
@@ -1201,6 +1313,13 @@ def fsp_status() -> None:
     s = _settings()
     report = read_status(s.fsp_status_file)
     code, line = fsp_status_exit_code(report)
+    if json_out:
+        print(
+            json.dumps(
+                {"ok": code == 0, "exit_code": code, "summary": line, "report": report}, indent=2
+            )
+        )
+        raise typer.Exit(code)
     (console.print if code == 0 else err.print)(
         f"[{'green' if code == 0 else 'bold red'}]{line}[/]"
     )
@@ -1714,7 +1833,11 @@ def epoch_run(
 
 
 @epoch_app.command(name="status")
-def epoch_status() -> None:
+def epoch_status(
+    json_out: Annotated[
+        bool, typer.Option("--json", help="Emit machine-readable JSON to stdout")
+    ] = False,
+) -> None:
     """Monitoring health for `clif epoch run` (Docker healthcheck / monitoring).
 
     Exit: 0 healthy; 2 degraded or daemon dead/stale; 3 no daemon state.
@@ -1722,6 +1845,13 @@ def epoch_status() -> None:
     s = _settings()
     report = read_status(s.epoch_status_file)
     code, line = status_exit_code(report)
+    if json_out:
+        print(
+            json.dumps(
+                {"ok": code == 0, "exit_code": code, "summary": line, "report": report}, indent=2
+            )
+        )
+        raise typer.Exit(code)
     (console.print if code == 0 else err.print)(
         f"[{'green' if code == 0 else 'bold red'}]{line}[/]"
     )

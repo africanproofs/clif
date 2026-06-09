@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "clif"
-version = "0.5.34"
+version = "0.5.35"
 description = "Keyless FTSO v2 reward claimer and FSP signer for Flare networks"
 authors = ["African Proofs <dev@proofs.africa>"]
 readme = "README.md"
