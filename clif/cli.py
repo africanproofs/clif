@@ -17,9 +17,11 @@ import logging
 import os
 import re
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Optional
 
+import fwd_client
 import typer
 from rich.console import Console
 
@@ -39,7 +41,15 @@ from clif.calldata import (
     build_claim_calldata,
 )
 from clif.claimer import ClaimOutcome, OutcomeStatus, run_claim, submit_claims
-from clif.config import KeylessViolation, Settings, _NETWORKS, load_settings
+from clif.config import (
+    Capability,
+    FWD_CONTRACT_EXPECTED,
+    KeylessViolation,
+    Settings,
+    _NETWORKS,
+    capabilities,
+    load_settings,
+)
 from clif.discovery import classify_claim_frontier, collect_reward_claims
 from clif.fwd_client import (
     FwdClient,
@@ -206,18 +216,70 @@ def list_claimable(
                 )
 
 
+def _capability_block(c: Capability) -> str:
+    """Render one capability as a human-reviewable custody diff (ADR-0001 §4)."""
+    lines = [
+        f"### `{c.capability_id}`  ({c.role})",
+        f"- endpoint: `{c.endpoint}`",
+        f"- fwd wallet: `{c.wallet_name or f'<{c.wallet_env} unset>'}`  (env `{c.wallet_env}`)",
+        f"- caller token: clif holds it in env `{c.caller_token_env}` "
+        "(granted by fwd; the value is never in this doc)",
+    ]
+    if c.contract:
+        lines.append(f"- contract: {c.contract_name} `{c.contract}`")
+    lines.append(f"- method: `{c.method}`")
+    if c.value_wei is not None:
+        lines.append(f"- value: `{c.value_wei}`")
+    if c.role == "claim":
+        lines.append(
+            f"- recipient pinned: `{c.recipient_pinned or '<CLAIM_RECIPIENT_ADDRESS unset>'}`"
+        )
+    lines.append(
+        f"- suggested rate: {c.suggested_rate}  (request only — fwd policy is authoritative)"
+    )
+    lines.append("- → approve / reject")
+    return "\n".join(lines)
+
+
 @app.command()
 def spec(
     out: Annotated[Path, typer.Option(help="Output path")] = Path("docs/fwd-integration-spec.md"),
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Emit clif's machine-readable capability-request (ADR-0001) to stdout "
+            "instead of writing the markdown handshake.",
+        ),
+    ] = False,
 ) -> None:
-    """Generate the fwd integration spec from live claim discovery.
+    """Generate clif's fwd capability-request / integration spec.
 
-    Builds real `claim` calldata from the live keyless discovery path (never a
-    hand-authored shape). If a real sample
-    cannot be captured (no beneficiary set / RPC down / no claimable epoch),
-    that section is written as explicitly PENDING — it is never fabricated.
+    clif's per-network fwd capabilities (ADR-0001 §3) render as a human-reviewable
+    custody diff (default markdown) or a machine-readable capability-request
+    (`--json`) keyed by `capability_id` + the compat tuple. `clif spec --json` is
+    clif's **reference capability-request** — the shape the (deferred)
+    `consumer-contract-v1` will formalize. The markdown form also captures a real
+    `claim` calldata sample from the live keyless discovery path (PENDING if none —
+    never hand-authored).
     """
     s = _settings()
+    caps = capabilities(s)
+    compat = {
+        "fwd_contract_expected": FWD_CONTRACT_EXPECTED,
+        "fwd_client": fwd_client.__version__,
+        "clif": __version__,
+    }
+    if json_output:
+        payload = {
+            "consumer": "clif",
+            "network": s.network,
+            "compat": compat,
+            "capabilities": [asdict(c) for c in caps],
+        }
+        print(json.dumps(payload, indent=2))
+        return
+
     samples: list[str] = []
     pending: list[str] = []
     claimers = _enabled_claimers(s)
@@ -268,6 +330,7 @@ def spec(
     )
     samples_md = "\n".join(samples) if samples else ("_No real sample captured in this run._")
     pending_md = "\n".join(f"- {p}" for p in pending) if pending else "- None."
+    capability_blocks = "\n\n".join(_capability_block(c) for c in caps)
 
     doc = f"""# fwd integration spec - clif
 
@@ -275,6 +338,15 @@ def spec(
 > the active environment before provisioning fwd. clif produces this; the
 > operator writes fwd's least-privilege `policy.yaml` and provisions the
 > wallet + caller token. clif never authors fwd policy or mints credentials.
+
+## Capability requests — clif/{s.network} (ADR-0001 §3/§4)
+
+The custody review for this consumer. Each block is one capability the operator
+approves or rejects; the granted caller token is a secret clif holds, never shown
+here. Compat: fwd_contract=`{compat['fwd_contract_expected']}` ·
+fwd_client=`{compat['fwd_client']}` · clif=`{compat['clif']}`.
+
+{capability_blocks}
 
 ## 1. Networks & RewardManager target
 

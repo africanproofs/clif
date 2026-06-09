@@ -18,6 +18,10 @@ Network = Literal["flare", "songbird", "coston2"]
 
 ZERO_BYTES32 = "0x" + "00" * 32
 
+# The fwd HTTP/ABI contract version clif is built against — the single source for
+# the compat tuple (mirrors docs/fwd-contract.md's "verified against fwd vX").
+FWD_CONTRACT_EXPECTED = "v1.1.0a69"
+
 
 @dataclass(frozen=True)
 class NetworkConfig:
@@ -251,6 +255,94 @@ class Settings(BaseSettings):
     @property
     def epoch_status_file(self) -> Path:
         return Path(self.clif_state_dir) / f"epoch-status-{self.network}.json"
+
+
+# --- fwd capability model (ADR-0001 §3) ----------------------------------------
+#
+# clif's per-network fwd capabilities. Each is one immutable, consumer-namespaced
+# capability_id = "clif/<network>/<role>" — the join key across the
+# request → grant → handoff → import → reconcile lifecycle. A capability describes
+# the AUTHORIZATION clif requests (endpoint, contract, method, pinned args); the
+# caller TOKEN is a secret clif reads from its env var and is NEVER emitted here.
+
+# Suggested per-role rate ceilings — REQUEST ONLY (fwd policy is authoritative).
+_SUGGESTED_RATE = {
+    "claim": "8/day",  # claims fire ~once per ~3.5-day reward epoch per type
+    "fsp-sign": "16/day",
+    "fsp-submit": "16/day",
+}
+
+_CLAIM_METHOD = "claim(address,address,uint24,bool,(bytes32[],(uint24,bytes20,uint120,uint8))[])"
+
+
+@dataclass(frozen=True)
+class Capability:
+    capability_id: str
+    role: str
+    endpoint: str
+    caller_token_env: str  # env var name clif reads the granted token from (NOT the value)
+    wallet_env: str  # env var name for the fwd wallet name
+    wallet_name: str | None  # the configured fwd wallet NAME (a name, not a key); None if unset
+    contract: str | None  # contract address, or None for a detached signature
+    contract_name: str | None
+    method: str | None
+    value_wei: str | None  # "0" for tx capabilities; None for /v1/sign-fsp-message
+    recipient_pinned: str | None
+    suggested_rate: str | None
+
+
+def capabilities(settings: Settings) -> list[Capability]:
+    """clif's three fwd capabilities for the configured network (ADR-0001 §3).
+
+    Config-derived and deterministic (no RPC). Carries NAMES only — never a
+    caller-token value. The set is what clif *requests*; grant/import is separate.
+    """
+    net = settings.net
+    n = settings.network
+    return [
+        Capability(
+            capability_id=f"clif/{n}/claim",
+            role="claim",
+            endpoint="/v1/sign-transaction",
+            caller_token_env="FWD_CALLER_TOKEN",
+            wallet_env="FWD_WALLET_NAME",
+            wallet_name=settings.fwd_wallet_name,
+            contract=net.reward_manager,
+            contract_name="RewardManager",
+            method=_CLAIM_METHOD,
+            value_wei="0",
+            recipient_pinned=settings.claim_recipient_address,
+            suggested_rate=_SUGGESTED_RATE["claim"],
+        ),
+        Capability(
+            capability_id=f"clif/{n}/fsp-sign",
+            role="fsp-sign",
+            endpoint="/v1/sign-fsp-message",
+            caller_token_env="FSP_SIGN_CALLER_TOKEN",
+            wallet_env="FSP_SIGNING_WALLET_NAME",
+            wallet_name=settings.fsp_signing_wallet_name,
+            contract=None,
+            contract_name=None,
+            method="signUptimeVote / signRewards (FSP messages: UPTIME, REWARD_DISTRIBUTION)",
+            value_wei=None,
+            recipient_pinned=None,
+            suggested_rate=_SUGGESTED_RATE["fsp-sign"],
+        ),
+        Capability(
+            capability_id=f"clif/{n}/fsp-submit",
+            role="fsp-submit",
+            endpoint="/v1/sign-transaction",
+            caller_token_env="FSP_SUBMIT_CALLER_TOKEN",
+            wallet_env="FSP_SENDER_WALLET_NAME",
+            wallet_name=settings.fsp_sender_wallet_name,
+            contract=net.flare_systems_manager,
+            contract_name="FlareSystemsManager",
+            method="signUptimeVote / signRewards",
+            value_wei="0",
+            recipient_pinned=None,
+            suggested_rate=_SUGGESTED_RATE["fsp-submit"],
+        ),
+    ]
 
 
 def load_settings() -> Settings:
