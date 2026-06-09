@@ -173,12 +173,15 @@
   `next_sleep_seconds` wakes at the next reward window when idle, at `wait_until` when
   too-early, and at `poll_interval` while actively waiting — replacing the flat 30-min poll.
   Mirrors `ftso/apgateway/apgateway/indexer/epoch_cache.py::get_timing`.)*
-- **D18 — fwd-client v0.1.1 migration + taxonomy refinement (2026-06-07).**
+- **D18 — fwd-client shared-library migration + taxonomy refinement (2026-06-07;
+  amended 2026-06-09 for v0.1.3).**
   Supersedes D13's status-taxonomy detail (D13 left in place as the original record).
   **(a) Consumption.** clif consumes the shared library from
   `github.com/africanproofs/fwd-client` (polyglot repo; Python in
-  `subdirectory=python`), tag **v0.1.1** — the gitlab home is retired. Public surface
-  unchanged (`FwdClient`, the `FwdError`/`FwdTerminalError`/`FwdRetryableError` taxonomy,
+  `subdirectory=python`), currently tag **v0.1.3** — the gitlab home is retired.
+  v0.1.1 was the original migration tag; v0.1.2 is the Python nested-envelope fix
+  consumed by clif v0.5.32. Public surface unchanged (`FwdClient`, the
+  `FwdError`/`FwdTerminalError`/`FwdRetryableError` taxonomy,
   `raise_for_fwd_error`, `make_idempotency_key`, the wire models); `clif/fwd_client.py`
   stays a thin re-export shim that composes idempotency keys via the lib helper.
   **(b) Error taxonomy.** Terminal = 400/401/403/404/422 **+ any unmapped status
@@ -186,13 +189,14 @@
   is zero-egress and makes no RPC, so it can never emit one — broadcast/RPC errors are
   clif's own via `clif/rpc.py`). **409 is split by error code**: `idempotent_replay` →
   retryable in the lib (a defensive fail-safe), every other 409 → terminal — but the fwd
-  *daemon returns a replayed idempotency key as a 200-cached result*, so **every 409 clif
-  actually receives is terminal**. **(c) Nested-envelope known gap.** fwd emits errors
-  as `{"detail":{"error","message"}}`, but fwd-client (Python ≤v0.1.1)
-  `raise_for_fwd_error` reads top-level `body["error"]`, so `FwdError.error_code` is
-  `"unknown"` for daemon errors. Harmless: clif dispatches on the exception **class**
-  (HTTP-status-driven), never on `error_code` — and must not start (the fix belongs in
-  fwd-client, a sibling repo clif does not touch). **(d) Idempotency parity.** The lib's
+  *daemon usually returns a replayed idempotency key as a 200-cached result*, so most
+  409s clif receives are terminal. **(c) Nested-envelope fix.** fwd emits errors as
+  `{"detail":{"error","message"}}`; fwd-client Python **v0.1.2** now reads
+  `detail.error`, so `FwdError.error_code` is reliable. clif still dispatches
+  generally on the exception **class** (HTTP-status-driven), but it deliberately
+  branches on `error_code` for one recoverable case: a Leg-2
+  `409 idempotency_conflict` after restart-before-finalization is treated as
+  retryable instead of a false terminal epoch failure. **(d) Idempotency parity.** The lib's
   `make_idempotency_key` is byte-identical to the Go port's `MakeIdempotencyKey`; clif
   composes via the lib helper and never reimplements the hashing. *Why: reconcile clif to
   the migrated/reorganized fwd-client; docs/verification-only — no clif version bump.*

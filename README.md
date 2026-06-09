@@ -32,7 +32,8 @@ git clone https://github.com/africanproofs/fwd.git
 sudo sh fwd/install/install.sh      # fwd-only; builds /opt/fwd, starts inert
 ```
 
-(Until `get.proofs.africa` is live: `curl -sfL https://get.proofs.africa/fwd | sudo sh -`.)
+When `get.proofs.africa` hosting is live, the equivalent fwd install is
+`curl -sfL https://get.proofs.africa/fwd | sudo sh -`.
 
 ### 2. Install clif (this deployment)
 
@@ -103,9 +104,11 @@ FSP signing needs separate fwd callers and wallets:
 | `FSP_SIGNING_WALLET_NAME` | fwd wallet holding the FSP signing-policy key |
 | `FSP_SENDER_WALLET_NAME` | fwd wallet that submits `FlareSystemsManager` txs |
 
-`FSP_AUTO_ENABLED=false` by default. `clif epoch run` signs, so it exits until
-the operator explicitly sets `FSP_AUTO_ENABLED=true`. Uptime signing is also
-gated by `UPTIME_AUTO_ENABLED`, which defaults to false.
+In `.env.example` and clif-only manual configuration, `FSP_AUTO_ENABLED=false`
+is the safe default. The full-stack `sudo fwd onboard rewards ...` flow writes
+`FSP_AUTO_ENABLED=true` into `/opt/clif/.env.<net>` by default; keep or set it
+to `false` only when you intentionally want that network to idle. Uptime
+signing is separately gated by `UPTIME_AUTO_ENABLED`, which defaults to false.
 
 ## Commands
 
@@ -115,8 +118,15 @@ Read-only:
 poetry run clif list
 poetry run clif preflight --identity 0x... --recipient 0x...
 poetry run clif chain nonce --address 0x...
-poetry run clif spec
+poetry run clif spec            # fwd integration spec (markdown handshake)
+poetry run clif spec --json     # machine-readable capability-request (ADR-0001)
 ```
+
+`clif spec --json` is clif's reference fwd **capability-request** — the per-network
+capabilities clif needs (each keyed by an immutable `capability_id`), rendered as a
+human-reviewable custody diff plus the compat tuple. It is the shape the (deferred)
+`consumer-contract-v1` will formalize. See
+`flaresystems/docs/adr/0001-fwd-consumer-deployment-contract.md`.
 
 fwd-backed one-shots:
 
@@ -133,7 +143,9 @@ Daemons and health checks:
 
 ```sh
 poetry run clif epoch run
-poetry run clif epoch status
+poetry run clif epoch status     # add --json for a machine-readable scrape
+poetry run clif doctor           # consumer self-check: keyless, fwd, capabilities, compat
+poetry run clif doctor --json    # the coordinator scrape surface (ADR-0001)
 ```
 
 Legacy loops still exist for manual/backward-compatible operation, but
@@ -180,10 +192,11 @@ clifctl run songbird claim --type fee     # one-shot manual op (reuses .env.song
 clifctl down songbird          # stop + remove
 ```
 
-`clif-epoch-<net>` SIGNS, so `clifctl up <net>` stays up only when
-`FSP_AUTO_ENABLED=true` in that network's `.env.<net>` (see Configure); otherwise it
-exits by design. Each per-network service reads its own `.env.<network>` (set
-`CLIF_STATE_DIR` per network). Set `FWD_NETWORK` if fwd's Docker network is not named
+`clif-epoch-<net>` signs only when `FSP_AUTO_ENABLED=true` in that network's
+`.env.<net>` (see Configure). If it is `false`, the daemon idles in a
+healthy-disabled state and logs a disabled heartbeat instead of signing. Each
+per-network service reads its own `.env.<network>` (set `CLIF_STATE_DIR` per
+network). Set `FWD_NETWORK` if fwd's Docker network is not named
 `fwd_fwd-callers`.
 
 Under the hood `clifctl` is `docker compose -p clif --profile multichain …`; run those

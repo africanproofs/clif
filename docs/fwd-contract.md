@@ -13,10 +13,12 @@ then reports the outcome back so fwd can confirm or release the nonce.
 
 clif talks to fwd through the shared **fwd-client** library
 (`github.com/africanproofs/fwd-client`, Python in `subdirectory=python`, tag
-**v0.1.1**) — `from fwd_client import …`, re-exported via `clif/fwd_client.py`.
-Error classification is **class-based** (`FwdRetryableError` / `FwdTerminalError`,
-HTTP-status-driven — never `error_code`; see § Error taxonomy). clif composes its
-idempotency keys via the lib's generic `make_idempotency_key` — whose hashing is
+**v0.1.3**) — `from fwd_client import …`, re-exported via `clif/fwd_client.py`.
+General error handling is **class-based** (`FwdRetryableError` /
+`FwdTerminalError`, HTTP-status-driven). clif branches on `error_code` only for
+the one documented Leg-2 `409 idempotency_conflict` recovery path described in
+§ Error taxonomy. clif composes its idempotency keys via the lib's generic
+`make_idempotency_key` — whose hashing is
 **byte-identical to the Go port's `MakeIdempotencyKey` for the same input** (clif adds
 a `clif:` / `clif-fsp:` namespace prefix); never reimplement the hashing.
 

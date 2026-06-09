@@ -124,5 +124,5 @@ next:
        writes $CLIF_DIR/.env.<net>; then re-run this installer (or 'clifctl nonce-sync') to seed nonces.
   2. verify on-chain auth:  clifctl run songbird preflight --identity 0x… --recipient 0x…
   3. rehearse:              clifctl run songbird claim --type fee   (then verify the RewardClaimed event)
-  4. enable (AFTER rehearsal): set FSP_AUTO_ENABLED=true in $CLIF_DIR/.env.songbird, then: clifctl up songbird
+  4. enable (AFTER rehearsal): confirm FSP_AUTO_ENABLED=true in $CLIF_DIR/.env.songbird, then: clifctl up songbird
 EOF

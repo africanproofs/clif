@@ -5,7 +5,7 @@ The fsp-rewards schema mirrors the upstream Zod schema in
 
 The fwd request/response models (SignTransaction*, BroadcastResult*, Receipt*,
 SignFspMessageResponse, TxStatus, Health) are now the single source of truth in
-the shared `fwd_client` package (github.com/africanproofs/fwd-client v0.1.1,
+the shared `fwd_client` package (github.com/africanproofs/fwd-client v0.1.3,
 `subdirectory=python`).
 They are re-exported here so existing callers (`from clif.models import …`)
 continue to work with no change.
