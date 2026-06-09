@@ -19,7 +19,7 @@ import re
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, NoReturn, Optional
 
 import fwd_client
 import typer
@@ -50,7 +50,7 @@ from clif.config import (
     capabilities,
     load_settings,
 )
-from clif.credentials import BundleError, import_credentials
+from clif.credentials import BundleError, check_bundle_mode, import_credentials
 from clif.discovery import classify_claim_frontier, collect_reward_claims
 from clif.fwd_client import (
     FwdClient,
@@ -314,20 +314,31 @@ def import_credentials_cmd(
     s = _settings()
     target_dir = env_dir or Path.cwd()
 
+    def _fail(reason: str, code: int) -> NoReturn:
+        # Machine-readable error on the --json path; rich line otherwise. Never the token.
+        if json_output:
+            print(json.dumps({"consumer": "clif", "ok": False, "error": reason, "exit": code}))
+        else:
+            err.print(f"[bold red]import-credentials: {reason}[/]")
+        raise typer.Exit(code)
+
     if not bundle.is_file():
-        err.print(f"[bold red]import-credentials: bundle not found: {bundle}[/]")
-        raise typer.Exit(1)
+        _fail(f"bundle not found: {bundle}", 1)
+    try:
+        check_bundle_mode(bundle)  # spec MUST: refuse a non-0600 plaintext-secret carrier
+    except BundleError as exc:
+        _fail(str(exc), 2)
     try:
         parsed = json.loads(bundle.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        err.print(f"[bold red]import-credentials: cannot read bundle {bundle}: {exc}[/]")
-        raise typer.Exit(1) from exc
+        _fail(f"cannot read bundle {bundle}: {exc}", 1)
 
     try:
         result = import_credentials(parsed, s, target_dir)
     except BundleError as exc:
-        err.print(f"[bold red]import-credentials: rejected — {exc}[/]")
-        raise typer.Exit(2) from exc
+        _fail(f"rejected — {exc}", 2)
+    except OSError as exc:  # env write failed AFTER validation — bundle left intact for retry
+        _fail(f"could not write env ({exc}); bundle left intact for retry", 1)
 
     # Success: CONSUME the one-shot bundle (delete it). Done only after the env
     # write succeeded, so a failed import leaves the bundle for a retry.

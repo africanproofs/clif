@@ -131,8 +131,26 @@ def validate_bundle(bundle: dict, settings: Settings) -> str:
         token = entry.get("caller_token")
         if not isinstance(token, str) or not token:
             raise BundleError(f"capability {cid!r} is missing its caller_token value")
+        # A newline/control char in a value would inject extra `.env` assignments
+        # (env-injection) or write a malformed line. Reject — never echo the value.
+        if token != token.strip() or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in token):
+            raise BundleError(f"capability {cid!r} caller_token contains illegal characters")
 
     return network
+
+
+def check_bundle_mode(path: Path) -> None:
+    """Refuse a bundle that is not mode-0600 (consumer-contract-v1 §4.2 / C6).
+
+    The bundle is the only artifact carrying plaintext caller-token VALUES outside
+    fwd; it must not be group/other-accessible. Raises ``BundleError`` if any
+    group/other permission bit is set. Reports the path + mode, never the contents.
+    """
+    mode = path.stat().st_mode & 0o777
+    if mode & 0o077:
+        raise BundleError(
+            f"bundle {path} is mode {oct(mode)}; must be 0600 (no group/other access)"
+        )
 
 
 # A single env line: NAME or `export NAME` = anything. Used to find+replace idempotently.
@@ -147,18 +165,25 @@ def _is_assignment(line: str, name: str) -> bool:
 
 
 def upsert_env_var(text: str, name: str, value: str) -> str:
-    """Replace the existing ``NAME=…`` line in ``text`` (idempotent — the rotation
-    channel) or append it. Preserves all other lines and trailing newline policy."""
-    lines = text.splitlines()
-    replaced = False
-    for i, line in enumerate(lines):
+    """Set ``NAME=value`` as the SINGLE canonical assignment (idempotent — the
+    rotation channel). COLLAPSES every existing ``NAME=…`` line into one: pydantic
+    reads the LAST assignment, so replacing only the first would leave a stale
+    (revoked) token live. The canonical line takes the position of the first
+    existing match (else is appended); all other lines + the trailing newline are
+    preserved."""
+    new_line = f"{name}={value}"
+    out: list[str] = []
+    placed = False
+    for line in text.splitlines():
         if _is_assignment(line, name):
-            lines[i] = f"{name}={value}"
-            replaced = True
-            break
-    if not replaced:
-        lines.append(f"{name}={value}")
-    return "\n".join(lines) + "\n"
+            if not placed:  # first match -> the canonical line; drop later duplicates
+                out.append(new_line)
+                placed = True
+        else:
+            out.append(line)
+    if not placed:
+        out.append(new_line)
+    return "\n".join(out) + "\n"
 
 
 def import_credentials(bundle: dict, settings: Settings, env_dir: Path) -> ImportResult:

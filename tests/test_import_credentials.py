@@ -5,6 +5,7 @@ verification against a REAL fwd-emitted bundle is PENDING (fwd bundle-emission
 unbuilt)."""
 
 import json
+import stat
 from datetime import datetime, timedelta, timezone
 
 from typer.testing import CliRunner
@@ -63,9 +64,10 @@ def _bundle(network="songbird", caps=None, **overrides) -> dict:
     return b
 
 
-def _write_bundle(tmp_path, bundle, name="bundle.json"):
+def _write_bundle(tmp_path, bundle, name="bundle.json", mode=0o600):
     p = tmp_path / name
     p.write_text(json.dumps(bundle))
+    p.chmod(mode)  # the bundle MUST be 0600 (consumer-contract-v1 §4.2)
     return p
 
 
@@ -264,3 +266,124 @@ def test_governed_env_var_writes_into_network_specific_file(monkeypatch, tmp_pat
     assert result.exit_code == 0, result.output
     assert (env_dir / ".env.flare").is_file()
     assert _env_lines(env_dir, "flare")["FWD_CALLER_TOKEN"] == SECRET_A
+
+
+# ---- regression tests for the confirmed review findings ----
+
+
+def test_non_0600_bundle_rejected(monkeypatch, tmp_path):
+    # The bundle carries plaintext token values; a group/world-readable bundle is refused.
+    env_dir = tmp_path / "clifdir"
+    bundle_path = _write_bundle(tmp_path, _bundle(), mode=0o644)
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "0600" in result.output
+    assert bundle_path.is_file()  # not consumed on rejection
+    assert not (env_dir / ".env.songbird").exists()
+
+
+def test_newline_in_token_value_rejected_no_env_injection(monkeypatch, tmp_path):
+    # A token value with a newline would inject an extra .env assignment; refuse it.
+    env_dir = tmp_path / "clifdir"
+    claim = {c.role: c for c in capabilities(_settings())}["claim"]
+    bad = _bundle(
+        caps=[
+            {
+                "capability_id": claim.capability_id,
+                "caller_token_env": claim.caller_token_env,
+                "caller_token": "fwd_live_ok\nCLAIM_RECIPIENT_ADDRESS=0xATTACKER",
+                "wallet_name": claim.wallet_name,
+            }
+        ]
+    )
+    bundle_path = _write_bundle(tmp_path, bad)
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "illegal characters" in result.output
+    assert bundle_path.is_file()
+    assert not (env_dir / ".env.songbird").exists()  # nothing injected
+
+
+def test_rotation_collapses_preexisting_duplicate(monkeypatch, tmp_path):
+    # A pre-existing DUPLICATE assignment must collapse to one canonical line with the
+    # NEW value — pydantic reads the last, so a stale dup would keep a revoked token live.
+    env_dir = tmp_path / "clifdir"
+    env_dir.mkdir()
+    (env_dir / ".env.songbird").write_text(
+        "FWD_CALLER_TOKEN=STALE_FIRST\nOTHER=keep\nFWD_CALLER_TOKEN=STALE_LAST\n"
+    )
+    bundle_path = _write_bundle(tmp_path, _bundle())
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 0, result.output
+    text = (env_dir / ".env.songbird").read_text()
+    assert text.count("FWD_CALLER_TOKEN=") == 1  # collapsed
+    assert _env_lines(env_dir)["FWD_CALLER_TOKEN"] == SECRET_A  # the new value
+    assert _env_lines(env_dir)["OTHER"] == "keep"  # unrelated lines preserved
+
+
+def test_written_env_is_mode_0600(monkeypatch, tmp_path):
+    env_dir = tmp_path / "clifdir"
+    bundle_path = _write_bundle(tmp_path, _bundle())
+    assert _invoke(monkeypatch, bundle_path, env_dir).exit_code == 0
+    assert stat.S_IMODE((env_dir / ".env.songbird").stat().st_mode) == 0o600
+
+
+def test_bundle_preserved_on_env_write_failure(monkeypatch, tmp_path):
+    # If the env write fails after validation, the one-shot bundle is left intact.
+    env_dir = tmp_path / "clifdir"
+    bundle_path = _write_bundle(tmp_path, _bundle())
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("clif.cli.import_credentials", _boom)
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 1, result.output
+    assert bundle_path.is_file()  # NOT consumed — retry possible
+
+
+def test_missing_caller_token_rejected(monkeypatch, tmp_path):
+    env_dir = tmp_path / "clifdir"
+    claim = {c.role: c for c in capabilities(_settings())}["claim"]
+    bad = _bundle(
+        caps=[
+            {
+                "capability_id": claim.capability_id,
+                "caller_token_env": claim.caller_token_env,
+                "caller_token": "",  # empty
+                "wallet_name": claim.wallet_name,
+            }
+        ]
+    )
+    bundle_path = _write_bundle(tmp_path, bad)
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "caller_token" in result.output
+    assert bundle_path.is_file()
+
+
+def test_empty_capabilities_rejected(monkeypatch, tmp_path):
+    env_dir = tmp_path / "clifdir"
+    bundle_path = _write_bundle(tmp_path, _bundle(caps=[]))
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "capabilities" in result.output
+
+
+def test_malformed_expires_at_rejected(monkeypatch, tmp_path):
+    env_dir = tmp_path / "clifdir"
+    bundle_path = _write_bundle(tmp_path, _bundle(expires_at="not-a-date"))
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "ISO8601" in result.output
+
+
+def test_json_error_on_rejection_is_machine_readable(monkeypatch, tmp_path):
+    env_dir = tmp_path / "clifdir"
+    bundle_path = _write_bundle(tmp_path, _bundle(version=2))
+    result = _invoke(monkeypatch, bundle_path, env_dir, "--json")
+    assert result.exit_code == 2, result.output
+    payload = json.loads(result.output)  # parseable JSON on the error path
+    assert payload["ok"] is False
+    assert payload["consumer"] == "clif"
+    assert "[bold" not in result.output

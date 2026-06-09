@@ -104,10 +104,18 @@ case "$cmd" in
     [ -f "$_bundle" ] || { echo "clifctl import-credentials: bundle not found: $_bundle" >&2; exit 1; }
     _babs=$(cd "$(dirname "$_bundle")" && pwd)/$(basename "$_bundle")
     _bdir=$(dirname "$_babs"); _bname=$(basename "$_babs")
-    exec docker compose --profile multichain run --rm \
+    set +e
+    docker compose --profile multichain run --rm \
       -v "$CLIF_DIR:/host-clif" -v "$_bdir:/host-bundle" \
       "clif-epoch-$_net" import-credentials \
-        --bundle "/host-bundle/$_bname" --env-dir /host-clif "$@" ;;
+        --bundle "/host-bundle/$_bname" --env-dir /host-clif "$@"
+    _rc=$?
+    set -e
+    # One-shot consume on the HOST: the in-container uid (1000) may be unable to
+    # delete a root-owned 0600 fwd bundle, so clifctl removes it here after a
+    # successful import (rc==0). A failed import leaves the bundle for retry.
+    [ "$_rc" -eq 0 ] && rm -f "$_babs"
+    exit "$_rc" ;;
   nonce-sync)
     # Seed fwd's nonce from CHAIN TRUTH for the tx-sending wallets onboard imported (claimer +
     # FSP sender — fsp-signing has no nonce). fwd is zero-egress, so this bridges: clif reads
