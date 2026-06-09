@@ -50,6 +50,7 @@ from clif.config import (
     capabilities,
     load_settings,
 )
+from clif.credentials import BundleError, import_credentials
 from clif.discovery import classify_claim_frontier, collect_reward_claims
 from clif.fwd_client import (
     FwdClient,
@@ -274,6 +275,96 @@ def doctor(
         f"fwd_client={c['fwd_client']} clif={c['clif']}"
     )
     raise typer.Exit(code)
+
+
+@app.command(name="import-credentials")
+def import_credentials_cmd(
+    bundle: Annotated[
+        Path, typer.Option("--bundle", help="Path to the fwd-emitted credential bundle (JSON)")
+    ],
+    env_dir: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--env-dir",
+            help="Directory holding the per-network .env.<net> (default: cwd, where clif reads)",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit machine-readable JSON to stdout")
+    ] = False,
+) -> None:
+    """Consumer side of the fwd credential handoff (ADR-0001).
+
+    Reads a one-shot fwd-emitted bundle (JSON), VALIDATES it against the
+    capabilities clif actually requests for the bundle's network
+    (version==1, consumer=="clif", not expired, every capability_id governed),
+    writes each granted `caller_token_env=<value>` into `<env-dir>/.env.<net>`
+    IDEMPOTENTLY (the rotation channel — re-mint the same id + re-import to
+    replace in place), then CONSUMES (deletes) the bundle. One-shot, keyless
+    (the tokens are bearer caller tokens, not signing keys). A token VALUE is
+    NEVER printed or logged — output reports capability_ids, counts, and the env
+    var NAMES written.
+
+    Exit: 0 imported; 1 bundle missing/unreadable; 2 invalid/expired/ungoverned.
+
+    NOTE: end-to-end verification against a REAL fwd-emitted bundle is PENDING —
+    fwd's bundle-emission side is not yet built (validated here against the
+    pinned v1 shape only).
+    """
+    s = _settings()
+    target_dir = env_dir or Path.cwd()
+
+    if not bundle.is_file():
+        err.print(f"[bold red]import-credentials: bundle not found: {bundle}[/]")
+        raise typer.Exit(1)
+    try:
+        parsed = json.loads(bundle.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        err.print(f"[bold red]import-credentials: cannot read bundle {bundle}: {exc}[/]")
+        raise typer.Exit(1) from exc
+
+    try:
+        result = import_credentials(parsed, s, target_dir)
+    except BundleError as exc:
+        err.print(f"[bold red]import-credentials: rejected — {exc}[/]")
+        raise typer.Exit(2) from exc
+
+    # Success: CONSUME the one-shot bundle (delete it). Done only after the env
+    # write succeeded, so a failed import leaves the bundle for a retry.
+    try:
+        bundle.unlink()
+        consumed = True
+    except OSError as exc:  # noqa: BLE001 — write succeeded; surface but don't fail the import
+        consumed = False
+        err.print(f"[yellow]import-credentials: wrote env but could not delete bundle: {exc}[/]")
+
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "consumer": "clif",
+                    "network": result.network,
+                    "env_file": result.env_file,
+                    "imported": len(result.imported),
+                    "capability_ids": result.capability_ids,
+                    "env_vars_written": result.env_vars_written,  # NAMES only, never values
+                    "bundle_consumed": consumed,
+                },
+                indent=2,
+            )
+        )
+        raise typer.Exit(0)
+
+    console.print(
+        f"[bold green]imported {len(result.imported)} credential(s)[/] — "
+        f"network={result.network} → {result.env_file}"
+    )
+    for c in result.imported:
+        console.print(f"  {c.capability_id}: wrote env {c.caller_token_env}")
+    console.print(
+        f"  bundle {'consumed (deleted)' if consumed else 'NOT deleted — remove manually'}"
+    )
+    raise typer.Exit(0)
 
 
 @app.command(name="list")

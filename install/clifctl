@@ -91,6 +91,23 @@ case "$cmd" in
     # it never collides with a running daemon. e.g. clifctl run songbird claim --type fee
     _net="${1:?clifctl run needs a network}"; _net_ok "$_net"; _envf "$_net"; shift
     exec docker compose --profile multichain run --rm "clif-epoch-$_net" "$@" ;;
+  import-credentials)
+    # Consumer side of the fwd credential handoff (ADR-0001). Reads a one-shot
+    # fwd-emitted bundle (JSON), validates it against the capabilities clif requests
+    # for <net>, writes each granted caller token into this host's .env.<net>
+    # IDEMPOTENTLY (the rotation channel — re-mint same id + re-import), then consumes
+    # (deletes) the bundle. Keyless: the tokens are bearer caller tokens, not signing
+    # keys; a token VALUE is never printed/logged. We bind-mount $CLIF_DIR into the
+    # one-shot container so the env write + bundle delete land on the host.
+    _net="${1:?clifctl import-credentials needs a network}"; _net_ok "$_net"; shift
+    _bundle="${1:?clifctl import-credentials needs a bundle path}"; shift
+    [ -f "$_bundle" ] || { echo "clifctl import-credentials: bundle not found: $_bundle" >&2; exit 1; }
+    _babs=$(cd "$(dirname "$_bundle")" && pwd)/$(basename "$_bundle")
+    _bdir=$(dirname "$_babs"); _bname=$(basename "$_babs")
+    exec docker compose --profile multichain run --rm \
+      -v "$CLIF_DIR:/host-clif" -v "$_bdir:/host-bundle" \
+      "clif-epoch-$_net" import-credentials \
+        --bundle "/host-bundle/$_bname" --env-dir /host-clif "$@" ;;
   nonce-sync)
     # Seed fwd's nonce from CHAIN TRUTH for the tx-sending wallets onboard imported (claimer +
     # FSP sender — fsp-signing has no nonce). fwd is zero-egress, so this bridges: clif reads
@@ -126,12 +143,13 @@ case "$cmd" in
     done
     ;;
   ""|help|-h|--help)
-    echo "usage: clifctl {up|down|restart|status|logs|run|doctor} <net> [args] | nonce-sync [<net>] | build" >&2
+    echo "usage: clifctl {up|down|restart|status|logs|run|doctor} <net> [args] | import-credentials <net> <bundle> | nonce-sync [<net>] | build" >&2
     echo "       <net> = flare | songbird | coston2 ; clif is the SEPARATE reward-automation deployment" >&2
     echo "       up <net>      start the epoch sign→claim daemon (needs FSP_AUTO_ENABLED=true in .env.<net>)" >&2
     echo "       status <net> [--json]   compose + daemon health (--json = machine-readable scrape)" >&2
     echo "       doctor <net> [--json]   consumer self-check: keyless, fwd, capabilities, compat (ADR-0001)" >&2
     echo "       run <net> …   one-shot: claim --type fee | fsp uptime --epoch N | preflight --identity 0x… | chain nonce --address 0x…" >&2
+    echo "       import-credentials <net> <bundle>   import + consume a one-shot fwd credential bundle into .env.<net> (ADR-0001; idempotent/rotation)" >&2
     echo "       nonce-sync    seed fwd's nonce from chain truth for imported wallets (clif reads, clifwd writes)" >&2
     [ "$cmd" = "" ] && exit 2 || exit 0 ;;
   *)
