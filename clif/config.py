@@ -345,6 +345,35 @@ def capabilities(settings: Settings) -> list[Capability]:
     ]
 
 
+def config_env_allowlist(settings: Settings) -> frozenset[str]:
+    """Env-var NAMES the v2 handoff bundle's ``config`` section may set.
+
+    The v2 bundle is the COMPLETE onboard handoff (ADR-0003 / consumer-contract-v1
+    §4): the entire ``.env.<network>`` is sourced from it, so the bundle MUST be
+    able to set clif's config env-vars — but ONLY clif's own (the bundle must not
+    inject an arbitrary env var). The allowlist is **derived from clif's own
+    ``Settings`` fields** (uppercased = the env-var names pydantic reads), so it
+    stays in sync automatically when a config knob is added.
+
+    Two exclusions keep the membrane intact:
+    - the per-capability **caller-token** env-vars (``FWD_CALLER_TOKEN``,
+      ``FSP_SIGN_CALLER_TOKEN``, ``FSP_SUBMIT_CALLER_TOKEN``) — those secrets
+      travel ONLY via the per-capability token path, which guards them and never
+      logs the value; the ``config`` section carries non-secret config;
+    - any ``*PRIVATE_KEY*`` name (clif holds no keys — Core invariant #7).
+
+    Wallet-env NAMES (``FWD_WALLET_NAME`` etc.) stay IN the allowlist — they are
+    names, not keys; the per-capability path is their canonical writer, but the
+    allowlist accepting them keeps the two writers consistent.
+    """
+    token_envs = {c.caller_token_env for c in capabilities(settings)}
+    return frozenset(
+        name.upper()
+        for name in Settings.model_fields
+        if name.upper() not in token_envs and "PRIVATE_KEY" not in name.upper()
+    )
+
+
 def load_settings() -> Settings:
     """Assert keyless (env **and** the .env source file) first, then load."""
     env_file = Settings.model_config.get("env_file", ".env")

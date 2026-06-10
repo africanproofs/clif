@@ -293,23 +293,29 @@ def import_credentials_cmd(
         bool, typer.Option("--json", help="Emit machine-readable JSON to stdout")
     ] = False,
 ) -> None:
-    """Consumer side of the fwd credential handoff (ADR-0001).
+    """Consumer side of the fwd credential handoff (ADR-0001 / ADR-0003).
 
     Reads a one-shot fwd-emitted bundle (JSON), VALIDATES it against the
     capabilities clif actually requests for the bundle's network
-    (version==1, consumer=="clif", not expired, every capability_id governed),
-    writes each granted `caller_token_env=<value>` into `<env-dir>/.env.<net>`
-    IDEMPOTENTLY (the rotation channel — re-mint the same id + re-import to
-    replace in place), then CONSUMES (deletes) the bundle. One-shot, keyless
-    (the tokens are bearer caller tokens, not signing keys). A token VALUE is
+    (consumer=="clif", not expired, every capability_id governed), then writes
+    the credentials into `<env-dir>/.env.<net>` IDEMPOTENTLY (the rotation
+    channel — re-mint the same id + re-import to replace in place) and CONSUMES
+    (deletes) the bundle.
+
+    A **v2** bundle is the COMPLETE handoff (ADR-0003 Unit 4b): per capability it
+    writes the caller TOKEN and the fwd WALLET NAME, plus a top-level `config`
+    section (allowlisted against clif's own env-vars) — so the entire
+    `.env.<net>` is sourced from the bundle. A **v1** bundle (tokens only) is
+    still accepted for back-compat. One-shot, keyless (the tokens are bearer
+    caller tokens, not signing keys; the config carries no key). A token VALUE is
     NEVER printed or logged — output reports capability_ids, counts, and the env
     var NAMES written.
 
     Exit: 0 imported; 1 bundle missing/unreadable; 2 invalid/expired/ungoverned.
 
-    NOTE: end-to-end verification against a REAL fwd-emitted bundle is PENDING —
-    fwd's bundle-emission side is not yet built (validated here against the
-    pinned v1 shape only).
+    NOTE: end-to-end verification against a REAL fwd-emitted **v2** bundle is
+    PENDING — fwd's v2 bundle-emission (Unit 4b) is the lockstep half and not yet
+    deployed; the Songbird canary flips this to proven.
     """
     s = _settings()
     target_dir = env_dir or Path.cwd()
@@ -355,10 +361,13 @@ def import_credentials_cmd(
                 {
                     "consumer": "clif",
                     "network": result.network,
+                    "bundle_version": result.version,
                     "env_file": result.env_file,
                     "imported": len(result.imported),
                     "capability_ids": result.capability_ids,
-                    "env_vars_written": result.env_vars_written,  # NAMES only, never values
+                    "env_vars_written": result.env_vars_written,  # token NAMES only, never values
+                    "wallet_envs_written": result.wallet_envs_written,  # NAMES only (v2)
+                    "config_keys_written": result.config_keys,  # NAMES only (v2)
                     "bundle_consumed": consumed,
                 },
                 indent=2,
@@ -368,10 +377,13 @@ def import_credentials_cmd(
 
     console.print(
         f"[bold green]imported {len(result.imported)} credential(s)[/] — "
-        f"network={result.network} → {result.env_file}"
+        f"v{result.version} network={result.network} → {result.env_file}"
     )
     for c in result.imported:
-        console.print(f"  {c.capability_id}: wrote env {c.caller_token_env}")
+        wallet = f" + wallet env {c.wallet_env}" if c.wallet_env else ""
+        console.print(f"  {c.capability_id}: wrote env {c.caller_token_env}{wallet}")
+    if result.config_keys:
+        console.print(f"  config: wrote {len(result.config_keys)} key(s) — {', '.join(result.config_keys)}")
     console.print(
         f"  bundle {'consumed (deleted)' if consumed else 'NOT deleted — remove manually'}"
     )

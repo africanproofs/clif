@@ -214,9 +214,10 @@ def test_wrong_consumer_rejected(monkeypatch, tmp_path):
     assert "consumer" in result.output
 
 
-def test_wrong_version_rejected(monkeypatch, tmp_path):
+def test_unsupported_version_rejected(monkeypatch, tmp_path):
+    # v1 + v2 are supported; an unknown version (3) is terminal.
     env_dir = tmp_path / "clifdir"
-    bundle_path = _write_bundle(tmp_path, _bundle(version=2))
+    bundle_path = _write_bundle(tmp_path, _bundle(version=3))
     result = _invoke(monkeypatch, bundle_path, env_dir)
     assert result.exit_code == 2, result.output
     assert "version" in result.output
@@ -380,10 +381,242 @@ def test_malformed_expires_at_rejected(monkeypatch, tmp_path):
 
 def test_json_error_on_rejection_is_machine_readable(monkeypatch, tmp_path):
     env_dir = tmp_path / "clifdir"
-    bundle_path = _write_bundle(tmp_path, _bundle(version=2))
+    bundle_path = _write_bundle(tmp_path, _bundle(version=99))
     result = _invoke(monkeypatch, bundle_path, env_dir, "--json")
     assert result.exit_code == 2, result.output
     payload = json.loads(result.output)  # parseable JSON on the error path
     assert payload["ok"] is False
     assert payload["consumer"] == "clif"
     assert "[bold" not in result.output
+
+
+# ===== v2 — the COMPLETE handoff (tokens + wallet-envs + config) ==================
+# ADR-0003 Unit 4b: the bundle sources clif's ENTIRE .env.<net>. v1 (tokens only)
+# stays accepted for back-compat (covered above).
+
+CONFIG_OK = {
+    "NETWORK": "songbird",
+    "FWD_ENDPOINT": "http://fwd:8080",
+    "CLIF_STATE_DIR": ".clif-state/songbird",
+    "CLAIM_RECIPIENT_ADDRESS": "0x7c3579aB3E647395c96a1EfC98aF9A31C5Ecc294",
+    "IDENTITY_ADDRESS": "0xcf3A3e5797A960C67e0E4B23D4594246ffB9d935",
+    "WRAP_REWARDS": "true",
+    "FSP_AUTO_ENABLED": "true",
+    "SIGNING_POLICY_ADDRESS": "",  # a blank config value is legitimate (no DIRECT rewards)
+}
+
+
+def _v2_caps(network="songbird"):
+    s = _settings(network=network)
+    secret_by_role = {"claim": SECRET_A, "fsp-sign": SECRET_B, "fsp-submit": SECRET_C}
+    return [
+        {
+            "capability_id": c.capability_id,
+            "caller_token_env": c.caller_token_env,
+            "caller_token": secret_by_role[c.role],
+            "wallet_name": c.wallet_name,
+        }
+        for c in capabilities(s)
+    ]
+
+
+def _v2_bundle(network="songbird", caps=None, config=None, **overrides) -> dict:
+    """A valid v2 bundle: per-cap tokens + wallet_name, plus a config section."""
+    b = {
+        "version": 2,
+        "consumer": "clif",
+        "network": network,
+        "issued_at": _iso(datetime.now(timezone.utc) - timedelta(minutes=1)),
+        "expires_at": _iso(datetime.now(timezone.utc) + timedelta(minutes=10)),
+        "config": CONFIG_OK.copy() if config is None else config,
+        "capabilities": _v2_caps(network) if caps is None else caps,
+    }
+    b.update(overrides)
+    return b
+
+
+def test_v2_writes_tokens_wallet_envs_and_config(monkeypatch, tmp_path):
+    env_dir = tmp_path / "clifdir"
+    bundle_path = _write_bundle(tmp_path, _v2_bundle())
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 0, result.output
+
+    written = _env_lines(env_dir)
+    # tokens (per-cap)
+    assert written["FWD_CALLER_TOKEN"] == SECRET_A
+    assert written["FSP_SIGN_CALLER_TOKEN"] == SECRET_B
+    assert written["FSP_SUBMIT_CALLER_TOKEN"] == SECRET_C
+    # wallet-envs (per-cap; the NAME is clif's, the value is the bundle's wallet_name)
+    assert written["FWD_WALLET_NAME"] == "claimer-songbird"
+    assert written["FSP_SIGNING_WALLET_NAME"] == "fsp-sign-songbird"
+    assert written["FSP_SENDER_WALLET_NAME"] == "fsp-sender-songbird"
+    # config section — the whole .env is now sourced from the bundle
+    assert written["NETWORK"] == "songbird"
+    assert written["FWD_ENDPOINT"] == "http://fwd:8080"
+    assert written["WRAP_REWARDS"] == "true"
+    assert written["FSP_AUTO_ENABLED"] == "true"
+    assert written["SIGNING_POLICY_ADDRESS"] == ""  # blank config value preserved
+    assert not bundle_path.exists()  # one-shot consumed
+
+
+def test_v2_json_reports_version_wallet_and_config_names_never_values(monkeypatch, tmp_path):
+    env_dir = tmp_path / "clifdir"
+    bundle_path = _write_bundle(tmp_path, _v2_bundle())
+    result = _invoke(monkeypatch, bundle_path, env_dir, "--json")
+    assert result.exit_code == 0, result.output
+    for secret in (SECRET_A, SECRET_B, SECRET_C):
+        assert secret not in result.output  # never a token value
+    payload = json.loads(result.output)
+    assert payload["bundle_version"] == 2
+    assert payload["env_vars_written"] == [
+        "FWD_CALLER_TOKEN",
+        "FSP_SIGN_CALLER_TOKEN",
+        "FSP_SUBMIT_CALLER_TOKEN",
+    ]
+    assert payload["wallet_envs_written"] == [
+        "FWD_WALLET_NAME",
+        "FSP_SIGNING_WALLET_NAME",
+        "FSP_SENDER_WALLET_NAME",
+    ]
+    # config key NAMES, sorted (deterministic); never values
+    assert payload["config_keys_written"] == sorted(CONFIG_OK)
+    assert payload["bundle_consumed"] is True
+
+
+def test_v2_no_token_value_in_console_output(monkeypatch, tmp_path):
+    env_dir = tmp_path / "clifdir"
+    bundle_path = _write_bundle(tmp_path, _v2_bundle())
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 0, result.output
+    for secret in (SECRET_A, SECRET_B, SECRET_C):
+        assert secret not in result.output
+    # NAMES + capability_ids ARE reported
+    assert "FWD_WALLET_NAME" in result.output
+    assert "clif/songbird/claim" in result.output
+    assert "config: wrote" in result.output
+
+
+def test_v2_unknown_config_key_rejected(monkeypatch, tmp_path):
+    # The bundle MUST NOT inject an arbitrary env var — only clif's own config keys.
+    env_dir = tmp_path / "clifdir"
+    bad = _v2_bundle(config={**CONFIG_OK, "SOME_RANDOM_KEY": "x"})
+    bundle_path = _write_bundle(tmp_path, bad)
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "ungoverned" in result.output and "SOME_RANDOM_KEY" in result.output
+    assert not (env_dir / ".env.songbird").exists()  # nothing written
+    assert bundle_path.is_file()  # not consumed on rejection
+
+
+def test_v2_config_cannot_carry_a_caller_token_env(monkeypatch, tmp_path):
+    # The secret token env-vars are EXCLUDED from the config allowlist — a token
+    # may travel only via the guarded per-cap path, never the config section.
+    env_dir = tmp_path / "clifdir"
+    bad = _v2_bundle(config={**CONFIG_OK, "FWD_CALLER_TOKEN": "sneaky_token"})
+    bundle_path = _write_bundle(tmp_path, bad)
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "ungoverned" in result.output
+    assert "sneaky_token" not in result.output  # never echo the value
+
+
+def test_v2_config_value_with_control_char_rejected(monkeypatch, tmp_path):
+    # A newline in a config value would inject an extra .env assignment.
+    env_dir = tmp_path / "clifdir"
+    bad = _v2_bundle(config={**CONFIG_OK, "WRAP_REWARDS": "true\nIDENTITY_ADDRESS=0xATTACKER"})
+    bundle_path = _write_bundle(tmp_path, bad)
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "illegal characters" in " ".join(result.output.split())  # tolerate rich line-wrap
+    assert not (env_dir / ".env.songbird").exists()
+
+
+def test_v2_config_private_key_name_refused(monkeypatch, tmp_path):
+    env_dir = tmp_path / "clifdir"
+    bad = _v2_bundle(config={**CONFIG_OK, "CLAIM_EXECUTOR_PRIVATE_KEY": "0xdead"})
+    bundle_path = _write_bundle(tmp_path, bad)
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "PRIVATE_KEY" in result.output
+    assert not (env_dir / ".env.songbird").exists()
+
+
+def test_v2_config_private_key_value_refused(monkeypatch, tmp_path):
+    # Even under a legit key, a PRIVATE_KEY-looking VALUE is refused (assert_keyless
+    # only sees names; this guards the value too).
+    env_dir = tmp_path / "clifdir"
+    bad = _v2_bundle(config={**CONFIG_OK, "IDENTITY_ADDRESS": "MY_PRIVATE_KEY_0xdead"})
+    bundle_path = _write_bundle(tmp_path, bad)
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "PRIVATE_KEY" in result.output
+
+
+def test_v2_non_string_config_value_rejected(monkeypatch, tmp_path):
+    env_dir = tmp_path / "clifdir"
+    bad = _v2_bundle(config={**CONFIG_OK, "WRAP_REWARDS": True})  # JSON bool, not a string
+    bundle_path = _write_bundle(tmp_path, bad)
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "must be a string" in result.output
+
+
+def test_v2_missing_config_section_rejected(monkeypatch, tmp_path):
+    env_dir = tmp_path / "clifdir"
+    b = _v2_bundle()
+    del b["config"]
+    bundle_path = _write_bundle(tmp_path, b)
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "config" in result.output
+
+
+def test_v2_capability_missing_wallet_name_rejected(monkeypatch, tmp_path):
+    # The COMPLETE handoff must carry a wallet_name per cap (clif writes the wallet-env).
+    env_dir = tmp_path / "clifdir"
+    caps = _v2_caps()
+    caps[0] = {**caps[0], "wallet_name": ""}  # blank
+    bundle_path = _write_bundle(tmp_path, _v2_bundle(caps=caps))
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "wallet_name" in result.output
+    assert not (env_dir / ".env.songbird").exists()
+
+
+def test_v2_rotation_replaces_tokens_wallet_envs_and_config_in_place(monkeypatch, tmp_path):
+    # Re-import is the rotation channel — for tokens, wallet-envs AND config.
+    env_dir = tmp_path / "clifdir"
+    b1 = _write_bundle(tmp_path, _v2_bundle(), name="b1.json")
+    assert _invoke(monkeypatch, b1, env_dir).exit_code == 0
+
+    rotated_caps = _v2_caps()
+    rotated_caps[0] = {**rotated_caps[0], "caller_token": "fwd_live_claim_ROTATED"}
+    b2 = _write_bundle(
+        tmp_path,
+        _v2_bundle(caps=rotated_caps, config={**CONFIG_OK, "WRAP_REWARDS": "false"}),
+        name="b2.json",
+    )
+    assert _invoke(monkeypatch, b2, env_dir).exit_code == 0
+
+    text = (env_dir / ".env.songbird").read_text()
+    written = _env_lines(env_dir)
+    assert written["FWD_CALLER_TOKEN"] == "fwd_live_claim_ROTATED"
+    assert written["WRAP_REWARDS"] == "false"  # config rotated in place
+    assert text.count("FWD_CALLER_TOKEN=") == 1  # no duplication
+    assert text.count("FWD_WALLET_NAME=") == 1
+    assert text.count("WRAP_REWARDS=") == 1
+
+
+def test_v2_back_compat_v1_still_imports_tokens_only(monkeypatch, tmp_path):
+    # A v1 bundle (tokens only, no config / no wallet-env write) still imports.
+    env_dir = tmp_path / "clifdir"
+    bundle_path = _write_bundle(tmp_path, _bundle())  # version=1
+    result = _invoke(monkeypatch, bundle_path, env_dir, "--json")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["bundle_version"] == 1
+    assert payload["wallet_envs_written"] == []  # v1 does not write wallet-envs
+    assert payload["config_keys_written"] == []
+    written = _env_lines(env_dir)
+    assert written["FWD_CALLER_TOKEN"] == SECRET_A
+    assert "FWD_WALLET_NAME" not in written  # v1: fwd's host-side env-write supplied it

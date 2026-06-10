@@ -200,3 +200,32 @@
   `make_idempotency_key` is byte-identical to the Go port's `MakeIdempotencyKey`; clif
   composes via the lib helper and never reimplements the hashing. *Why: reconcile clif to
   the migrated/reorganized fwd-client; docs/verification-only — no clif version bump.*
+
+- **D19 — v2 COMPLETE handoff bundle: import tokens + wallet-envs + config (2026-06-10;
+  ADR-0003 Unit 4b, clif lockstep, clif v0.5.38).** The fwd credential handoff bundle
+  becomes **v2 — the complete onboard handoff** (consumer-contract-v1 §4): clif's ENTIRE
+  `.env.<network>` is sourced from the bundle, so **fwd never reads or writes clif's env**
+  (the `install/onboard --clif-env-dir` env-write is retired on the fwd side; closes the
+  cross-project Invariant #5). `import-credentials` now writes, per capability, the bearer
+  caller TOKEN **and** the fwd WALLET NAME (the wallet-env NAME is clif's own —
+  `config.capabilities()[cid].wallet_env` — never the bundle's; the bundle supplies only
+  the value), plus a top-level **`config`** section for the rest of the env.
+  **(a) Allowlist.** The `config` keys are validated against an allowlist **derived from
+  clif's own `Settings` fields** (`config.config_env_allowlist`, uppercased field names) so
+  it stays in sync; an unknown key is rejected (the bundle must not inject an arbitrary env
+  var). **Excluded** from the config allowlist: the per-cap caller-token env-vars (secrets
+  travel ONLY via the guarded per-cap path) and any `*PRIVATE_KEY*` name (D1). **(b) Guards.**
+  The env-injection guard (no control/newline chars; D11 lineage) is applied to config
+  values **and** wallet names; a `*PRIVATE_KEY*` key OR value in `config` is refused; config
+  values must be strings. **(c) Overwrite, not merge.** The bundle is the authoritative
+  onboard artifact, so config keys **overwrite in place** via the same idempotent
+  `upsert_env_var` collapse used for token rotation (consistent with the rotation channel;
+  config written in sorted order for diff determinism, ADR-0003). **(d) Back-compat.** v1
+  (tokens-only) bundles still import (no wallet-env / no config write) — the v1 era had fwd's
+  host-side env-write supply those. **(e) Reporting.** Output reports NAMES only —
+  capability_ids, token env-var names, wallet env-var names, config key names — **never a
+  token value**. **(f) Verification.** Unit-tested both shapes; the real-fwd **v2** e2e
+  (Songbird canary) is BLOCKED-pending-fwd — fwd still emits v1 (`bundle_emit.BUNDLE_VERSION
+  == 1`); Unit 4b is the lockstep half. `credentials.py` keeps the e2e NOTE as PENDING until
+  the canary proves it. *Why: ADR-0003 — build the fwd dialect now for interface cohesion at
+  N=1; the bundle is the single complete handoff and the membrane's env-write breach closes.*
