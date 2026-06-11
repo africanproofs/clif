@@ -206,7 +206,11 @@
   becomes **v2 — the complete onboard handoff** (consumer-contract-v1 §4): clif's ENTIRE
   `.env.<network>` is sourced from the bundle, so **fwd never reads or writes clif's env**
   (the `install/onboard --clif-env-dir` env-write is retired on the fwd side; closes the
-  cross-project Invariant #5). `import-credentials` now writes, per capability, the bearer
+  cross-project Invariant #5). The handoff is now **fwd-outbox-publish / consumer-pull**:
+  `fwd onboard` publishes a one-shot bundle to fwd's OWN outbox (e.g.
+  `/opt/fwd/handoff/clif-<net>.json`) and the operator imports it on the clif host with
+  `clifctl import-credentials <net> <bundle>` — the `--clif-env-dir` flag no longer exists
+  (deleted by fwd's a102). `import-credentials` now writes, per capability, the bearer
   caller TOKEN **and** the fwd WALLET NAME (the wallet-env NAME is clif's own —
   `config.capabilities()[cid].wallet_env` — never the bundle's; the bundle supplies only
   the value), plus a top-level **`config`** section for the rest of the env.

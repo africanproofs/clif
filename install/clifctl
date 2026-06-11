@@ -15,8 +15,9 @@
 #   clifctl run <net> …     # one-shot manual op: claim / fsp / preflight / chain nonce / rehearse
 #   clifctl build           # build the clif image from source
 #
-# <net> = flare | songbird | coston2  (selects the gitignored .env.<net> written by
-# `fwd onboard … --clif-env-dir <CLIF_DIR>`). The daemon SIGNS, so it stays hard-off
+# <net> = flare | songbird | coston2  (selects the gitignored .env.<net> created by
+# `clifctl import-credentials <net> <bundle>` from the one-shot bundle `fwd onboard`
+# publishes to fwd's outbox). The daemon SIGNS, so it stays hard-off
 # unless FSP_AUTO_ENABLED=true in that network's .env.<net> (D15).
 set -eu
 
@@ -41,7 +42,7 @@ _chain_id() {  # net -> EVM chain id
   case "$1" in flare) echo 14 ;; songbird) echo 19 ;; coston2) echo 114 ;; *) return 1 ;; esac
 }
 _envf() {
-  [ -f ".env.$1" ] || { echo "clifctl: .env.$1 not found in $CLIF_DIR — run 'sudo fwd onboard rewards … --clif-env-dir $CLIF_DIR' on the fwd host first" >&2; exit 2; }
+  [ -f ".env.$1" ] || { echo "clifctl: .env.$1 not found in $CLIF_DIR — run 'sudo fwd onboard rewards …' on the fwd host (it publishes a one-shot bundle to fwd's outbox, e.g. /opt/fwd/handoff/clif-$1.json), then 'clifctl import-credentials $1 <bundle>' here" >&2; exit 2; }
 }
 
 cmd="${1:-}"; [ "$#" -gt 0 ] && shift
@@ -104,6 +105,9 @@ case "$cmd" in
     [ -f "$_bundle" ] || { echo "clifctl import-credentials: bundle not found: $_bundle" >&2; exit 1; }
     _babs=$(cd "$(dirname "$_bundle")" && pwd)/$(basename "$_bundle")
     _bdir=$(dirname "$_babs"); _bname=$(basename "$_babs")
+    # Pre-create an empty .env.<net> so docker-compose's env_file directive is satisfied;
+    # the importer overwrites it with the real tokens+config. (clif-epoch-<net> has env_file:.env.<net>.)
+    [ -f "$CLIF_DIR/.env.$_net" ] || { ( umask 077; : > "$CLIF_DIR/.env.$_net" ); chown 1000:1000 "$CLIF_DIR/.env.$_net" 2>/dev/null || true; }
     set +e
     docker compose --profile multichain run --rm \
       -v "$CLIF_DIR:/host-clif" -v "$_bdir:/host-bundle" \

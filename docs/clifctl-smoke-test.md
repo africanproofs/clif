@@ -17,7 +17,7 @@ real network throughout.
 | # | Precondition | How to confirm |
 |---|---|---|
 | P1 | **fwd is up** and its callers network exists | `docker network ls \| grep fwd_fwd-callers` returns a row; `docker ps \| grep '\bfwd\b'` shows the container running |
-| P2 | **`.env.<net>` present** at `/opt/clif` | `ls /opt/clif/.env.<net>` exists (written by `sudo fwd onboard rewards … --clif-env-dir /opt/clif`) |
+| P2 | **`.env.<net>` present** at `/opt/clif` | `ls /opt/clif/.env.<net>` exists (created by `clifctl import-credentials <net> <bundle>` from the one-shot bundle `sudo fwd onboard rewards …` publishes to fwd's outbox) |
 | P3 | **`FSP_AUTO_ENABLED=true`** in `.env.<net>` | `grep -i '^FSP_AUTO_ENABLED=true' /opt/clif/.env.<net>` matches — otherwise `clifctl up` warns and the daemon IDLES (signs nothing, status `disabled` → healthy) |
 | P4 | **clif image built** | `clifctl build` has run, or `docker images \| grep clif` shows the tag |
 | P5 | **daemon running** | `clifctl up <net>` returned 0 **and** `clifctl status <net>` shows the container `running` (P5 is the real gate — `up -d` returning 0 does not prove it stayed up) |

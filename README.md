@@ -60,7 +60,9 @@ sudo fwd onboard rewards \
 ```
 
 The wizard creates or imports the reward wallets, writes the policy, mints caller
-tokens into clif's per-network env files at `/opt/clif` (`--clif-env-dir`), seeds
+tokens, and publishes a one-shot bundle to fwd's outbox (e.g. `/opt/fwd/handoff/clif-<net>.json`);
+you then run `clifctl import-credentials <net> <bundle>` on the clif host to create clif's
+per-network env files at `/opt/clif`. It also seeds
 fresh wallets' nonces to 0, and prints the on-chain authorizations you perform from
 the offline identity key (`setClaimExecutors` + allowed recipients — see
 `docs/onchain-migration.md`). It **never invokes clif**; on-chain preflight and

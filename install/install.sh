@@ -11,7 +11,8 @@
 #
 # Prerequisites:
 #   - fwd is installed + running (it creates the `fwd_fwd-callers` network clif attaches to).
-#   - `sudo fwd onboard rewards … --clif-env-dir /opt/clif` has written the per-network
+#   - `sudo fwd onboard rewards …` has published a one-shot bundle to fwd's outbox, then
+#     `clifctl import-credentials <net> <bundle>` here has created the per-network
 #     .env.<net> files this deployment reads (caller tokens + wallet names; keyless).
 #
 # Config (env or flags):
@@ -62,7 +63,7 @@ elif [ -f "$CLIF_DIR/docker-compose.yml" ]; then
   log "using existing clif source at $CLIF_DIR (no .git — building in place)"
 else
   # Empty, OR contains only operator config — e.g. the .env.<net> that
-  # `fwd onboard --clif-env-dir $CLIF_DIR` writes BEFORE clif is installed.
+  # `clifctl import-credentials <net> <bundle>` creates from the fwd-outbox bundle.
   # `git clone` refuses a non-empty target, so init + fetch + checkout INTO the dir:
   # this lays the source down ALONGSIDE the gitignored .env.<net> files
   # (`checkout -f` overwrites tracked files only; it never touches untracked ones).
@@ -76,8 +77,9 @@ else
 fi
 
 # clif's compose validates env_file even for stopped services. Seed a placeholder .env
-# from .env.example so `compose build` parses; the real per-network .env.<net> are written
-# by `fwd onboard … --clif-env-dir $CLIF_DIR` (keyless caller tokens — never here).
+# from .env.example so `compose build` parses; the real per-network .env.<net> are created
+# by `clifctl import-credentials <net> <bundle>` from the fwd-outbox bundle (keyless caller
+# tokens — never here).
 [ -f "$CLIF_DIR/.env" ] || { [ -f "$CLIF_DIR/.env.example" ] && cp "$CLIF_DIR/.env.example" "$CLIF_DIR/.env" && log "seeded placeholder $CLIF_DIR/.env"; }
 
 # --- 3. build the image from source --------------------------------------
@@ -106,9 +108,9 @@ fi
 
 # --- 5. seed fwd nonces from chain truth (best-effort; non-fatal) ---------
 # fwd is zero-egress: clif reads the on-chain tx count, the clifwd host wrapper writes fwd's
-# nonce. Idempotent; no-ops cleanly if onboarding hasn't written .env.<net> yet (re-run later
-# with `clifctl nonce-sync`). This restores the no-hand-typing nonce seeding without giving
-# fwd egress.
+# nonce. Idempotent; no-ops cleanly if `clifctl import-credentials` hasn't created .env.<net>
+# yet (re-run later with `clifctl nonce-sync`). This restores the no-hand-typing nonce seeding
+# without giving fwd egress.
 _clifctl="$CLIF_BIN_DIR/clifctl"; [ -x "$_clifctl" ] || _clifctl="$CLIF_DIR/install/clifctl"
 if [ "$BUILD" -eq 1 ]; then
   log "seeding fwd nonces from chain truth (clifctl nonce-sync)"
@@ -121,7 +123,8 @@ cat <<EOF
 clif is installed (separate from fwd; joins the '$FWD_NETWORK' network to reach fwd:8080).
 next:
   1. (if not yet onboarded) sudo fwd onboard rewards --identity 0x… --recipient 0x… --networks songbird
-       writes $CLIF_DIR/.env.<net>; then re-run this installer (or 'clifctl nonce-sync') to seed nonces.
+       publishes a one-shot bundle to fwd's outbox; then here: clifctl import-credentials <net> <bundle>
+       creates $CLIF_DIR/.env.<net>; then re-run this installer (or 'clifctl nonce-sync') to seed nonces.
   2. verify on-chain auth:  clifctl run songbird preflight --identity 0x… --recipient 0x…
   3. rehearse:              clifctl run songbird claim --type fee   (then verify the RewardClaimed event)
   4. enable (AFTER rehearsal): confirm FSP_AUTO_ENABLED=true in $CLIF_DIR/.env.songbird, then: clifctl up songbird
