@@ -41,6 +41,35 @@ _net_ok() {
 _chain_id() {  # net -> EVM chain id
   case "$1" in flare) echo 14 ;; songbird) echo 19 ;; coston2) echo 114 ;; *) return 1 ;; esac
 }
+# Seed fwd's nonce from CHAIN TRUTH for ONE net's tx-sending wallets (claimer + FSP sender;
+# fsp-signing has no nonce). fwd is zero-egress, so clif reads the on-chain count and the clifwd
+# host wrapper writes fwd's nonce. Idempotent — already-seeded wallets are skipped. Used by both
+# `nonce-sync` and (auto) by `import-credentials`. Best-effort — always returns 0.
+_ns_one() {  # net
+  _n="$1"; _cid=$(_chain_id "$_n") || return 0
+  [ -f ".env.$_n" ] || return 0
+  printf 'nonce-sync %s (chain %s):\n' "$_n" "$_cid"
+  for _wv in FWD_WALLET_NAME FSP_SENDER_WALLET_NAME; do
+    _wn=$(sed -n "s/^$_wv=//p" ".env.$_n" 2>/dev/null | head -n1)
+    [ -n "$_wn" ] || continue
+    if clifwd nonce get --wallet "$_wn" --chain "$_cid" >/dev/null 2>&1; then
+      printf '  ok: %s already seeded\n' "$_wn"; continue
+    fi
+    _addr=$(clifwd wallets list 2>/dev/null | awk -v n="$_wn" '$1==n{print $2; exit}')
+    [ -n "$_addr" ] || { printf '  ! %s: address not found in fwd (skipped)\n' "$_wn"; continue; }
+    _j=$(docker compose --profile multichain run --rm "clif-epoch-$_n" chain nonce --address "$_addr" --json 2>/dev/null || true)
+    _cnt=$(printf '%s' "$_j" | docker exec -i "$FWD_CONTAINER" python -c 'import sys,json;print(json.load(sys.stdin)["latest"])' 2>/dev/null || true)
+    case "$_cnt" in
+      ''|*[!0-9]*) printf '  ! %s (%s): chain nonce read failed — seed manually\n' "$_wn" "$_addr"; continue ;;
+    esac
+    if clifwd nonce init --wallet "$_wn" --chain "$_cid" --starting-nonce "$_cnt" >/dev/null 2>&1; then
+      printf '  seeded: %s @ chain %s = %s (chain truth)\n' "$_wn" "$_cid" "$_cnt"
+    else
+      printf '  ! %s: nonce init failed — run: clifwd nonce init --wallet %s --chain %s --starting-nonce %s\n' "$_wn" "$_wn" "$_cid" "$_cnt"
+    fi
+  done
+  return 0
+}
 _envf() {
   [ -f ".env.$1" ] || { echo "clifctl: .env.$1 not found in $CLIF_DIR — run 'sudo fwd onboard rewards …' on the fwd host (it publishes a one-shot bundle to fwd's outbox, e.g. /opt/fwd/handoff/clif-$1.json), then 'clifctl import-credentials $1 <bundle>' here" >&2; exit 2; }
 }
@@ -119,6 +148,11 @@ case "$cmd" in
     # delete a root-owned 0600 fwd bundle, so clifctl removes it here after a
     # successful import (rc==0). A failed import leaves the bundle for retry.
     [ "$_rc" -eq 0 ] && rm -f "$_babs"
+    # Auto-seed nonces from chain truth right after a successful import — only when fwd is
+    # co-located (clifwd on PATH). Best-effort: never changes the import's exit code.
+    if [ "$_rc" -eq 0 ] && command -v clifwd >/dev/null 2>&1; then
+      printf '\n— seeding nonces from chain truth (auto) —\n'; _ns_one "$_net" || true
+    fi
     exit "$_rc" ;;
   nonce-sync)
     # Seed fwd's nonce from CHAIN TRUTH for the tx-sending wallets onboard imported (claimer +
@@ -130,29 +164,7 @@ case "$cmd" in
     if [ -n "${1:-}" ]; then _net_ok "$1"; _ns_nets="$1"
     else _ns_nets=""; for _nf in flare songbird coston2; do [ -f ".env.$_nf" ] && _ns_nets="$_ns_nets $_nf"; done; fi
     [ -n "$_ns_nets" ] || { echo "clifctl nonce-sync: no .env.<net> in $CLIF_DIR — nothing to seed"; exit 0; }
-    for _n in $_ns_nets; do
-      _cid=$(_chain_id "$_n") || continue
-      printf 'nonce-sync %s (chain %s):\n' "$_n" "$_cid"
-      for _wv in FWD_WALLET_NAME FSP_SENDER_WALLET_NAME; do
-        _wn=$(sed -n "s/^$_wv=//p" ".env.$_n" 2>/dev/null | head -n1)
-        [ -n "$_wn" ] || continue
-        if clifwd nonce get --wallet "$_wn" --chain "$_cid" >/dev/null 2>&1; then
-          printf '  ok: %s already seeded\n' "$_wn"; continue
-        fi
-        _addr=$(clifwd wallets list 2>/dev/null | awk -v n="$_wn" '$1==n{print $2; exit}')
-        [ -n "$_addr" ] || { printf '  ! %s: address not found in fwd (skipped)\n' "$_wn"; continue; }
-        _j=$(docker compose --profile multichain run --rm "clif-epoch-$_n" chain nonce --address "$_addr" --json 2>/dev/null || true)
-        _cnt=$(printf '%s' "$_j" | docker exec -i "$FWD_CONTAINER" python -c 'import sys,json;print(json.load(sys.stdin)["latest"])' 2>/dev/null || true)
-        case "$_cnt" in
-          ''|*[!0-9]*) printf '  ! %s (%s): chain nonce read failed — seed manually\n' "$_wn" "$_addr"; continue ;;
-        esac
-        if clifwd nonce init --wallet "$_wn" --chain "$_cid" --starting-nonce "$_cnt" >/dev/null 2>&1; then
-          printf '  seeded: %s @ chain %s = %s (chain truth)\n' "$_wn" "$_cid" "$_cnt"
-        else
-          printf '  ! %s: nonce init failed — run: clifwd nonce init --wallet %s --chain %s --starting-nonce %s\n' "$_wn" "$_wn" "$_cid" "$_cnt"
-        fi
-      done
-    done
+    for _n in $_ns_nets; do _ns_one "$_n"; done
     ;;
   ""|help|-h|--help)
     echo "usage: clifctl {up|down|restart|status|logs|run|doctor} <net> [args] | import-credentials <net> <bundle> | nonce-sync [<net>] | build" >&2
