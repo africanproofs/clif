@@ -66,6 +66,21 @@ paths now do too (v0.5.6). *Codified 2026-05-29 after an empty Flare discovery (
 already claimed manually by the operator) was mis-reported as "not yet claimable" — the
 same done-vs-pending conflation as the rule above, made right after invoking it.*
 
+## Hard rule — `NETWORK` selects the chain; unset defaults *silently* to flare
+
+Companion to the mined-≠-success rule, at the *configuration* level. clif resolves the
+active chain as `net = network or os.environ.get("NETWORK") or "flare"`
+(`clif/cli.py:715`) — so an `.env.<network>` (or a v2 handoff bundle `config`) that
+**omits `NETWORK`** makes clif **silently run on flare**: `preflight` AND the `epoch run`
+daemon, with no error. A songbird deployment missing `NETWORK` would sign/claim on the
+**wrong chain**. **Every `.env.<network>` MUST carry `NETWORK`** (the v2 bundle `config`
+supplies it — allowlisted via `Settings.network`, D20), or the command must pass
+`--network`. The trap: the omission is invisible on flare (= the default) — only a
+non-default (songbird) canary exposes it (`clifctl nonce-sync` is *not* affected — the
+wrapper maps net→chain itself; only the in-container clif command reads `NETWORK`). See
+`docs/decisions.md` D20. *Codified 2026-06-12 after a fresh v2-bundle onboard dropped
+`NETWORK` and `clifctl run songbird preflight` printed `Preflight — flare (chain 14)`.*
+
 ## Automation — `clif epoch run` (canonical reward-lifecycle daemon)
 
 The canonical automation is **`clif epoch run`** (`clif/epoch_auto.py`; decisions D17) — ONE
