@@ -214,6 +214,13 @@ def validate_bundle(bundle: dict, settings: Settings) -> str:
 
     if version == 2:
         _validate_config_section(bundle.get("config"), config_env_allowlist(settings))
+        config = bundle.get("config") or {}
+        config_network = config.get("NETWORK")
+        if config_network is not None and config_network != network:
+            raise BundleError(
+                f"bundle config NETWORK {config_network!r} contradicts the "
+                f"bundle's network {network!r}"
+            )
 
     return network
 
@@ -308,6 +315,14 @@ def import_credentials(bundle: dict, settings: Settings, env_dir: Path) -> Impor
         for key, value in sorted(bundle.get("config", {}).items()):
             text = upsert_env_var(text, key, value)
             config_keys.append(key)
+
+    # NETWORK is clif's only chain selector and silently defaults to flare when
+    # absent (cli.py resolver; CLAUDE.md hard rule / D20). The import is the
+    # authoritative env writer, so it ALWAYS pins NETWORK to the bundle's own
+    # validated network — a handoff can no longer produce a wrong-chain env.
+    text = upsert_env_var(text, "NETWORK", network)
+    if "NETWORK" not in config_keys:
+        config_keys.append("NETWORK")
 
     # mode-0600: the file holds bearer tokens. Set perms before/at write so the
     # token bytes never briefly sit world-readable.

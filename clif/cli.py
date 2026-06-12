@@ -12,6 +12,7 @@ wait → reward-publication poll → sign rewards → wait for the >threshold
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -712,7 +713,15 @@ def preflight(
             )
             raise typer.Exit(1)
 
-    net = network or os.environ.get("NETWORK") or "flare"
+    net = network or os.environ.get("NETWORK")
+    if not net:
+        if not json_output:
+            err.print(
+                "[bold red]no network selected: set NETWORK in the environment "
+                "(.env.<net> carries it post-import) or pass --network. "
+                "Refusing to default silently to flare.[/]"
+            )
+        raise typer.Exit(2)
     if net not in _NETWORKS:
         if not json_output:
             err.print(f"[bold red]--network must be one of: {', '.join(_NETWORKS)}[/]")
@@ -1454,40 +1463,60 @@ def fsp_status(
 
 
 _FSP_AUTO_LOCK_FILE = "/tmp/clif-fsp-auto.lock"
+_fsp_auto_lock_fd: int | None = None
 
 
 def _acquire_fsp_auto_lock() -> None:
     """Acquire the fsp-auto singleton lock.
 
-    Writes the current PID to /tmp/clif-fsp-auto.lock.  If the file already
-    exists and the recorded PID is still running, print an error and exit — two
-    concurrent fsp-auto processes would double-sign epochs.  Stale locks (PID
-    gone) are silently overwritten.
+    The lock is an ``fcntl.flock`` held on an open fd kept alive for the process
+    lifetime.  The kernel releases the flock automatically on ANY process death
+    — clean exit, crash, SIGKILL, or reboot — so a stale lock can never exist.
+    This is immune to the stale-PID / PID-1-container misfire that the old
+    ``os.kill(pid, 0)`` check suffered (the daemon is PID 1 in its container, so
+    after a restart it would signal itself and refuse to start).  The PID written
+    into the file is informational only.
     """
-    lock_path = Path(_FSP_AUTO_LOCK_FILE)
-    if lock_path.exists():
+    global _fsp_auto_lock_fd
+    fd = os.open(_FSP_AUTO_LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # Lock held by a live process (covers BlockingIOError/EWOULDBLOCK).
+        existing_pid = "unknown"
         try:
-            existing_pid = int(lock_path.read_text().strip())
-            # Check if that PID is still alive.
-            os.kill(existing_pid, 0)
-            # If os.kill succeeds, the process exists.
-            err.print(
-                f"[bold red]clif fsp auto is already running (PID {existing_pid}). "
-                f"Lock file: {_FSP_AUTO_LOCK_FILE}. "
-                "Two concurrent fsp-auto processes would double-sign epochs. Aborting.[/]"
-            )
-            raise typer.Exit(2)
-        except (ProcessLookupError, PermissionError):
-            # Process is gone (ProcessLookupError) or we can't signal it
-            # (PermissionError = exists but different user). Treat as stale.
+            existing_pid = os.read(fd, 64).decode().strip() or "unknown"
+        except OSError:
             pass
-        except ValueError:
-            pass  # malformed PID file — treat as stale
-    lock_path.write_text(str(os.getpid()))
+        os.close(fd)
+        err.print(
+            f"[bold red]clif fsp auto is already running (PID {existing_pid}). "
+            f"Lock file: {_FSP_AUTO_LOCK_FILE}. "
+            "Two concurrent fsp-auto processes would double-sign epochs. Aborting.[/]"
+        )
+        raise typer.Exit(2)
+    # Acquired. Record our PID for diagnostics only, then keep the fd open.
+    os.ftruncate(fd, 0)
+    os.write(fd, str(os.getpid()).encode())
+    _fsp_auto_lock_fd = fd
 
 
 def _release_fsp_auto_lock() -> None:
-    """Remove the fsp-auto lock file on clean exit."""
+    """Release the fsp-auto lock on clean exit.
+
+    Releases the ``fcntl.flock`` held on the open fd and closes it (the kernel
+    would do this anyway on process death — the lock is auto-released and
+    immune to the stale-PID / PID-1-container misfire), then best-effort unlinks
+    the lock file.
+    """
+    global _fsp_auto_lock_fd
+    if _fsp_auto_lock_fd is not None:
+        try:
+            fcntl.flock(_fsp_auto_lock_fd, fcntl.LOCK_UN)
+            os.close(_fsp_auto_lock_fd)
+        except OSError:
+            pass
+        _fsp_auto_lock_fd = None
     try:
         Path(_FSP_AUTO_LOCK_FILE).unlink(missing_ok=True)
     except OSError:
@@ -1668,6 +1697,20 @@ def epoch_run(
     Replaces `clif auto` + `clif fsp auto` as the daemon entrypoint. Shares the
     fsp-auto singleton lock (only one signer process per host).
     """
+    # Refuse to start without an explicit NETWORK. `Settings.network` carries a
+    # load-bearing pydantic default of "flare" (chicken-and-egg with
+    # import-credentials), so a daemon launched with no NETWORK in its env would
+    # silently sign/claim on flare — an irreversible wrong-chain action. The
+    # post-import `.env.<net>` always carries NETWORK, so this only fires on a
+    # mis-provisioned env.
+    if not os.environ.get("NETWORK"):
+        err.print(
+            "[bold red]epoch run refuses to start without an explicit NETWORK "
+            "(env or --network); a silent flare default could sign/claim on the "
+            "wrong chain[/]"
+        )
+        raise typer.Exit(2)
+
     s = _settings()
     # Hard-off gate (D15): the state machine SIGNS. A valid signature over wrong
     # data is irreversible on-chain, so signing is opt-in.

@@ -616,7 +616,48 @@ def test_v2_back_compat_v1_still_imports_tokens_only(monkeypatch, tmp_path):
     payload = json.loads(result.output)
     assert payload["bundle_version"] == 1
     assert payload["wallet_envs_written"] == []  # v1 does not write wallet-envs
-    assert payload["config_keys_written"] == []
+    # v1 force-writes the NETWORK selector (the import is the authoritative env
+    # writer; absent NETWORK silently defaults to flare — wrong-chain risk).
+    assert payload["config_keys_written"] == ["NETWORK"]
     written = _env_lines(env_dir)
     assert written["FWD_CALLER_TOKEN"] == SECRET_A
+    assert written["NETWORK"] == "songbird"  # pinned to the bundle's validated network
     assert "FWD_WALLET_NAME" not in written  # v1: fwd's host-side env-write supplied it
+
+
+# ===== NETWORK enforcement — the import is the authoritative chain selector =======
+# clif's only chain selector is NETWORK; absent it silently defaults to flare
+# (cli.py resolver; D20). The import force-pins NETWORK to the bundle's validated
+# network and rejects a config that contradicts it.
+
+
+def test_v2_config_network_contradicting_bundle_network_rejected(monkeypatch, tmp_path):
+    # config says flare but the bundle is a songbird bundle → terminal contradiction.
+    env_dir = tmp_path / "clifdir"
+    bad = _v2_bundle(network="songbird", config={**CONFIG_OK, "NETWORK": "flare"})
+    bundle_path = _write_bundle(tmp_path, bad)
+    result = _invoke(monkeypatch, bundle_path, env_dir)
+    assert result.exit_code == 2, result.output
+    assert "contradicts" in result.output
+    assert not (env_dir / ".env.songbird").exists()  # nothing written
+    assert bundle_path.is_file()  # not consumed on rejection
+
+
+def test_v2_config_omitting_network_still_pins_it(monkeypatch, tmp_path):
+    # A v2 config that omits NETWORK imports cleanly; the force-write pins it.
+    env_dir = tmp_path / "clifdir"
+    config = {k: v for k, v in CONFIG_OK.items() if k != "NETWORK"}
+    bundle_path = _write_bundle(tmp_path, _v2_bundle(config=config))
+    result = _invoke(monkeypatch, bundle_path, env_dir, "--json")
+    assert result.exit_code == 0, result.output
+    assert _env_lines(env_dir)["NETWORK"] == "songbird"
+    assert "NETWORK" in json.loads(result.output)["config_keys_written"]
+
+
+def test_v1_import_pins_network_in_config_keys(monkeypatch, tmp_path):
+    env_dir = tmp_path / "clifdir"
+    bundle_path = _write_bundle(tmp_path, _bundle(network="songbird"))
+    result = _invoke(monkeypatch, bundle_path, env_dir, "--json")
+    assert result.exit_code == 0, result.output
+    assert _env_lines(env_dir)["NETWORK"] == "songbird"
+    assert "NETWORK" in json.loads(result.output)["config_keys_written"]
