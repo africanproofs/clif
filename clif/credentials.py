@@ -73,7 +73,14 @@ class ImportResult:
 
     @property
     def wallet_envs_written(self) -> list[str]:
-        return [c.wallet_env for c in self.imported if c.wallet_env]
+        # Order-preserving unique: the two sign caps share FSP_SIGNING_WALLET_NAME and the
+        # two submit caps share FSP_SENDER_WALLET_NAME (the per-message-type least-privilege
+        # split, ADR-0004), so the same wallet-env is written by >1 cap — report it once.
+        seen: dict[str, None] = {}
+        for c in self.imported:
+            if c.wallet_env:
+                seen.setdefault(c.wallet_env, None)
+        return list(seen)
 
     @property
     def capability_ids(self) -> list[str]:

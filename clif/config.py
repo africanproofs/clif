@@ -195,8 +195,13 @@ class Settings(BaseSettings):
     # (cross-domain key reuse = fail-fast boot). One caller → one policy_path
     # → one block. So one caller authorizes EITHER /v1/sign-fsp-message (Leg-1,
     # fsp_permissions) OR /v1/sign-transaction (Leg-2, permissions) — never both.
-    fsp_sign_caller_token: str | None = None  # Leg-1: /v1/sign-fsp-message (fsp_permissions)
-    fsp_submit_caller_token: str | None = None  # Leg-2: /v1/sign-transaction (permissions)
+    # FSP signing is split PER MESSAGE-TYPE (ADR-0004 least-privilege): an uptime token
+    # cannot sign a reward distribution. Sign legs (Leg-1, /v1/sign-fsp-message) share the
+    # fsp-signing wallet; submit legs (Leg-2, /v1/sign-transaction) share the fsp-sender wallet.
+    fsp_uptime_sign_caller_token: str | None = None    # Leg-1 UPTIME
+    fsp_uptime_submit_caller_token: str | None = None  # Leg-2 signUptimeVote
+    fsp_reward_sign_caller_token: str | None = None    # Leg-1 REWARD_DISTRIBUTION
+    fsp_reward_submit_caller_token: str | None = None  # Leg-2 signRewards
     fsp_auto_enabled: bool = False
     fsp_signing_wallet_name: str | None = None
     fsp_sender_wallet_name: str | None = None
@@ -265,16 +270,19 @@ class Settings(BaseSettings):
 # the AUTHORIZATION clif requests (endpoint, contract, method, pinned args); the
 # caller TOKEN is a secret clif reads from its env var and is NEVER emitted here.
 #
-# Consumer identity is `claim` (ADR-0004): the reward-harvester. The fsp-sign / fsp-submit
-# roles ride here TRANSITIONALLY — until the `fsp` consumer (keyless flare-system-client)
-# lands, then they migrate to `fsp/<net>/…` and are revoked here. Until then they keep
+# Consumer identity is `claim` (ADR-0004): the reward-harvester. The four FSP roles
+# (uptime-vote-{sign,submit}, reward-distribution-{sign,submit}) ride here TRANSITIONALLY —
+# until the `fsp` consumer (keyless flare-system-client) lands, then they migrate to
+# `fsp/<net>/…` (same role tokens, prefix swap) and are revoked here. Until then they keep
 # live FSP signing working (dropping them now would halt it; `fsp` does not exist yet).
 
 # Suggested per-role rate ceilings — REQUEST ONLY (fwd policy is authoritative).
 _SUGGESTED_RATE = {
-    "ftso-reward": "8/day",  # claims fire ~once per ~3.5-day reward epoch per type
-    "fsp-sign": "16/day",
-    "fsp-submit": "16/day",
+    "ftso-reward-claim": "8/day",  # claims fire ~once per ~3.5-day reward epoch per type
+    "uptime-vote-sign": "16/day",
+    "uptime-vote-submit": "16/day",
+    "reward-distribution-sign": "16/day",
+    "reward-distribution-submit": "16/day",
 }
 
 _CLAIM_METHOD = "claim(address,address,uint24,bool,(bytes32[],(uint24,bytes20,uint120,uint8))[])"
@@ -297,7 +305,7 @@ class Capability:
 
 
 def capabilities(settings: Settings) -> list[Capability]:
-    """clif's three fwd capabilities for the configured network (ADR-0001 §3).
+    """clif's five fwd capabilities for the configured network (1 claim + 4 FSP; ADR-0001 §3).
 
     Config-derived and deterministic (no RPC). Carries NAMES only — never a
     caller-token value. The set is what clif *requests*; grant/import is separate.
@@ -306,8 +314,8 @@ def capabilities(settings: Settings) -> list[Capability]:
     n = settings.network
     return [
         Capability(
-            capability_id=f"claim/{n}/ftso-reward",
-            role="ftso-reward",
+            capability_id=f"claim/{n}/ftso-reward-claim",
+            role="ftso-reward-claim",
             endpoint="/v1/sign-transaction",
             caller_token_env="FWD_CALLER_TOKEN",
             wallet_env="FWD_WALLET_NAME",
@@ -317,35 +325,67 @@ def capabilities(settings: Settings) -> list[Capability]:
             method=_CLAIM_METHOD,
             value_wei="0",
             recipient_pinned=settings.claim_recipient_address,
-            suggested_rate=_SUGGESTED_RATE["ftso-reward"],
+            suggested_rate=_SUGGESTED_RATE["ftso-reward-claim"],
         ),
+        # FSP — split PER MESSAGE-TYPE (ADR-0004 least-privilege). The two sign legs (Leg-1,
+        # /v1/sign-fsp-message) share the fsp-signing wallet but each authorizes exactly ONE
+        # message type; the two submit legs (Leg-2) share the fsp-sender wallet but each
+        # authorizes ONE FlareSystemsManager method. An uptime token cannot sign a reward.
         Capability(
-            capability_id=f"claim/{n}/fsp-sign",
-            role="fsp-sign",
+            capability_id=f"claim/{n}/uptime-vote-sign",
+            role="uptime-vote-sign",
             endpoint="/v1/sign-fsp-message",
-            caller_token_env="FSP_SIGN_CALLER_TOKEN",
+            caller_token_env="FSP_UPTIME_SIGN_CALLER_TOKEN",
             wallet_env="FSP_SIGNING_WALLET_NAME",
             wallet_name=settings.fsp_signing_wallet_name,
             contract=None,
             contract_name=None,
-            method="signUptimeVote / signRewards (FSP messages: UPTIME, REWARD_DISTRIBUTION)",
+            method="signUptimeVote (FSP message: UPTIME)",
             value_wei=None,
             recipient_pinned=None,
-            suggested_rate=_SUGGESTED_RATE["fsp-sign"],
+            suggested_rate=_SUGGESTED_RATE["uptime-vote-sign"],
         ),
         Capability(
-            capability_id=f"claim/{n}/fsp-submit",
-            role="fsp-submit",
+            capability_id=f"claim/{n}/reward-distribution-sign",
+            role="reward-distribution-sign",
+            endpoint="/v1/sign-fsp-message",
+            caller_token_env="FSP_REWARD_SIGN_CALLER_TOKEN",
+            wallet_env="FSP_SIGNING_WALLET_NAME",
+            wallet_name=settings.fsp_signing_wallet_name,
+            contract=None,
+            contract_name=None,
+            method="signRewards (FSP message: REWARD_DISTRIBUTION)",
+            value_wei=None,
+            recipient_pinned=None,
+            suggested_rate=_SUGGESTED_RATE["reward-distribution-sign"],
+        ),
+        Capability(
+            capability_id=f"claim/{n}/uptime-vote-submit",
+            role="uptime-vote-submit",
             endpoint="/v1/sign-transaction",
-            caller_token_env="FSP_SUBMIT_CALLER_TOKEN",
+            caller_token_env="FSP_UPTIME_SUBMIT_CALLER_TOKEN",
             wallet_env="FSP_SENDER_WALLET_NAME",
             wallet_name=settings.fsp_sender_wallet_name,
             contract=net.flare_systems_manager,
             contract_name="FlareSystemsManager",
-            method="signUptimeVote / signRewards",
+            method="signUptimeVote",
             value_wei="0",
             recipient_pinned=None,
-            suggested_rate=_SUGGESTED_RATE["fsp-submit"],
+            suggested_rate=_SUGGESTED_RATE["uptime-vote-submit"],
+        ),
+        Capability(
+            capability_id=f"claim/{n}/reward-distribution-submit",
+            role="reward-distribution-submit",
+            endpoint="/v1/sign-transaction",
+            caller_token_env="FSP_REWARD_SUBMIT_CALLER_TOKEN",
+            wallet_env="FSP_SENDER_WALLET_NAME",
+            wallet_name=settings.fsp_sender_wallet_name,
+            contract=net.flare_systems_manager,
+            contract_name="FlareSystemsManager",
+            method="signRewards",
+            value_wei="0",
+            recipient_pinned=None,
+            suggested_rate=_SUGGESTED_RATE["reward-distribution-submit"],
         ),
     ]
 

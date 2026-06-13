@@ -115,12 +115,22 @@ def _out(
 
 
 def _check_fsp_config(settings: Settings, message_type: str, epoch: int) -> FspOutcome | None:
-    """Return a FAILED_TERMINAL outcome if required FSP config is missing, else None."""
+    """Return a FAILED_TERMINAL outcome if required FSP config is missing, else None.
+
+    Tokens are PER MESSAGE-TYPE (ADR-0004 least-privilege): UPTIME uses the uptime
+    sign/submit callers; REWARD_DISTRIBUTION uses the reward sign/submit callers.
+    """
+    if message_type == "UPTIME":
+        _sign = ("FSP_UPTIME_SIGN_CALLER_TOKEN", settings.fsp_uptime_sign_caller_token)
+        _submit = ("FSP_UPTIME_SUBMIT_CALLER_TOKEN", settings.fsp_uptime_submit_caller_token)
+    else:  # REWARD_DISTRIBUTION
+        _sign = ("FSP_REWARD_SIGN_CALLER_TOKEN", settings.fsp_reward_sign_caller_token)
+        _submit = ("FSP_REWARD_SUBMIT_CALLER_TOKEN", settings.fsp_reward_submit_caller_token)
     missing = [
         n
         for n, v in (
-            ("FSP_SIGN_CALLER_TOKEN", settings.fsp_sign_caller_token),
-            ("FSP_SUBMIT_CALLER_TOKEN", settings.fsp_submit_caller_token),
+            _sign,
+            _submit,
             ("FSP_SIGNING_WALLET_NAME", settings.fsp_signing_wallet_name),
             ("FSP_SENDER_WALLET_NAME", settings.fsp_sender_wallet_name),
         )
@@ -187,8 +197,8 @@ def run_sign_uptime(
     retry_token = retry if retry is not None else settings.fsp_idempotency_retry
 
     with (
-        FwdClient(settings.fwd_endpoint, settings.fsp_sign_caller_token) as sign_fwd,
-        FwdClient(settings.fwd_endpoint, settings.fsp_submit_caller_token) as submit_fwd,
+        FwdClient(settings.fwd_endpoint, settings.fsp_uptime_sign_caller_token) as sign_fwd,
+        FwdClient(settings.fwd_endpoint, settings.fsp_uptime_submit_caller_token) as submit_fwd,
     ):
         # Leg 1: request the FSP message signature from fwd (SIGN caller).
         leg1_key = make_fsp_idempotency_key(net, mt, reward_epoch_id, "sign", retry_token)
@@ -434,8 +444,8 @@ def run_sign_rewards(
     retry_token = retry if retry is not None else settings.fsp_idempotency_retry
 
     with (
-        FwdClient(settings.fwd_endpoint, settings.fsp_sign_caller_token) as sign_fwd,
-        FwdClient(settings.fwd_endpoint, settings.fsp_submit_caller_token) as submit_fwd,
+        FwdClient(settings.fwd_endpoint, settings.fsp_reward_sign_caller_token) as sign_fwd,
+        FwdClient(settings.fwd_endpoint, settings.fsp_reward_submit_caller_token) as submit_fwd,
     ):
         leg1_key = make_fsp_idempotency_key(net, mt, reward_epoch_id, "sign", retry_token)
         log.info(

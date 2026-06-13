@@ -214,9 +214,11 @@ def doctor(
 
     # Configured = clif holds the caller token (its "imported" view). NAMES only.
     token_by_role = {
-        "ftso-reward": s.fwd_caller_token,
-        "fsp-sign": s.fsp_sign_caller_token,
-        "fsp-submit": s.fsp_submit_caller_token,
+        "ftso-reward-claim": s.fwd_caller_token,
+        "uptime-vote-sign": s.fsp_uptime_sign_caller_token,
+        "uptime-vote-submit": s.fsp_uptime_submit_caller_token,
+        "reward-distribution-sign": s.fsp_reward_sign_caller_token,
+        "reward-distribution-submit": s.fsp_reward_submit_caller_token,
     }
     cap_status = [
         {
@@ -446,7 +448,7 @@ def _capability_block(c: Capability) -> str:
     lines.append(f"- method: `{c.method}`")
     if c.value_wei is not None:
         lines.append(f"- value: `{c.value_wei}`")
-    if c.role == "ftso-reward":
+    if c.role == "ftso-reward-claim":
         lines.append(
             f"- recipient pinned: `{c.recipient_pinned or '<CLAIM_RECIPIENT_ADDRESS unset>'}`"
         )

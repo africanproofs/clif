@@ -14,8 +14,10 @@ from clif.cli import app
 from clif.config import Settings, capabilities
 
 SECRET_A = "fwd_live_claim_SECRET_VALUE_A"
-SECRET_B = "fwd_live_fspsign_SECRET_VALUE_B"
-SECRET_C = "fwd_live_fspsubmit_SECRET_VALUE_C"
+SECRET_B = "fwd_live_uptimesign_SECRET_VALUE_B"
+SECRET_C = "fwd_live_uptimesubmit_SECRET_VALUE_C"
+SECRET_D = "fwd_live_rewardsign_SECRET_VALUE_D"
+SECRET_E = "fwd_live_rewardsubmit_SECRET_VALUE_E"
 
 
 def _iso(dt: datetime) -> str:
@@ -42,7 +44,13 @@ def _bundle(network="songbird", caps=None, **overrides) -> dict:
     """A valid v1 bundle for `network`, granting all of clif's governed capabilities."""
     if caps is None:
         s = _settings(network=network)
-        secret_by_role = {"ftso-reward": SECRET_A, "fsp-sign": SECRET_B, "fsp-submit": SECRET_C}
+        secret_by_role = {
+            "ftso-reward-claim": SECRET_A,
+            "uptime-vote-sign": SECRET_B,
+            "uptime-vote-submit": SECRET_C,
+            "reward-distribution-sign": SECRET_D,
+            "reward-distribution-submit": SECRET_E,
+        }
         caps = [
             {
                 "capability_id": c.capability_id,
@@ -96,10 +104,12 @@ def test_valid_bundle_writes_the_right_env_vars_by_name(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
 
     written = _env_lines(env_dir)
-    # The three governed env var NAMES are written with the bundle's secret values.
+    # The five governed env var NAMES are written with the bundle's secret values.
     assert written["FWD_CALLER_TOKEN"] == SECRET_A
-    assert written["FSP_SIGN_CALLER_TOKEN"] == SECRET_B
-    assert written["FSP_SUBMIT_CALLER_TOKEN"] == SECRET_C
+    assert written["FSP_UPTIME_SIGN_CALLER_TOKEN"] == SECRET_B
+    assert written["FSP_UPTIME_SUBMIT_CALLER_TOKEN"] == SECRET_C
+    assert written["FSP_REWARD_SIGN_CALLER_TOKEN"] == SECRET_D
+    assert written["FSP_REWARD_SUBMIT_CALLER_TOKEN"] == SECRET_E
 
 
 def test_no_token_value_appears_in_output(monkeypatch, tmp_path):
@@ -107,11 +117,11 @@ def test_no_token_value_appears_in_output(monkeypatch, tmp_path):
     bundle_path = _write_bundle(tmp_path, _bundle())
     result = _invoke(monkeypatch, bundle_path, env_dir)
     assert result.exit_code == 0, result.output
-    for secret in (SECRET_A, SECRET_B, SECRET_C):
+    for secret in (SECRET_A, SECRET_B, SECRET_C, SECRET_D, SECRET_E):
         assert secret not in result.output  # never log/print a token value
     # but the env var NAMES and capability_ids ARE reported
     assert "FWD_CALLER_TOKEN" in result.output
-    assert "claim/songbird/ftso-reward" in result.output
+    assert "claim/songbird/ftso-reward-claim" in result.output
 
 
 def test_no_token_value_appears_in_json_output(monkeypatch, tmp_path):
@@ -119,21 +129,25 @@ def test_no_token_value_appears_in_json_output(monkeypatch, tmp_path):
     bundle_path = _write_bundle(tmp_path, _bundle())
     result = _invoke(monkeypatch, bundle_path, env_dir, "--json")
     assert result.exit_code == 0, result.output
-    for secret in (SECRET_A, SECRET_B, SECRET_C):
+    for secret in (SECRET_A, SECRET_B, SECRET_C, SECRET_D, SECRET_E):
         assert secret not in result.output
     payload = json.loads(result.output)
     assert payload["consumer"] == "claim"
     assert payload["network"] == "songbird"
-    assert payload["imported"] == 3
+    assert payload["imported"] == 5
     assert payload["capability_ids"] == [
-        "claim/songbird/ftso-reward",
-        "claim/songbird/fsp-sign",
-        "claim/songbird/fsp-submit",
+        "claim/songbird/ftso-reward-claim",
+        "claim/songbird/uptime-vote-sign",
+        "claim/songbird/reward-distribution-sign",
+        "claim/songbird/uptime-vote-submit",
+        "claim/songbird/reward-distribution-submit",
     ]
     assert payload["env_vars_written"] == [
         "FWD_CALLER_TOKEN",
-        "FSP_SIGN_CALLER_TOKEN",
-        "FSP_SUBMIT_CALLER_TOKEN",
+        "FSP_UPTIME_SIGN_CALLER_TOKEN",
+        "FSP_REWARD_SIGN_CALLER_TOKEN",
+        "FSP_UPTIME_SUBMIT_CALLER_TOKEN",
+        "FSP_REWARD_SUBMIT_CALLER_TOKEN",
     ]
     assert "[bold" not in result.output  # clean JSON, no rich markup
 
@@ -161,7 +175,7 @@ def test_idempotent_rerun_replaces_in_place(monkeypatch, tmp_path):
         {
             "capability_id": c.capability_id,
             "caller_token_env": c.caller_token_env,
-            "caller_token": rotated if c.role == "ftso-reward" else "x",
+            "caller_token": rotated if c.role == "ftso-reward-claim" else "x",
             "wallet_name": c.wallet_name,
         }
         for c in capabilities(s)
@@ -226,7 +240,7 @@ def test_unsupported_version_rejected(monkeypatch, tmp_path):
 def test_caller_token_env_mismatch_rejected(monkeypatch, tmp_path):
     env_dir = tmp_path / "clifdir"
     s = _settings()
-    claim = {c.role: c for c in capabilities(s)}["ftso-reward"]
+    claim = {c.role: c for c in capabilities(s)}["ftso-reward-claim"]
     bad = _bundle(
         caps=[
             {
@@ -286,7 +300,7 @@ def test_non_0600_bundle_rejected(monkeypatch, tmp_path):
 def test_newline_in_token_value_rejected_no_env_injection(monkeypatch, tmp_path):
     # A token value with a newline would inject an extra .env assignment; refuse it.
     env_dir = tmp_path / "clifdir"
-    claim = {c.role: c for c in capabilities(_settings())}["ftso-reward"]
+    claim = {c.role: c for c in capabilities(_settings())}["ftso-reward-claim"]
     bad = _bundle(
         caps=[
             {
@@ -345,7 +359,7 @@ def test_bundle_preserved_on_env_write_failure(monkeypatch, tmp_path):
 
 def test_missing_caller_token_rejected(monkeypatch, tmp_path):
     env_dir = tmp_path / "clifdir"
-    claim = {c.role: c for c in capabilities(_settings())}["ftso-reward"]
+    claim = {c.role: c for c in capabilities(_settings())}["ftso-reward-claim"]
     bad = _bundle(
         caps=[
             {
@@ -408,7 +422,13 @@ CONFIG_OK = {
 
 def _v2_caps(network="songbird"):
     s = _settings(network=network)
-    secret_by_role = {"ftso-reward": SECRET_A, "fsp-sign": SECRET_B, "fsp-submit": SECRET_C}
+    secret_by_role = {
+        "ftso-reward-claim": SECRET_A,
+        "uptime-vote-sign": SECRET_B,
+        "uptime-vote-submit": SECRET_C,
+        "reward-distribution-sign": SECRET_D,
+        "reward-distribution-submit": SECRET_E,
+    }
     return [
         {
             "capability_id": c.capability_id,
@@ -444,8 +464,10 @@ def test_v2_writes_tokens_wallet_envs_and_config(monkeypatch, tmp_path):
     written = _env_lines(env_dir)
     # tokens (per-cap)
     assert written["FWD_CALLER_TOKEN"] == SECRET_A
-    assert written["FSP_SIGN_CALLER_TOKEN"] == SECRET_B
-    assert written["FSP_SUBMIT_CALLER_TOKEN"] == SECRET_C
+    assert written["FSP_UPTIME_SIGN_CALLER_TOKEN"] == SECRET_B
+    assert written["FSP_UPTIME_SUBMIT_CALLER_TOKEN"] == SECRET_C
+    assert written["FSP_REWARD_SIGN_CALLER_TOKEN"] == SECRET_D
+    assert written["FSP_REWARD_SUBMIT_CALLER_TOKEN"] == SECRET_E
     # wallet-envs (per-cap; the NAME is clif's, the value is the bundle's wallet_name)
     assert written["FWD_WALLET_NAME"] == "claimer-songbird"
     assert written["FSP_SIGNING_WALLET_NAME"] == "fsp-sign-songbird"
@@ -464,14 +486,16 @@ def test_v2_json_reports_version_wallet_and_config_names_never_values(monkeypatc
     bundle_path = _write_bundle(tmp_path, _v2_bundle())
     result = _invoke(monkeypatch, bundle_path, env_dir, "--json")
     assert result.exit_code == 0, result.output
-    for secret in (SECRET_A, SECRET_B, SECRET_C):
+    for secret in (SECRET_A, SECRET_B, SECRET_C, SECRET_D, SECRET_E):
         assert secret not in result.output  # never a token value
     payload = json.loads(result.output)
     assert payload["bundle_version"] == 2
     assert payload["env_vars_written"] == [
         "FWD_CALLER_TOKEN",
-        "FSP_SIGN_CALLER_TOKEN",
-        "FSP_SUBMIT_CALLER_TOKEN",
+        "FSP_UPTIME_SIGN_CALLER_TOKEN",
+        "FSP_REWARD_SIGN_CALLER_TOKEN",
+        "FSP_UPTIME_SUBMIT_CALLER_TOKEN",
+        "FSP_REWARD_SUBMIT_CALLER_TOKEN",
     ]
     assert payload["wallet_envs_written"] == [
         "FWD_WALLET_NAME",
@@ -488,11 +512,11 @@ def test_v2_no_token_value_in_console_output(monkeypatch, tmp_path):
     bundle_path = _write_bundle(tmp_path, _v2_bundle())
     result = _invoke(monkeypatch, bundle_path, env_dir)
     assert result.exit_code == 0, result.output
-    for secret in (SECRET_A, SECRET_B, SECRET_C):
+    for secret in (SECRET_A, SECRET_B, SECRET_C, SECRET_D, SECRET_E):
         assert secret not in result.output
     # NAMES + capability_ids ARE reported
     assert "FWD_WALLET_NAME" in result.output
-    assert "claim/songbird/ftso-reward" in result.output
+    assert "claim/songbird/ftso-reward-claim" in result.output
     assert "config: wrote" in result.output
 
 

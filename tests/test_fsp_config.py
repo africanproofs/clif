@@ -9,8 +9,10 @@ def _s(**over) -> Settings:
 
 def test_fsp_fields_default_none_or_false():
     s = _s()
-    assert s.fsp_sign_caller_token is None
-    assert s.fsp_submit_caller_token is None
+    assert s.fsp_uptime_sign_caller_token is None
+    assert s.fsp_uptime_submit_caller_token is None
+    assert s.fsp_reward_sign_caller_token is None
+    assert s.fsp_reward_submit_caller_token is None
     assert s.fsp_auto_enabled is False
     assert s.fsp_signing_wallet_name is None
     assert s.fsp_sender_wallet_name is None
@@ -38,26 +40,31 @@ def test_fsp_terminal_cooldown_default():
 
 
 def test_fsp_fields_distinct_from_claim_fields():
-    """FSP caller tokens and wallet names are separate from the claim path (D14/D15)."""
+    """The four FSP caller tokens and wallet names are separate from the claim path (D14/D15)."""
     s = _s(
         fwd_caller_token="claim-token",
         fwd_wallet_name="claim-wallet",
-        fsp_sign_caller_token="fsp-sign-token",
-        fsp_submit_caller_token="fsp-submit-token",
+        fsp_uptime_sign_caller_token="uptime-sign-token",
+        fsp_uptime_submit_caller_token="uptime-submit-token",
+        fsp_reward_sign_caller_token="reward-sign-token",
+        fsp_reward_submit_caller_token="reward-submit-token",
         fsp_signing_wallet_name="fsp-signing",
         fsp_sender_wallet_name="fsp-sender",
     )
     assert s.fwd_caller_token == "claim-token"
     assert s.fwd_wallet_name == "claim-wallet"
-    assert s.fsp_sign_caller_token == "fsp-sign-token"
-    assert s.fsp_submit_caller_token == "fsp-submit-token"
     assert s.fsp_signing_wallet_name == "fsp-signing"
     assert s.fsp_sender_wallet_name == "fsp-sender"
-    # Both FSP tokens are distinct from the claim token (cross-domain rule, D15)
-    assert s.fsp_sign_caller_token != s.fwd_caller_token
-    assert s.fsp_submit_caller_token != s.fwd_caller_token
-    # The two FSP tokens are distinct from each other
-    assert s.fsp_sign_caller_token != s.fsp_submit_caller_token
+    fsp_tokens = [
+        s.fsp_uptime_sign_caller_token,
+        s.fsp_uptime_submit_caller_token,
+        s.fsp_reward_sign_caller_token,
+        s.fsp_reward_submit_caller_token,
+    ]
+    # Every FSP token is distinct from the claim token (cross-domain rule, D15)
+    assert all(t != s.fwd_caller_token for t in fsp_tokens)
+    # The four FSP tokens are pairwise distinct (least-privilege: one per message-type × leg)
+    assert len(set(fsp_tokens)) == 4
 
 
 def test_fsp_auto_enabled_default_false():

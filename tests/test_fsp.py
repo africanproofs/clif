@@ -26,8 +26,10 @@ SIGNED_RAW = "0xf86c"
 def _settings(**over):
     base = dict(
         network="coston2",
-        fsp_sign_caller_token="fwd_live_fsp_sign",
-        fsp_submit_caller_token="fwd_live_fsp_submit",
+        fsp_uptime_sign_caller_token="fwd_live_uptime_sign",
+        fsp_uptime_submit_caller_token="fwd_live_uptime_submit",
+        fsp_reward_sign_caller_token="fwd_live_reward_sign",
+        fsp_reward_submit_caller_token="fwd_live_reward_submit",
         fsp_signing_wallet_name="fsp-signing-wallet",
         fsp_sender_wallet_name="fsp-sender-wallet",
         fsp_submit_gas=500_000,
@@ -148,9 +150,11 @@ def _patch_fwd_factory(monkeypatch, *, sign_fwd, submit_fwd):
     import clif.fsp as fsp_mod
 
     def factory(endpoint, caller_token, *a, **kw):
-        if caller_token == "fwd_live_fsp_sign":
+        # Per-message-type least-privilege: the sign leg (uptime OR reward) goes to
+        # sign_fwd; the submit leg goes to submit_fwd.
+        if caller_token in ("fwd_live_uptime_sign", "fwd_live_reward_sign"):
             return sign_fwd
-        if caller_token == "fwd_live_fsp_submit":
+        if caller_token in ("fwd_live_uptime_submit", "fwd_live_reward_submit"):
             return submit_fwd
         raise AssertionError(f"unexpected caller_token={caller_token!r}")
 
@@ -161,23 +165,23 @@ def _patch_fwd_factory(monkeypatch, *, sign_fwd, submit_fwd):
 
 
 def test_missing_fsp_sign_caller_token_is_terminal(monkeypatch):
-    s = _settings(fsp_sign_caller_token=None)
+    s = _settings(fsp_uptime_sign_caller_token=None)
     sign_fwd = FakeFwdFsp()
     submit_fwd = FakeFwdFsp()
     _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
     o = run_sign_uptime(s, 0)
     assert o.status == OutcomeStatus.FAILED_TERMINAL
-    assert "FSP_SIGN_CALLER_TOKEN" in o.detail
+    assert "FSP_UPTIME_SIGN_CALLER_TOKEN" in o.detail
 
 
 def test_missing_fsp_submit_caller_token_is_terminal(monkeypatch):
-    s = _settings(fsp_submit_caller_token=None)
+    s = _settings(fsp_uptime_submit_caller_token=None)
     sign_fwd = FakeFwdFsp()
     submit_fwd = FakeFwdFsp()
     _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
     o = run_sign_uptime(s, 0)
     assert o.status == OutcomeStatus.FAILED_TERMINAL
-    assert "FSP_SUBMIT_CALLER_TOKEN" in o.detail
+    assert "FSP_UPTIME_SUBMIT_CALLER_TOKEN" in o.detail
 
 
 def test_missing_fsp_signing_wallet_is_terminal(monkeypatch):
