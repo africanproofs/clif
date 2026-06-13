@@ -157,9 +157,11 @@ def run_sign_uptime(
 ) -> FspOutcome:
     """Orchestrate keyless UPTIME signing: Leg-1 (SIGN caller) + Leg-2 (SUBMIT caller).
 
-    Leg-1 uses fsp_sign_caller_token (fsp_permissions block in fwd — only
-    /v1/sign-fsp-message). Leg-2 uses fsp_submit_caller_token (permissions
-    block — /v1/sign-transaction); clif broadcasts via rpc.py and reports back
+    Leg-1 uses fsp_uptime_sign_caller_token (an fsp_permissions block authorizing
+    ONLY the UPTIME message type — /v1/sign-fsp-message). Leg-2 uses
+    fsp_uptime_submit_caller_token (a permissions block authorizing ONLY
+    FlareSystemsManager.signUptimeVote — /v1/sign-transaction); clif broadcasts
+    via rpc.py and reports back
     via broadcast-result + receipt endpoints. The per-caller split is required
     by the fwd cross-domain policy_path rule (D15 MAJOR-2). The orchestrator
     owns both clients; the CLI no longer builds or passes an FSP FwdClient.
@@ -351,8 +353,9 @@ def run_sign_rewards(
 ) -> FspOutcome:
     """Orchestrate keyless REWARD_DISTRIBUTION signing: fetch rdd → Leg-1 (SIGN) + Leg-2 (SUBMIT).
 
-    Leg-1 uses fsp_sign_caller_token; Leg-2 uses fsp_submit_caller_token with
-    the new sign-transaction + clif-side broadcast + report-back flow. The
+    Leg-1 uses fsp_reward_sign_caller_token (REWARD_DISTRIBUTION only); Leg-2 uses
+    fsp_reward_submit_caller_token (signRewards only) with
+    the sign-transaction + clif-side broadcast + report-back flow. The
     per-caller split is required by the fwd cross-domain policy_path rule (D15
     MAJOR-2).
 
