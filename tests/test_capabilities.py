@@ -23,16 +23,16 @@ def _settings(**kw) -> Settings:
 def test_three_capabilities_with_namespaced_ids():
     caps = capabilities(_settings())
     ids = [c.capability_id for c in caps]
-    assert ids == ["clif/songbird/claim", "clif/songbird/fsp-sign", "clif/songbird/fsp-submit"]
+    assert ids == ["claim/songbird/ftso-reward", "claim/songbird/fsp-sign", "claim/songbird/fsp-submit"]
     assert len(set(ids)) == 3  # immutable, unique join keys
 
 
 def test_capability_id_is_namespaced_per_network():
-    assert capabilities(_settings(network="flare"))[0].capability_id == "clif/flare/claim"
+    assert capabilities(_settings(network="flare"))[0].capability_id == "claim/flare/ftso-reward"
 
 
 def test_claim_pins_recipient_zero_value_rewardmanager():
-    claim = {c.role: c for c in capabilities(_settings())}["claim"]
+    claim = {c.role: c for c in capabilities(_settings())}["ftso-reward"]
     assert claim.endpoint == "/v1/sign-transaction"
     assert claim.value_wei == "0"
     assert claim.recipient_pinned == _RECIP
@@ -78,13 +78,13 @@ def test_spec_json_payload_shape_no_secret_leak(monkeypatch):
     assert result.exit_code == 0, result.output
 
     payload = json.loads(result.output)
-    assert payload["consumer"] == "clif"
+    assert payload["consumer"] == "claim"
     assert payload["network"] == "songbird"
-    assert set(payload["compat"]) == {"fwd_contract_expected", "fwd_client", "clif"}
+    assert set(payload["compat"]) == {"fwd_contract_expected", "fwd_client", "claim"}
     assert [c["capability_id"] for c in payload["capabilities"]] == [
-        "clif/songbird/claim",
-        "clif/songbird/fsp-sign",
-        "clif/songbird/fsp-submit",
+        "claim/songbird/ftso-reward",
+        "claim/songbird/fsp-sign",
+        "claim/songbird/fsp-submit",
     ]
     assert "SUPER-SECRET-TOKEN" not in result.output  # no secret in the emitted artifact
     assert "[bold" not in result.output  # clean JSON, no rich markup

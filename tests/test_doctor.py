@@ -41,20 +41,20 @@ def test_doctor_json_healthy_when_fwd_ready(monkeypatch, tmp_path):
     result = CliRunner().invoke(app, ["doctor", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["consumer"] == "clif"
+    assert payload["consumer"] == "claim"
     assert payload["network"] == "songbird"
     assert payload["ok"] is True
     assert payload["keyless"] is True
-    assert set(payload["compat"]) == {"fwd_contract_expected", "fwd_client", "clif"}
+    assert set(payload["compat"]) == {"fwd_contract_expected", "fwd_client", "claim"}
     assert payload["fwd"]["reachable"] is True and payload["fwd"]["master"] == "ok"
     assert [c["capability_id"] for c in payload["capabilities"]] == [
-        "clif/songbird/claim",
-        "clif/songbird/fsp-sign",
-        "clif/songbird/fsp-submit",
+        "claim/songbird/ftso-reward",
+        "claim/songbird/fsp-sign",
+        "claim/songbird/fsp-submit",
     ]
     # claim has its caller token; FSP tokens unset -> reflects clif's imported view
     by_role = {c["role"]: c["configured"] for c in payload["capabilities"]}
-    assert by_role == {"claim": True, "fsp-sign": False, "fsp-submit": False}
+    assert by_role == {"ftso-reward": True, "fsp-sign": False, "fsp-submit": False}
     # no daemon running in tmp state dir -> informational, not a failure
     assert payload["daemon"]["present"] is False
     assert "TOK-SECRET" not in result.output  # caller-token value never emitted

@@ -182,7 +182,7 @@ def _compat() -> dict:
     return {
         "fwd_contract_expected": FWD_CONTRACT_EXPECTED,
         "fwd_client": fwd_client.__version__,
-        "clif": __version__,
+        "claim": __version__,
     }
 
 
@@ -214,7 +214,7 @@ def doctor(
 
     # Configured = clif holds the caller token (its "imported" view). NAMES only.
     token_by_role = {
-        "claim": s.fwd_caller_token,
+        "ftso-reward": s.fwd_caller_token,
         "fsp-sign": s.fsp_sign_caller_token,
         "fsp-submit": s.fsp_submit_caller_token,
     }
@@ -244,7 +244,7 @@ def doctor(
         print(
             json.dumps(
                 {
-                    "consumer": "clif",
+                    "consumer": "claim",
                     "network": s.network,
                     "ok": overall_ok,
                     "keyless": True,
@@ -298,7 +298,7 @@ def import_credentials_cmd(
 
     Reads a one-shot fwd-emitted bundle (JSON), VALIDATES it against the
     capabilities clif actually requests for the bundle's network
-    (consumer=="clif", not expired, every capability_id governed), then writes
+    (consumer=="claim", not expired, every capability_id governed), then writes
     the credentials into `<env-dir>/.env.<net>` IDEMPOTENTLY (the rotation
     channel — re-mint the same id + re-import to replace in place) and CONSUMES
     (deletes) the bundle.
@@ -324,7 +324,7 @@ def import_credentials_cmd(
     def _fail(reason: str, code: int) -> NoReturn:
         # Machine-readable error on the --json path; rich line otherwise. Never the token.
         if json_output:
-            print(json.dumps({"consumer": "clif", "ok": False, "error": reason, "exit": code}))
+            print(json.dumps({"consumer": "claim", "ok": False, "error": reason, "exit": code}))
         else:
             err.print(f"[bold red]import-credentials: {reason}[/]")
         raise typer.Exit(code)
@@ -360,7 +360,7 @@ def import_credentials_cmd(
         print(
             json.dumps(
                 {
-                    "consumer": "clif",
+                    "consumer": "claim",
                     "network": result.network,
                     "bundle_version": result.version,
                     "env_file": result.env_file,
@@ -446,7 +446,7 @@ def _capability_block(c: Capability) -> str:
     lines.append(f"- method: `{c.method}`")
     if c.value_wei is not None:
         lines.append(f"- value: `{c.value_wei}`")
-    if c.role == "claim":
+    if c.role == "ftso-reward":
         lines.append(
             f"- recipient pinned: `{c.recipient_pinned or '<CLAIM_RECIPIENT_ADDRESS unset>'}`"
         )
@@ -484,7 +484,7 @@ def spec(
     compat = _compat()
     if json_output:
         payload = {
-            "consumer": "clif",
+            "consumer": "claim",
             "network": s.network,
             "compat": compat,
             "capabilities": [asdict(c) for c in caps],
@@ -551,7 +551,7 @@ def spec(
 > operator writes fwd's least-privilege `policy.yaml` and provisions the
 > wallet + caller token. clif never authors fwd policy or mints credentials.
 
-## Capability requests — clif/{s.network} (ADR-0001 §3/§4)
+## Capability requests — claim/{s.network} (ADR-0001 §3/§4)
 
 The custody review for this consumer. Each block is one capability the operator
 approves or rejects; the granted caller token is a secret clif holds, never shown

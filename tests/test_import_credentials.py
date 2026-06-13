@@ -42,7 +42,7 @@ def _bundle(network="songbird", caps=None, **overrides) -> dict:
     """A valid v1 bundle for `network`, granting all of clif's governed capabilities."""
     if caps is None:
         s = _settings(network=network)
-        secret_by_role = {"claim": SECRET_A, "fsp-sign": SECRET_B, "fsp-submit": SECRET_C}
+        secret_by_role = {"ftso-reward": SECRET_A, "fsp-sign": SECRET_B, "fsp-submit": SECRET_C}
         caps = [
             {
                 "capability_id": c.capability_id,
@@ -54,7 +54,7 @@ def _bundle(network="songbird", caps=None, **overrides) -> dict:
         ]
     b = {
         "version": 1,
-        "consumer": "clif",
+        "consumer": "claim",
         "network": network,
         "issued_at": _iso(datetime.now(timezone.utc) - timedelta(minutes=1)),
         "expires_at": _iso(datetime.now(timezone.utc) + timedelta(minutes=10)),
@@ -111,7 +111,7 @@ def test_no_token_value_appears_in_output(monkeypatch, tmp_path):
         assert secret not in result.output  # never log/print a token value
     # but the env var NAMES and capability_ids ARE reported
     assert "FWD_CALLER_TOKEN" in result.output
-    assert "clif/songbird/claim" in result.output
+    assert "claim/songbird/ftso-reward" in result.output
 
 
 def test_no_token_value_appears_in_json_output(monkeypatch, tmp_path):
@@ -122,13 +122,13 @@ def test_no_token_value_appears_in_json_output(monkeypatch, tmp_path):
     for secret in (SECRET_A, SECRET_B, SECRET_C):
         assert secret not in result.output
     payload = json.loads(result.output)
-    assert payload["consumer"] == "clif"
+    assert payload["consumer"] == "claim"
     assert payload["network"] == "songbird"
     assert payload["imported"] == 3
     assert payload["capability_ids"] == [
-        "clif/songbird/claim",
-        "clif/songbird/fsp-sign",
-        "clif/songbird/fsp-submit",
+        "claim/songbird/ftso-reward",
+        "claim/songbird/fsp-sign",
+        "claim/songbird/fsp-submit",
     ]
     assert payload["env_vars_written"] == [
         "FWD_CALLER_TOKEN",
@@ -161,7 +161,7 @@ def test_idempotent_rerun_replaces_in_place(monkeypatch, tmp_path):
         {
             "capability_id": c.capability_id,
             "caller_token_env": c.caller_token_env,
-            "caller_token": rotated if c.role == "claim" else "x",
+            "caller_token": rotated if c.role == "ftso-reward" else "x",
             "wallet_name": c.wallet_name,
         }
         for c in capabilities(s)
@@ -181,7 +181,7 @@ def test_ungoverned_capability_id_rejected(monkeypatch, tmp_path):
     bad = _bundle(
         caps=[
             {
-                "capability_id": "clif/songbird/rogue",
+                "capability_id": "claim/songbird/rogue",
                 "caller_token_env": "FWD_CALLER_TOKEN",
                 "caller_token": SECRET_A,
                 "wallet_name": "x",
@@ -226,7 +226,7 @@ def test_unsupported_version_rejected(monkeypatch, tmp_path):
 def test_caller_token_env_mismatch_rejected(monkeypatch, tmp_path):
     env_dir = tmp_path / "clifdir"
     s = _settings()
-    claim = {c.role: c for c in capabilities(s)}["claim"]
+    claim = {c.role: c for c in capabilities(s)}["ftso-reward"]
     bad = _bundle(
         caps=[
             {
@@ -286,7 +286,7 @@ def test_non_0600_bundle_rejected(monkeypatch, tmp_path):
 def test_newline_in_token_value_rejected_no_env_injection(monkeypatch, tmp_path):
     # A token value with a newline would inject an extra .env assignment; refuse it.
     env_dir = tmp_path / "clifdir"
-    claim = {c.role: c for c in capabilities(_settings())}["claim"]
+    claim = {c.role: c for c in capabilities(_settings())}["ftso-reward"]
     bad = _bundle(
         caps=[
             {
@@ -345,7 +345,7 @@ def test_bundle_preserved_on_env_write_failure(monkeypatch, tmp_path):
 
 def test_missing_caller_token_rejected(monkeypatch, tmp_path):
     env_dir = tmp_path / "clifdir"
-    claim = {c.role: c for c in capabilities(_settings())}["claim"]
+    claim = {c.role: c for c in capabilities(_settings())}["ftso-reward"]
     bad = _bundle(
         caps=[
             {
@@ -386,7 +386,7 @@ def test_json_error_on_rejection_is_machine_readable(monkeypatch, tmp_path):
     assert result.exit_code == 2, result.output
     payload = json.loads(result.output)  # parseable JSON on the error path
     assert payload["ok"] is False
-    assert payload["consumer"] == "clif"
+    assert payload["consumer"] == "claim"
     assert "[bold" not in result.output
 
 
@@ -408,7 +408,7 @@ CONFIG_OK = {
 
 def _v2_caps(network="songbird"):
     s = _settings(network=network)
-    secret_by_role = {"claim": SECRET_A, "fsp-sign": SECRET_B, "fsp-submit": SECRET_C}
+    secret_by_role = {"ftso-reward": SECRET_A, "fsp-sign": SECRET_B, "fsp-submit": SECRET_C}
     return [
         {
             "capability_id": c.capability_id,
@@ -424,7 +424,7 @@ def _v2_bundle(network="songbird", caps=None, config=None, **overrides) -> dict:
     """A valid v2 bundle: per-cap tokens + wallet_name, plus a config section."""
     b = {
         "version": 2,
-        "consumer": "clif",
+        "consumer": "claim",
         "network": network,
         "issued_at": _iso(datetime.now(timezone.utc) - timedelta(minutes=1)),
         "expires_at": _iso(datetime.now(timezone.utc) + timedelta(minutes=10)),
@@ -492,7 +492,7 @@ def test_v2_no_token_value_in_console_output(monkeypatch, tmp_path):
         assert secret not in result.output
     # NAMES + capability_ids ARE reported
     assert "FWD_WALLET_NAME" in result.output
-    assert "clif/songbird/claim" in result.output
+    assert "claim/songbird/ftso-reward" in result.output
     assert "config: wrote" in result.output
 
 

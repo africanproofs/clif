@@ -42,7 +42,7 @@ from clif.config import Settings, capabilities, config_env_allowlist
 
 BUNDLE_VERSION = 2  # the COMPLETE handoff clif emits-against (tokens + wallet-envs + config)
 SUPPORTED_VERSIONS = frozenset({1, 2})  # v1 (tokens-only) still imported for back-compat
-CONSUMER = "clif"
+CONSUMER = "claim"  # ADR-0004: the consumer identity is `claim` (the reward-harvester); was "clif"
 
 
 class BundleError(ValueError):

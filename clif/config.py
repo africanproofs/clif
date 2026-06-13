@@ -260,14 +260,19 @@ class Settings(BaseSettings):
 # --- fwd capability model (ADR-0001 §3) ----------------------------------------
 #
 # clif's per-network fwd capabilities. Each is one immutable, consumer-namespaced
-# capability_id = "clif/<network>/<role>" — the join key across the
+# capability_id = "claim/<network>/<role>" — the join key across the
 # request → grant → handoff → import → reconcile lifecycle. A capability describes
 # the AUTHORIZATION clif requests (endpoint, contract, method, pinned args); the
 # caller TOKEN is a secret clif reads from its env var and is NEVER emitted here.
+#
+# Consumer identity is `claim` (ADR-0004): the reward-harvester. The fsp-sign / fsp-submit
+# roles ride here TRANSITIONALLY — until the `fsp` consumer (keyless flare-system-client)
+# lands, then they migrate to `fsp/<net>/…` and are revoked here. Until then they keep
+# live FSP signing working (dropping them now would halt it; `fsp` does not exist yet).
 
 # Suggested per-role rate ceilings — REQUEST ONLY (fwd policy is authoritative).
 _SUGGESTED_RATE = {
-    "claim": "8/day",  # claims fire ~once per ~3.5-day reward epoch per type
+    "ftso-reward": "8/day",  # claims fire ~once per ~3.5-day reward epoch per type
     "fsp-sign": "16/day",
     "fsp-submit": "16/day",
 }
@@ -301,8 +306,8 @@ def capabilities(settings: Settings) -> list[Capability]:
     n = settings.network
     return [
         Capability(
-            capability_id=f"clif/{n}/claim",
-            role="claim",
+            capability_id=f"claim/{n}/ftso-reward",
+            role="ftso-reward",
             endpoint="/v1/sign-transaction",
             caller_token_env="FWD_CALLER_TOKEN",
             wallet_env="FWD_WALLET_NAME",
@@ -312,10 +317,10 @@ def capabilities(settings: Settings) -> list[Capability]:
             method=_CLAIM_METHOD,
             value_wei="0",
             recipient_pinned=settings.claim_recipient_address,
-            suggested_rate=_SUGGESTED_RATE["claim"],
+            suggested_rate=_SUGGESTED_RATE["ftso-reward"],
         ),
         Capability(
-            capability_id=f"clif/{n}/fsp-sign",
+            capability_id=f"claim/{n}/fsp-sign",
             role="fsp-sign",
             endpoint="/v1/sign-fsp-message",
             caller_token_env="FSP_SIGN_CALLER_TOKEN",
@@ -329,7 +334,7 @@ def capabilities(settings: Settings) -> list[Capability]:
             suggested_rate=_SUGGESTED_RATE["fsp-sign"],
         ),
         Capability(
-            capability_id=f"clif/{n}/fsp-submit",
+            capability_id=f"claim/{n}/fsp-submit",
             role="fsp-submit",
             endpoint="/v1/sign-transaction",
             caller_token_env="FSP_SUBMIT_CALLER_TOKEN",
