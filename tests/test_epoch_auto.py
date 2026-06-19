@@ -96,6 +96,7 @@ def _drive(rpc, **kw):
         initial_delay=kw.pop("initial_delay", 3600),
         epoch_end_ts=kw.pop("epoch_end_ts", lambda _e: rpc.end_ts),
         our_signed_fn=kw.pop("our_signed_fn", None),
+        retry_counts=kw.pop("retry_counts", None),
     )
 
 
@@ -371,3 +372,56 @@ def test_build_disabled_report_shape():
     assert rep["network"] == "songbird"
     assert rep["updated_at_ts"] == 42.0
     assert rep["epochs"] == []
+
+
+# --- reward-sign idempotency retry-token bump (durable nonce-wedge fix) -------
+
+def test_sign_retry_token_helper():
+    from clif.epoch_auto import _sign_retry_token
+    assert _sign_retry_token(None, 0) is None
+    assert _sign_retry_token("base", 0) == "base"
+    assert _sign_retry_token(None, 1) == "r1"
+    assert _sign_retry_token("base", 2) == "base-r2"
+
+
+def test_retryable_reward_sign_bumps_retry_count_and_token(monkeypatch):
+    """A FAILED_RETRYABLE reward-sign bumps the per-epoch count, and the NEXT
+    attempt re-signs under a fresh idempotency key (the wedge self-heals)."""
+    seen_retry = []
+    seq = [
+        _fsp(OutcomeStatus.FAILED_RETRYABLE, "broadcast rejected (nonce too low)"),
+        _fsp(OutcomeStatus.SUBMITTED_MINED),
+    ]
+
+    def fake_sign(*_a, **kw):
+        seen_retry.append(kw.get("retry"))
+        return seq.pop(0)
+
+    monkeypatch.setattr(ea, "get_reward_distribution_data", lambda *_a, **_k: object())
+    monkeypatch.setattr(ea, "run_sign_rewards", fake_sign)
+    rpc = FakeRpc(end_ts=1_000)
+    rc: dict[int, int] = {}
+
+    # cycle 1: retryable → count bumped to 1, still awaiting finalization (not terminal)
+    obs1 = _drive(rpc, now=10_000, retry_counts=rc)
+    assert obs1.phase is Phase.REWARD_SIGN and not obs1.done and not obs1.terminal
+    assert rc[5] == 1
+    assert seen_retry[0] is None  # first attempt used the base (default) token
+
+    # cycle 2: re-signs under the bumped token, succeeds
+    obs2 = _drive(rpc, now=10_000, retry_counts=rc)
+    assert obs2.phase is Phase.REWARD_SIGN and not obs2.done
+    assert seen_retry[1] == "r1"  # fresh key on the re-attempt
+
+
+def test_persistent_retryable_reward_sign_goes_terminal(monkeypatch):
+    """If fresh keys don't help (persistent fwd-nonce drift), it surfaces terminal
+    with a nonce-sync hint rather than looping silently forever."""
+    _patch(monkeypatch, sign=_fsp(OutcomeStatus.FAILED_RETRYABLE, "nonce too low"))
+    rpc = FakeRpc(end_ts=1_000)
+    rc: dict[int, int] = {}
+    obs = None
+    for _ in range(3):
+        obs = _drive(rpc, now=10_000, retry_counts=rc)
+    assert obs.terminal and obs.phase is Phase.REWARD_SIGN
+    assert "nonce-sync" in obs.detail

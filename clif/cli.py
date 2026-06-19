@@ -1806,6 +1806,11 @@ def epoch_run(
         # narration scan is incremental (immutable weights/total/threshold fetched
         # once; only new blocks + new signers cost RPC calls each cycle).
         prog_cache: dict = {}
+        # In-memory {epoch: reward-sign retry count}, persists across cycles for the
+        # daemon's lifetime. Bumps the leg-2 idempotency discriminator on a retryable
+        # failure so a transient nonce-too-low self-heals next cycle instead of
+        # wedging the epoch on a dead key (epoch_auto._sign_retry_token).
+        retry_counts: dict[int, int] = {}
         try:
             while True:
                 now = time.time()
@@ -1857,6 +1862,7 @@ def epoch_run(
                             terminal_cooldown=s.epoch_terminal_cooldown_sec,
                             epoch_end_ts=epoch_end_ts,
                             our_signed_fn=_our_signed,
+                            retry_counts=retry_counts,
                         )
                         for o in observations:
                             acts = "".join(f" [{leg}={st}]" for leg, st, _ in o.actions)

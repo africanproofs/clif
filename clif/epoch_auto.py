@@ -50,6 +50,30 @@ _CLAIM_DONE = {
     OutcomeStatus.NOTHING_CLAIMABLE,
 }
 
+# Max idempotency-key bumps for one epoch's reward-sign before flagging it terminal.
+# Each bump is a FRESH leg-2 attempt: a transient nonce-too-low self-heals in one
+# (fwd re-signs at its corrected nonce instead of replaying the wedged stale-nonce
+# tx); a PERSISTENT fwd-nonce drift won't, so we surface it for an operator
+# `clifctl nonce-sync` rather than loop silently forever. Counts are in-memory
+# (reset on restart) — chain truth (our_signed_fn / getVoterRewardsSignInfo) remains
+# the double-submit guard, so a reset can never cause a double-sign.
+_MAX_REWARD_SIGN_RETRIES = 3
+
+
+def _sign_retry_token(base: str | None, count: int) -> str | None:
+    """Idempotency discriminator for the reward-sign legs.
+
+    count == 0 → ``base`` unchanged (a fresh epoch signs under the configured /
+    default key). count > 0 → append a per-attempt suffix so a re-sign AFTER a
+    retryable failure gets a NEW fwd idempotency key, instead of fwd replaying the
+    cached stale-nonce tx (`sign-transaction-duplicate` → nonce-too-low) or denying
+    `idempotency_key_body_mismatch`. The per-epoch key already varies by epoch, so
+    this only matters for re-attempting the SAME wedged epoch.
+    """
+    if count <= 0:
+        return base
+    return f"{base}-r{count}" if base else f"r{count}"
+
 
 class Phase(str, Enum):
     REWARD_WAIT = "reward-wait"  # too early, or rewards not yet published
@@ -105,8 +129,14 @@ def drive_epoch(
     initial_delay: int,
     epoch_end_ts: Callable[[int], int],
     our_signed_fn: Callable[[int], bool] | None = None,
+    retry_counts: dict[int, int] | None = None,
 ) -> EpochObs:
     """Advance a single closed reward epoch through its phases (one cycle).
+
+    `retry_counts` is a caller-owned, in-memory {epoch: reward-sign retry count}
+    map (persists across cycles for the daemon's lifetime). On a retryable
+    reward-sign failure the count is bumped so the next cycle re-signs under a
+    FRESH idempotency key (escaping a wedged stale-nonce tx); see _sign_retry_token.
 
     `our_signed_fn(epoch) -> bool` is an optional chain-truth check (RewardsSigned
     events) for "have WE already signed rewards for this epoch", used only when the
@@ -114,6 +144,7 @@ def drive_epoch(
     behaviour (assume not-signed on revert)."""
     fsm = settings.net.flare_systems_manager
     actions: list[tuple[str, str, str]] = []
+    rc = retry_counts if retry_counts is not None else {}
 
     # --- UPTIME phase (gated OFF by default; independent of rewards/claim) ---
     if uptime_enabled:
@@ -158,7 +189,13 @@ def drive_epoch(
             )
         if get_reward_distribution_data(settings, epoch) is None:
             return EpochObs(epoch, Phase.REWARD_WAIT, "rewards not yet published", actions=actions)
-        ro = run_sign_rewards(settings, epoch, wait=True, rpc=rpc)
+        ro = run_sign_rewards(
+            settings,
+            epoch,
+            wait=True,
+            rpc=rpc,
+            retry=_sign_retry_token(settings.fsp_idempotency_retry, rc.get(epoch, 0)),
+        )
         actions.append(("rewards", ro.status.value, ro.detail))
         if ro.status == OutcomeStatus.FAILED_TERMINAL:
             return EpochObs(
@@ -171,7 +208,24 @@ def drive_epoch(
         if ro.status == OutcomeStatus.ALREADY_FINALIZED:
             finalized = True  # network finalized before us → fall through to claim
         else:
-            # signed / pending / transient → wait for the network to finalize
+            # signed / pending / transient → wait for the network to finalize.
+            # On a RETRYABLE failure, bump this epoch's idempotency discriminator so
+            # the next cycle re-signs under a FRESH key (escaping a wedged stale-nonce
+            # tx) rather than looping forever on the dead key. Bounded: a persistent
+            # fwd-nonce drift can't be fixed by a fresh key (clif is keyless, can't
+            # resync fwd's nonce) → surface it terminal for an operator nonce-sync.
+            if ro.status == OutcomeStatus.FAILED_RETRYABLE:
+                n = rc.get(epoch, 0) + 1
+                rc[epoch] = n
+                if n >= _MAX_REWARD_SIGN_RETRIES:
+                    return EpochObs(
+                        epoch,
+                        Phase.REWARD_SIGN,
+                        f"reward sign failed-retryable x{n} despite fresh idempotency keys — "
+                        f"likely fwd nonce drift; run `clifctl nonce-sync {settings.network}`",
+                        terminal=True,
+                        actions=actions,
+                    )
             return EpochObs(
                 epoch,
                 Phase.REWARD_SIGN,
@@ -223,6 +277,7 @@ def run_cycle(
     terminal_cooldown: int,
     epoch_end_ts: Callable[[int], int],
     our_signed_fn: Callable[[int], bool] | None = None,
+    retry_counts: dict[int, int] | None = None,
 ) -> tuple[int | None, int, list[EpochObs]]:
     """One poll cycle: process all closed-but-unhandled epochs (oldest first).
 
@@ -272,6 +327,7 @@ def run_cycle(
             initial_delay=initial_delay,
             epoch_end_ts=epoch_end_ts,
             our_signed_fn=our_signed_fn,
+            retry_counts=retry_counts,
         )
         observations.append(obs)
         if obs.terminal:
