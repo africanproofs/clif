@@ -330,8 +330,8 @@ def test_sleep_floor_when_overdue():
 # ---- daemon log narrative helpers (v0.5.22) ----
 
 def test_fmt_ts_utc():
-    assert ea._fmt_ts(0) == "1970-01-01T00:00:00Z"
-    assert ea._fmt_ts(3661) == "1970-01-01T01:01:01Z"
+    assert ea._fmt_ts(0) == "1970-01-01T00:00:00 UTC"
+    assert ea._fmt_ts(3661) == "1970-01-01T01:01:01 UTC"
 
 
 def test_fmt_dur_buckets():
@@ -346,22 +346,34 @@ def test_fmt_dur_buckets():
 def test_schedule_line_idle_names_next_window():
     end = make_epoch_end_ts(0, 1000)  # end(7) = 8000
     obs = [EpochObs(7, Phase.DONE, "done", done=True)]
+    line = ea.schedule_line(obs, 7, end, now=1000.0, poll_interval=1800, initial_delay=100, last_done=6)
+    # explicit about status so a stale snapshot never reads as "behind"
+    assert "idle — caught up (signed through epoch 6)" in line
+    assert "current open epoch 7" in line
+    assert "after it closes" in line
+    assert ea._fmt_ts(8100.0) in line  # end(7)=8000 + initial_delay 100; '... UTC'
+    assert "UTC" in line and "(in " in line
+
+
+def test_schedule_line_idle_without_last_done_omits_through():
+    end = make_epoch_end_ts(0, 1000)
+    obs = [EpochObs(7, Phase.DONE, "done", done=True)]
     line = ea.schedule_line(obs, 7, end, now=1000.0, poll_interval=1800, initial_delay=100)
-    assert "idle — caught up" in line
-    assert ea._fmt_ts(8100.0) in line  # end(7)=8000 + initial_delay 100
-    assert "(in " in line
+    assert "idle — caught up;" in line and "signed through" not in line
 
 
 def test_schedule_line_too_early_uses_wait_until():
     obs = [EpochObs(5, Phase.REWARD_WAIT, "holding", wait_until=10_500.0)]
-    line = ea.schedule_line(obs, 5, lambda _e: 0, now=10_000.0, poll_interval=1800, initial_delay=3600)
-    assert "epoch 5 reward-wait" in line
+    line = ea.schedule_line(obs, 6, lambda _e: 0, now=10_000.0, poll_interval=1800, initial_delay=3600)
+    # the signed epoch (5) is CLOSED; the live chain epoch (6) is shown alongside
+    assert "epoch 5 (closed; chain at 6) reward-wait" in line
     assert "actionable " + ea._fmt_ts(10_500.0) in line
 
 
 def test_schedule_line_polling_uses_poll_interval():
     obs = [EpochObs(5, Phase.CLAIM_WAIT, "awaiting finalization")]  # wait_until None
-    line = ea.schedule_line(obs, 5, lambda _e: 0, now=10_000.0, poll_interval=1800, initial_delay=3600)
+    line = ea.schedule_line(obs, 6, lambda _e: 0, now=10_000.0, poll_interval=1800, initial_delay=3600)
+    assert "epoch 5 (closed; chain at 6) claim-wait" in line
     assert "next check " + ea._fmt_ts(11_800.0) in line  # now + poll_interval
 
 

@@ -432,8 +432,9 @@ def next_sleep_seconds(
 
 
 def _fmt_ts(ts: float) -> str:
-    """UNIX ts → 'YYYY-MM-DDTHH:MM:SSZ' (UTC, second precision) — matches the log clock."""
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """UNIX ts → 'YYYY-MM-DDTHH:MM:SS UTC' (UTC, second precision) — matches the log clock.
+    UTC is spelled out (not 'Z') so a glance can't misread it against a local wall clock."""
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
 
 
 def _fmt_dur(seconds: float) -> str:
@@ -459,31 +460,38 @@ def schedule_line(
     *,
     poll_interval: int,
     initial_delay: int,
+    last_done: int | None = None,
 ) -> str:
     """One-line 'what to expect and when' for the daemon log: what each active epoch is
     waiting for + the ABSOLUTE next-action time + a countdown. Mirrors next_sleep_seconds'
-    wake logic so the narrative and the actual sleep agree."""
+    wake logic so the narrative and the actual sleep agree.
+
+    Phrasing is explicit about epoch status so a stale snapshot never *looks* behind: clif
+    signs the just-CLOSED epoch, so when idle it's waiting on the current OPEN epoch to close,
+    and `current_epoch` is shown so it reconciles against a live `getCurrentRewardEpoch` glance."""
     active = [o for o in observations if not o.done]
     if not active:
         if current_epoch is None:
             return f"idle — no current epoch resolved yet; re-checking in {_fmt_dur(poll_interval)}"
         wake = float(epoch_end_ts(current_epoch) + initial_delay)
+        through = f" (signed through epoch {last_done})" if last_done is not None else ""
         return (
-            f"idle — caught up; next reward window (epoch {current_epoch} end +{initial_delay}s) "
-            f"opens {_fmt_ts(wake)} (in {_fmt_dur(wake - now)})"
+            f"idle — caught up{through}; current open epoch {current_epoch} — its reward window "
+            f"opens {_fmt_ts(wake)} (in {_fmt_dur(wake - now)}) after it closes"
         )
     parts: list[str] = []
+    chain = f"chain at {current_epoch}" if current_epoch is not None else "chain epoch unknown"
     for o in active:
         if o.wait_until is not None:
             parts.append(
-                f"epoch {o.epoch} {o.phase.value} — {o.detail}; actionable {_fmt_ts(o.wait_until)} "
-                f"(in {_fmt_dur(o.wait_until - now)})"
+                f"epoch {o.epoch} (closed; {chain}) {o.phase.value} — {o.detail}; "
+                f"actionable {_fmt_ts(o.wait_until)} (in {_fmt_dur(o.wait_until - now)})"
             )
         else:
             nxt = now + poll_interval
             parts.append(
-                f"epoch {o.epoch} {o.phase.value} — {o.detail}; polling, next check "
-                f"{_fmt_ts(nxt)} (in {_fmt_dur(poll_interval)})"
+                f"epoch {o.epoch} (closed; {chain}) {o.phase.value} — {o.detail}; "
+                f"polling, next check {_fmt_ts(nxt)} (in {_fmt_dur(poll_interval)})"
             )
     return " | ".join(parts)
 

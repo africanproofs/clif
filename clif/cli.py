@@ -86,7 +86,7 @@ logging.Formatter.converter = (
 )  # all clif log timestamps in UTC (match on-chain/epoch times)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)sZ %(levelname)s clif %(message)s",
+    format="%(asctime)s UTC %(levelname)s clif %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 # httpx/httpcore log one INFO "HTTP Request: …" line per RPC call. The epoch daemon
@@ -1965,6 +1965,7 @@ def epoch_run(
                                 _now2,
                                 poll_interval=iv,
                                 initial_delay=s.epoch_reward_initial_delay_sec,
+                                last_done=last_done,
                             ),
                         )
                 except RpcError as exc:
