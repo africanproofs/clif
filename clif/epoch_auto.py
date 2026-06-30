@@ -473,11 +473,16 @@ def schedule_line(
     if not active:
         if current_epoch is None:
             return f"idle — no current epoch resolved yet; re-checking in {_fmt_dur(poll_interval)}"
-        wake = float(epoch_end_ts(current_epoch) + initial_delay)
+        end = float(epoch_end_ts(current_epoch))
+        wake = end + initial_delay  # poll-START heuristic (mirrors next_sleep_seconds), NOT
+        # when rewards are available: the reward data publishes later (during the next epoch,
+        # off-chain, unpredictable), so we narrate the epoch END + the poll-start, never claim
+        # a "reward window opens" time we can't know.
         through = f" (signed through epoch {last_done})" if last_done is not None else ""
         return (
-            f"idle — caught up{through}; current open epoch {current_epoch} — its reward window "
-            f"opens {_fmt_ts(wake)} (in {_fmt_dur(wake - now)}) after it closes"
+            f"idle — caught up{through}; epoch {current_epoch} (open) ends {_fmt_ts(end)} "
+            f"(in {_fmt_dur(end - now)}); clif then polls for its rewards from {_fmt_ts(wake)} "
+            f"and signs once published"
         )
     parts: list[str] = []
     chain = f"chain at {current_epoch}" if current_epoch is not None else "chain epoch unknown"

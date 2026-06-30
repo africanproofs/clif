@@ -349,9 +349,12 @@ def test_schedule_line_idle_names_next_window():
     line = ea.schedule_line(obs, 7, end, now=1000.0, poll_interval=1800, initial_delay=100, last_done=6)
     # explicit about status so a stale snapshot never reads as "behind"
     assert "idle — caught up (signed through epoch 6)" in line
-    assert "current open epoch 7" in line
-    assert "after it closes" in line
-    assert ea._fmt_ts(8100.0) in line  # end(7)=8000 + initial_delay 100; '... UTC'
+    # the EPOCH END (real boundary) is shown, not just the poll-start
+    assert "epoch 7 (open) ends " + ea._fmt_ts(8000.0) in line  # end(7)=8000
+    # the poll-start (end+delay) is labeled as polling, NOT "reward window opens"
+    assert "polls for its rewards from " + ea._fmt_ts(8100.0) in line  # 8000 + delay 100
+    assert "signs once published" in line
+    assert "reward window opens" not in line
     assert "UTC" in line and "(in " in line
 
 
@@ -360,6 +363,7 @@ def test_schedule_line_idle_without_last_done_omits_through():
     obs = [EpochObs(7, Phase.DONE, "done", done=True)]
     line = ea.schedule_line(obs, 7, end, now=1000.0, poll_interval=1800, initial_delay=100)
     assert "idle — caught up;" in line and "signed through" not in line
+    assert "epoch 7 (open) ends " in line
 
 
 def test_schedule_line_too_early_uses_wait_until():
