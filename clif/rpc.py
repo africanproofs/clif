@@ -22,6 +22,7 @@ loop would add plumbing without benefit (Behavioural guideline 2).
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, cast
@@ -56,10 +57,26 @@ def _bytes20_to_cb58(b: bytes) -> str:
 _GAS_BUFFER = 1.25
 # Tip: 1 gwei (in wei) — conservative default.
 _DEFAULT_TIP_WEI = 1_000_000_000
-# Sanity ceiling: if computed max_fee exceeds this, cap it.
-# Keeps clif comfortably under fwd's FWD_MAX_FEE_PER_GAS default (500 gwei).
-_MAX_FEE_CAP_WEI = 300_000_000_000  # 300 gwei
+# Sanity ceiling: if computed max_fee exceeds this, cap it. Must stay at or under
+# fwd's FWD_MAX_FEE_PER_GAS, which rejects `max_fee > cap`.
+#
+# The cap is per-network, because a chain's minimum base fee is a chain property:
+# Songbird's floor is 500 gwei (raised from 1 wei on 2026-07-07), so a 300 gwei
+# cap makes every Songbird broadcast unsendable. Set CLIF_MAX_FEE_PER_GAS_WEI per
+# daemon; the default suits a near-zero base fee.
+_DEFAULT_MAX_FEE_CAP_WEI = 300_000_000_000  # 300 gwei
 _MAX_GAS_CAP = 10_000_000  # 10M — well under fwd's FWD_MAX_GAS default (15M)
+
+
+def _max_fee_cap_wei() -> int:
+    """Fee ceiling, overridable per network via CLIF_MAX_FEE_PER_GAS_WEI."""
+    raw = os.getenv("CLIF_MAX_FEE_PER_GAS_WEI")
+    if not raw:
+        return _DEFAULT_MAX_FEE_CAP_WEI
+    value = int(raw)
+    if value <= 0:
+        raise ValueError(f"CLIF_MAX_FEE_PER_GAS_WEI must be positive, got {value}")
+    return value
 
 
 class RpcError(RuntimeError):
@@ -194,7 +211,9 @@ class RpcClient:
     def suggest_fees(self) -> tuple[int, int]:
         """eth_feeHistory → (max_fee_per_gas, max_priority_fee_per_gas) in wei.
 
-        Strategy: baseFee × 2 + tip (1 gwei), capped at _MAX_FEE_CAP_WEI.
+        Strategy: baseFee × 2 + tip (1 gwei), capped at the per-network ceiling.
+        Raises RpcError when the cap cannot cover baseFee + tip, rather than
+        emitting a transaction the chain is certain to reject as underpriced.
         Returns (max_fee_per_gas, max_priority_fee_per_gas).
         """
         result = self._call("eth_feeHistory", [4, "latest", []])
@@ -207,7 +226,15 @@ class RpcClient:
             latest_base = _DEFAULT_TIP_WEI  # fallback
 
         tip = _DEFAULT_TIP_WEI
-        max_fee = min(latest_base * 2 + tip, _MAX_FEE_CAP_WEI)
+        cap = _max_fee_cap_wei()
+        if latest_base + tip > cap:
+            raise RpcError(
+                f"base fee {latest_base} wei + tip {tip} wei exceeds the fee cap "
+                f"{cap} wei; the chain would reject this as underpriced. Raise "
+                f"CLIF_MAX_FEE_PER_GAS_WEI to at least {latest_base * 2 + tip} "
+                f"wei (and fwd's FWD_MAX_FEE_PER_GAS to match)."
+            )
+        max_fee = min(latest_base * 2 + tip, cap)
         # max_priority must not exceed max_fee
         max_priority = min(tip, max_fee)
         return max_fee, max_priority
