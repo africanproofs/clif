@@ -98,3 +98,23 @@ def test_epoch_status_json_no_daemon_state(monkeypatch, tmp_path):
     assert payload["exit_code"] == 3
     assert payload["report"] is None
     assert "[bold" not in result.output  # clean JSON, no rich markup
+
+
+def test_compat_keys_match_doctor_text_output():
+    """Regression: doctor's human-readable branch read `c['clif']` but `_compat()`
+    emits `claim` — every text-mode `clif doctor` died with KeyError, and Typer's
+    default rich traceback then dumped the caller BEARER TOKENS to the terminal
+    (observed live 2026-07-24). Pin the key names."""
+    from clif.cli import _compat
+
+    c = _compat()
+    assert set(c) == {"fwd_contract_expected", "fwd_client", "claim"}
+
+
+def test_typer_apps_do_not_dump_locals():
+    """Locals-dumping tracebacks leak caller tokens — must stay off on every app."""
+    from clif import cli
+
+    for name in ("app", "fsp_app", "chain_app", "epoch_app"):
+        a = getattr(cli, name)
+        assert a.pretty_exceptions_show_locals is False, name

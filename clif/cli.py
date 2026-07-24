@@ -99,6 +99,9 @@ log = logging.getLogger("clif")
 
 app = typer.Typer(
     add_completion=False,
+    # Typer defaults to rich tracebacks WITH LOCALS, which dump caller bearer
+    # tokens to the terminal on any uncaught error (observed live 2026-07-24).
+    pretty_exceptions_show_locals=False,
     help=(
         "Keyless FTSO reward claimer + FSP signing-tool — signs via the fwd daemon. "
         "Canonical daemon: epoch run / epoch status (per-epoch sign→claim). "
@@ -108,6 +111,7 @@ app = typer.Typer(
 
 fsp_app = typer.Typer(
     add_completion=False,
+    pretty_exceptions_show_locals=False,
     help=(
         "Keyless FSP signing-tool — fwd signs the FSP message/tx; clif broadcasts "
         "and reports back. clif holds zero keys."
@@ -117,12 +121,14 @@ app.add_typer(fsp_app, name="fsp")
 
 chain_app = typer.Typer(
     add_completion=False,
+    pretty_exceptions_show_locals=False,
     help="Keyless chain reads (nonce, ...). No keys; public RPC reads only.",
 )
 app.add_typer(chain_app, name="chain")
 
 epoch_app = typer.Typer(
     add_completion=False,
+    pretty_exceptions_show_locals=False,
     help=(
         "Epoch-anchored sign→claim daemon (replaces `auto` + `fsp auto`). "
         "`epoch run` is the daemon; `epoch status` is the monitoring health."
@@ -315,7 +321,7 @@ def doctor(
     c = _compat()
     console.print(
         f"  compat   : fwd_contract={c['fwd_contract_expected']} "
-        f"fwd_client={c['fwd_client']} clif={c['clif']}"
+        f"fwd_client={c['fwd_client']} clif={c['claim']}"
     )
     raise typer.Exit(code)
 
