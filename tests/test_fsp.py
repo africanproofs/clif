@@ -502,6 +502,73 @@ def test_uptime_already_signed_revert_is_already_finalized(monkeypatch):
     assert "not a fault" in o.detail
 
 
+# ---- ALREADY_SIGNED: the contract's per-voter duplicate guard ----
+# Live regression: Flare epoch 417 (2026-07-24). The VoterRegistry moved, so the
+# "have we already signed?" guard went blind and the daemon re-signed every cycle;
+# the resulting "voter already signed" revert was classified FAILED_TERMINAL, which
+# wedged the epoch in cooldown and SKIPPED THE CLAIM. It must be benign — and it
+# must NOT imply finalization (417's rewardsHash was still zero).
+
+
+def test_rewards_voter_already_signed_revert_is_already_signed(monkeypatch):
+    """status=0x0 + reason='voter already signed' → ALREADY_SIGNED, not TERMINAL."""
+    rpc = FakeRpc(
+        poll_receipt_result={"status": "0x0", "blockNumber": "0x1", "logs": []},
+        revert_reason="voter already signed",
+    )
+    sign_fwd = FakeFwdFsp(sign_fsp=SIG)
+    submit_fwd = FakeFwdFsp(sign_tx=SIGN_TX_RESP)
+    _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
+    monkeypatch.setattr("clif.fsp.get_reward_distribution_data", lambda *_: RDD)
+    o = run_sign_rewards(_settings(), 3, rpc=rpc)
+    assert o.status == OutcomeStatus.ALREADY_SIGNED
+    assert o.ok is True
+    assert o.status != OutcomeStatus.FAILED_TERMINAL
+    assert "our vote is on-chain" in o.detail
+    # Must NOT claim the network finalized — the epoch may still be below threshold.
+    assert "finalized by the network" not in o.detail
+
+
+def test_uptime_voter_already_signed_revert_is_already_signed(monkeypatch):
+    """The per-voter guard is shared by signUptimeVote."""
+    rpc = FakeRpc(
+        poll_receipt_result={"status": "0x0", "blockNumber": "0x1", "logs": []},
+        revert_reason="voter already signed",
+    )
+    sign_fwd = FakeFwdFsp(sign_fsp=SIG)
+    submit_fwd = FakeFwdFsp(sign_tx=SIGN_TX_RESP)
+    _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
+    o = run_sign_uptime(_settings(), 0, rpc=rpc)
+    assert o.status == OutcomeStatus.ALREADY_SIGNED
+    assert o.ok is True
+
+
+def test_already_signed_in_ok_set():
+    from clif.claimer import _OK
+
+    assert OutcomeStatus.ALREADY_SIGNED in _OK
+
+
+def test_already_signed_is_distinct_from_already_finalized():
+    """The two benign guards must stay distinct: ALREADY_FINALIZED falls through to
+    the claim, ALREADY_SIGNED must keep awaiting finalization."""
+    assert OutcomeStatus.ALREADY_SIGNED != OutcomeStatus.ALREADY_FINALIZED
+
+
+def test_unknown_revert_still_terminal(monkeypatch):
+    """Safe default preserved: an unrecognised revert stays FAILED_TERMINAL."""
+    rpc = FakeRpc(
+        poll_receipt_result={"status": "0x0", "blockNumber": "0x1", "logs": []},
+        revert_reason="some brand new guard",
+    )
+    sign_fwd = FakeFwdFsp(sign_fsp=SIG)
+    submit_fwd = FakeFwdFsp(sign_tx=SIGN_TX_RESP)
+    _patch_fwd_factory(monkeypatch, sign_fwd=sign_fwd, submit_fwd=submit_fwd)
+    monkeypatch.setattr("clif.fsp.get_reward_distribution_data", lambda *_: RDD)
+    o = run_sign_rewards(_settings(), 3, rpc=rpc)
+    assert o.status == OutcomeStatus.FAILED_TERMINAL
+
+
 def test_other_revert_reason_stays_failed_terminal(monkeypatch):
     """status=0x0 + unrecognized revert reason → FAILED_TERMINAL with reason appended."""
     rpc = FakeRpc(

@@ -64,6 +64,10 @@ _DEFAULT_TIP_WEI = 1_000_000_000
 # Songbird's floor is 500 gwei (raised from 1 wei on 2026-07-07), so a 300 gwei
 # cap makes every Songbird broadcast unsendable. Set CLIF_MAX_FEE_PER_GAS_WEI per
 # daemon; the default suits a near-zero base fee.
+# FlareContractRegistry — the same immutable address on every Flare-family network
+# (flare, songbird, coston2). The chain's own directory of protocol contracts.
+FLARE_CONTRACT_REGISTRY = "0xaD67FE66660Fb8dFE9d6b1b4240d8650e30F6019"
+
 _DEFAULT_MAX_FEE_CAP_WEI = 300_000_000_000  # 300 gwei
 _MAX_GAS_CAP = 10_000_000  # 10M — well under fwd's FWD_MAX_GAS default (15M)
 
@@ -554,6 +558,21 @@ class RpcClient:
         data = "0x" + selector("signingPolicyThresholdPPM()").hex()
         (out,) = self._abi_decode(["uint24"], self.eth_call(flare_systems_manager, data))
         return int(out)
+
+    def contract_address_by_name(self, name: str) -> str:
+        """FlareContractRegistry.getContractAddressByName(string) → address.
+
+        The registry is the chain's own source of truth for protocol contract
+        addresses, which the Flare Foundation re-deploys from time to time (the
+        VoterRegistry moved on both mainnets in July 2026). Keyless read; used to
+        detect drift against clif's pinned addresses. Returns the zero address if
+        the registry does not know the name.
+        """
+        data = "0x" + selector("getContractAddressByName(string)").hex() + abi_encode(
+            ["string"], [name]
+        ).hex()
+        (out,) = self._abi_decode(["address"], self.eth_call(FLARE_CONTRACT_REGISTRY, data))
+        return str(out)
 
     def get_revert_reason(self, tx_hash: str) -> str | None:
         """Attempt to decode the revert reason for a mined-reverted tx by replaying it.

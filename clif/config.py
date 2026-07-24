@@ -47,7 +47,7 @@ _NETWORKS: dict[str, NetworkConfig] = {
         flare_systems_manager="0x89e50DC0380e597ecE79c8494bAAFD84537AD0D4",
         claim_setup_manager="0xD56c0Ea37B848939B59e6F5Cda119b3fA473b5eB",
         entity_manager="0x134b3311C6BdeD895556807a30C7f047D99DfdC2",
-        voter_registry="0x2580101692366e2f331e891180d9ffdF861Fce83",
+        voter_registry="0xA480457953Af3583E54DCd630b219353B8FC9Af7",
         default_rpc="https://flare-api.flare.network/ext/bc/C/rpc",
         reward_data_url_template=(
             "https://raw.githubusercontent.com/flare-foundation/fsp-rewards/"
@@ -61,7 +61,7 @@ _NETWORKS: dict[str, NetworkConfig] = {
         flare_systems_manager="0x421c69E22f48e14Fc2d2Ee3812c59bfb81c38516",
         claim_setup_manager="0xDD138B38d87b0F95F6c3e13e78FFDF2588F1732d",
         entity_manager="0x46C417D0760198E94fee455CE0e223262a3D0049",
-        voter_registry="0x31B9EC65C731c7D973a33Ef3FC83B653f540dC8D",
+        voter_registry="0xd23FAE88c09e6A77dD9eFcc29D6bBC55D2e74310",
         default_rpc="https://songbird-api.flare.network/ext/bc/C/rpc",
         reward_data_url_template=(
             "https://raw.githubusercontent.com/flare-foundation/fsp-rewards/"

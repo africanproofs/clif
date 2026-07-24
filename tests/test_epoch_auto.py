@@ -441,3 +441,39 @@ def test_persistent_retryable_reward_sign_goes_terminal(monkeypatch):
         obs = _drive(rpc, now=10_000, retry_counts=rc)
     assert obs.terminal and obs.phase is Phase.REWARD_SIGN
     assert "nonce-sync" in obs.detail
+
+
+# --- ALREADY_SIGNED: the Flare-417 wedge regression ---------------------------
+
+
+def test_reward_sign_already_signed_awaits_finalization_not_terminal(monkeypatch):
+    """`voter already signed` must NOT wedge the epoch terminal.
+
+    Flare epoch 417 (2026-07-24): the stale VoterRegistry blinded `our_signed_fn`,
+    so the daemon re-signed each cycle; the duplicate reverted "voter already
+    signed" and was classified FAILED_TERMINAL → DEGRADED + cooldown → the claim
+    was skipped every cycle. It must instead await finalization.
+    """
+    _patch(monkeypatch, sign=_fsp(OutcomeStatus.ALREADY_SIGNED, "our vote is on-chain"))
+    rpc = FakeRpc(end_ts=1_000, rewards_hash=ZERO_BYTES32)  # NOT finalized
+    obs = _drive(rpc, now=10_000)
+    assert obs.terminal is False
+    assert obs.done is False
+    assert obs.phase is Phase.REWARD_SIGN
+    assert "awaiting finalization" in obs.detail
+
+
+def test_reward_sign_already_signed_does_not_claim_unfinalized(monkeypatch):
+    """ALREADY_SIGNED must not imply finalization — no claim on a zero rewardsHash."""
+    claimed: list[int] = []
+
+    def _claim_spy(*_a, **_k):
+        claimed.append(1)
+        return _claim(OutcomeStatus.SUBMITTED_MINED)
+
+    _patch(monkeypatch, sign=_fsp(OutcomeStatus.ALREADY_SIGNED, "our vote is on-chain"))
+    monkeypatch.setattr(ea, "run_claim", _claim_spy)
+    rpc = FakeRpc(end_ts=1_000, rewards_hash=ZERO_BYTES32)  # NOT finalized
+    obs = _drive(rpc, now=10_000)
+    assert claimed == [], "must not claim an epoch the network has not finalized"
+    assert obs.phase is Phase.REWARD_SIGN

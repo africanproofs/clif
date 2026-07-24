@@ -52,6 +52,10 @@ class OutcomeStatus(str, Enum):
     MINED_NOOP = "mined-noop"  # tx mined (status 0x1) but claimed nothing — epoch already claimed
     ALREADY_FINALIZED = "already-finalized"  # FSP: epoch reached the >50% signing-weight threshold
     # + finalized before our signature landed — too late this round, not a fault
+    ALREADY_SIGNED = "already-signed"  # FSP: WE already signed this epoch (our vote is
+    # on-chain); the contract's per-voter guard refused the duplicate. Distinct from
+    # ALREADY_FINALIZED: the epoch may NOT be finalized yet, so the caller must keep
+    # awaiting finalization rather than falling through to the claim.
     FAILED_RETRYABLE = "failed-retryable"  # transient — retry next cycle
     FAILED_TERMINAL = "failed-terminal"  # operator action needed — escalate
 
@@ -62,6 +66,7 @@ _OK = {
     OutcomeStatus.SUBMITTED_PENDING,
     OutcomeStatus.MINED_NOOP,
     OutcomeStatus.ALREADY_FINALIZED,
+    OutcomeStatus.ALREADY_SIGNED,
 }
 
 

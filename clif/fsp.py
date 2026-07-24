@@ -39,18 +39,27 @@ from clif.rpc import RpcClient, RpcError
 
 log = logging.getLogger("clif")
 
-# Known FSP finalization-guard revert strings.  These are benign: the network
-# finalized the epoch (>50% signing-weight threshold) before our signature landed.
-# REWARD_DISTRIBUTION: confirmed live on Songbird epoch 402 (2026-06-01) by
-#   replaying reverted tx 0x097d48c4… via eth_call.
-# UPTIME: "uptime vote hash already signed" is the expected string by analogy with
-#   the REWARD_DISTRIBUTION path; NOT yet live-confirmed.
-#   TODO: confirm the exact uptime revert string against a live revert or the
-#   FlareSystemsManager source before treating this as confirmed.
+# `FlareSystemsManager.signRewards` / `.signUptimeVote` each carry TWO benign
+# "already done" guards. Both are no-faults, but they mean DIFFERENT things and
+# must not be conflated (see the two maps below). Strings verified against the
+# contract source — `FlareSystemsManager.sol`, the `require` statements in
+# `signRewards` / `signUptimeVote`.
+#
+# (1) Hash-level guard: the network reached the >50% signing-weight threshold and
+#     finalized the epoch before our signature landed. WE DID NOT SIGN — too late
+#     this round. Confirmed live on Songbird epoch 402 (2026-06-01) by replaying
+#     reverted tx 0x097d48c4… via eth_call.
 _FSP_FINALIZATION_REVERTS: dict[str, str] = {
     "REWARD_DISTRIBUTION": "rewards hash already signed",
-    "UPTIME": "uptime vote hash already signed",  # best-effort — see TODO above
+    "UPTIME": "uptime vote hash already signed",
 }
+
+# (2) Per-voter guard: WE already signed this epoch — our vote IS on-chain and the
+#     contract refused the duplicate. Common to both message types. The epoch may
+#     still be UNFINALIZED, so this must NOT imply finalization (that would send the
+#     daemon into a claim on an epoch with no `rewardsHash` yet). Confirmed live on
+#     Flare epoch 417 (2026-07-24) by replaying reverted tx 0xea5bbf91… via eth_call.
+_FSP_ALREADY_SIGNED_REVERT = "voter already signed"
 
 
 def _is_finalization_revert(message_type: str, reason: str | None) -> bool:
@@ -65,6 +74,17 @@ def _is_finalization_revert(message_type: str, reason: str | None) -> bool:
     if expected is None:
         return False
     return expected.lower() in reason.lower()
+
+
+def _is_already_signed_revert(reason: str | None) -> bool:
+    """Return True iff the revert says WE already signed this epoch (not a fault).
+
+    Applies to both message types. Says nothing about finalization — the caller
+    must keep awaiting it.
+    """
+    if reason is None:
+        return False
+    return _FSP_ALREADY_SIGNED_REVERT in reason.lower()
 
 
 # fwd cross-domain rule (D15 MAJOR-2): the same policy_path key cannot appear
@@ -719,6 +739,21 @@ def _broadcast_and_confirm(
                 reward_epoch_id,
                 OutcomeStatus.ALREADY_FINALIZED,
                 detail,
+                message_hash=mh,
+                leg1_sig=l1s,
+                tx_id=tx_id,
+                tx_hash=broadcast_hash,
+            )
+        if _is_already_signed_revert(reason):
+            # The contract's per-voter guard: our signature for this epoch is ALREADY
+            # on-chain, so the duplicate was refused. Not a fault, and NOT finalization
+            # — the epoch may still be below threshold, so the caller keeps awaiting it.
+            return _out(
+                message_type,
+                reward_epoch_id,
+                OutcomeStatus.ALREADY_SIGNED,
+                f"epoch {reward_epoch_id} already signed by us — our vote is on-chain "
+                "(duplicate refused); awaiting network finalization (not a fault)",
                 message_hash=mh,
                 leg1_sig=l1s,
                 tx_id=tx_id,

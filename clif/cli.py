@@ -229,6 +229,38 @@ def doctor(
         for c in capabilities(s)
     ]
 
+    # Contract-address drift: clif PINS protocol addresses (auditable, not
+    # hijackable by a compromised registry), but the Foundation re-deploys them
+    # from time to time — the VoterRegistry moved on both mainnets in July 2026 and
+    # silently broke signing-progress. Compare the pins against the chain's own
+    # registry so the next migration surfaces here instead of as a stuck epoch.
+    # Best-effort: an unreachable RPC reports "unknown", never a doctor failure.
+    contracts: list[dict] = []
+    pinned = {
+        "RewardManager": s.net.reward_manager,
+        "FlareSystemsManager": s.net.flare_systems_manager,
+        "ClaimSetupManager": s.net.claim_setup_manager,
+        "EntityManager": s.net.entity_manager,
+        "VoterRegistry": s.net.voter_registry,
+    }
+    try:
+        with RpcClient(s.rpc_url) as _rpc:
+            for cname, addr in pinned.items():
+                if not addr:
+                    continue
+                live = _rpc.contract_address_by_name(cname)
+                contracts.append(
+                    {
+                        "name": cname,
+                        "pinned": addr,
+                        "onchain": live,
+                        "stale": live.lower() != addr.lower(),
+                    }
+                )
+    except Exception as exc:  # noqa: BLE001 — diagnostics only, never fail doctor
+        contracts = [{"error": str(exc)}]
+    stale_contracts = [c["name"] for c in contracts if c.get("stale")]
+
     report = read_status(s.epoch_status_file)
     daemon_code, daemon_line = status_exit_code(report)
     daemon = {
@@ -253,6 +285,7 @@ def doctor(
                     "compat": _compat(),
                     "fwd": fwd_info,
                     "capabilities": cap_status,
+                    "contracts": contracts,
                     "daemon": daemon,
                 },
                 indent=2,
@@ -271,6 +304,13 @@ def doctor(
     )
     for cs in cap_status:
         console.print(f"  {cs['capability_id']}: configured={cs['configured']}")
+    if stale_contracts:
+        err.print(
+            f"  [yellow]contracts: STALE PIN — {', '.join(stale_contracts)} "
+            f"moved on-chain; update clif/config.py[/]"
+        )
+    else:
+        console.print(f"  contracts: {len(contracts)} pinned, no drift")
     console.print(f"  daemon   : {daemon_line}")
     c = _compat()
     console.print(
