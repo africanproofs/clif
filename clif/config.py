@@ -224,6 +224,16 @@ class Settings(BaseSettings):
     epoch_stale_after_sec: int = 86_400  # 24h: an active epoch stuck this long ⇒ degraded
     epoch_terminal_cooldown_sec: int = 3_600
 
+    # Keyless gas-funding (`clif fund` / `clif fund run`). The ap-funder wallet
+    # (fwd-custodied) tops up any FSP account that breaches its balance band via
+    # fwd's native-transfer capability. Keyless: funding_caller_token is a bearer
+    # caller token (NOT a key); funding_wallet_name = ap-funder. Hard-off by
+    # default like FSP signing (a stray funding daemon must not move value).
+    funding_enabled: bool = False
+    funding_caller_token: str | None = None
+    funding_wallet_name: str | None = None
+    funding_poll_interval_sec: int = 900  # 15m — funding cadence (independent of epochs)
+
     @property
     def net(self) -> NetworkConfig:
         return _NETWORKS[self.network]

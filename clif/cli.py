@@ -53,6 +53,7 @@ from clif.config import (
 )
 from clif.credentials import BundleError, check_bundle_mode, import_credentials
 from clif.discovery import classify_claim_frontier, collect_reward_claims
+from clif.funding import SYMBOL, read_health, render_health, run_funding
 from clif.fwd_client import (
     FwdClient,
     FwdRetryableError,
@@ -135,6 +136,17 @@ epoch_app = typer.Typer(
     ),
 )
 app.add_typer(epoch_app, name="epoch")
+
+fund_app = typer.Typer(
+    add_completion=False,
+    pretty_exceptions_show_locals=False,
+    help=(
+        "Keyless gas-funding — keep the FSP accounts within their balance band "
+        "(gas-payers 250→400, identity/delegation 150→200) via fwd's ap-funder. "
+        "`fund health` reads state; `fund once` tops up; `fund run` is the daemon."
+    ),
+)
+app.add_typer(fund_app, name="fund")
 console = Console()
 err = Console(stderr=True)
 
@@ -2014,6 +2026,25 @@ def epoch_run(
                                 last_done=last_done,
                             ),
                         )
+                        # Funding health, surfaced EVERY cycle, COLOR-CODED, so the
+                        # state of the gas-funding is impossible to miss while the
+                        # operator is watching reward-signing — louder (🔴🔴 + ERROR
+                        # level) when an epoch is active and something is wrong.
+                        # Read-only (enforcement is the separate clif-fund-<net>
+                        # daemon); read_health never raises, so it can't disrupt the
+                        # epoch cycle. A CRIT here = an account is below its floor
+                        # (gas-starved risk) or the ap-funder is exhausted.
+                        try:
+                            _fh = read_health(rpc, s.network)
+                            _fline = render_health(_fh, active=bool(active))
+                            if _fh.severity == "OK":
+                                log.info("%s", _fline)
+                            elif _fh.severity == "WARN":
+                                log.warning("%s", _fline)
+                            else:
+                                log.error("%s", _fline)
+                        except Exception as _fexc:  # noqa: BLE001 — never break the cycle
+                            log.warning("funding-health read skipped: %s", _fexc)
                 except RpcError as exc:
                     log.warning("epoch rpc failure: %s (retry next cycle)", exc)
                 except FwdRetryableError as exc:
@@ -2232,6 +2263,120 @@ def nonce(
             f"{s.network} chain_id={out['chain_id']} {address} "
             f"latest={latest} pending={pending}"
         )
+
+
+def _fund_log(sev: str, msg: str, *args: object) -> None:
+    (log.info if sev == "OK" else log.warning if sev == "WARN" else log.error)(msg, *args)
+
+
+def _fund_pass(*, dry_run: bool, s: Settings) -> None:
+    """One funding pass for s.network: surface health, then top up any account
+    below its band's lower bound to its upper bound. Health is ALWAYS surfaced
+    (color-coded) even when nothing needs funding."""
+    with RpcClient(s.rpc_url) as rpc:
+        fh = read_health(rpc, s.network)
+        _fund_log(fh.severity, "%s", render_health(fh, active=False))
+        if not fh.below and not fh.funder_crit and fh.error is None:
+            return
+        if dry_run:
+            for a in fh.below:
+                log.info(
+                    "fund DRY-RUN would top %s %.2f -> %.2f %s",
+                    a.name, a.balance, a.band.upper, SYMBOL.get(s.network, ""),
+                )
+            return
+        if not s.funding_caller_token or not s.funding_wallet_name:
+            log.error(
+                "\033[1;31m🔴 fund: FUNDING_CALLER_TOKEN / FUNDING_WALLET_NAME not set "
+                "— cannot fund %s\033[0m", s.network,
+            )
+            return
+        with FwdClient(s.fwd_endpoint, s.funding_caller_token) as fwd:
+            res = run_funding(
+                rpc=rpc, fwd=fwd, network=s.network,
+                wallet=s.funding_wallet_name, chain_id=s.net.chain_id,
+            )
+    sym = SYMBOL.get(s.network, "")
+    for t in res.funded:
+        log.info(
+            "\033[32m💰 funded %s %.2f -> %.2f %s (+%.2f) %s\033[0m",
+            t.name, t.before, t.after, sym, t.after - t.before, t.tx_hash[:16],
+        )
+    for t in res.failed:
+        log.error("\033[1;31m🔴 fund FAILED %s: %s\033[0m", t.name, t.detail)
+    if res.error:
+        log.error("\033[1;31m🔴 fund pass error: %s\033[0m", res.error)
+
+
+@fund_app.command(name="health")
+def fund_health(
+    network: Annotated[Optional[str], typer.Option("--network", envvar="NETWORK")] = None,
+) -> None:
+    """Print the COLOR-CODED funding health (read-only). Exit 0/1/2 = OK/WARN/CRIT."""
+    s = _settings()
+    if network:
+        s.network = network  # type: ignore[assignment]
+    with RpcClient(s.rpc_url) as rpc:
+        fh = read_health(rpc, s.network)
+    print(render_health(fh, active=False))
+    raise typer.Exit(0 if fh.severity == "OK" else (1 if fh.severity == "WARN" else 2))
+
+
+@fund_app.command(name="once")
+def fund_once(
+    network: Annotated[Optional[str], typer.Option("--network", envvar="NETWORK")] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="show what would be funded; send nothing")
+    ] = False,
+) -> None:
+    """One funding pass now (manual). --dry-run shows the plan without sending."""
+    s = _settings()
+    if network:
+        s.network = network  # type: ignore[assignment]
+    _fund_pass(dry_run=dry_run, s=s)
+
+
+@fund_app.command(name="run")
+def fund_run(
+    interval: Annotated[
+        Optional[int], typer.Option("--interval", help="poll seconds (default FUNDING_POLL_INTERVAL_SEC)")
+    ] = None,
+) -> None:
+    """Funding daemon — enforce the bands every funding_poll_interval_sec.
+
+    Hard-off by default (FUNDING_ENABLED) so a stray daemon can't move value.
+    Refuses to start without an explicit NETWORK (a silent flare default would
+    fund the wrong chain's accounts)."""
+    if not os.environ.get("NETWORK"):
+        err.print("[bold red]fund run refuses to start without an explicit NETWORK[/]")
+        raise typer.Exit(2)
+    s = _settings()
+    if not s.funding_enabled:
+        log.warning(
+            "funding daemon DISABLED — FUNDING_ENABLED is not true; idling (NOT funding). "
+            "Set FUNDING_ENABLED=true in .env.%s and restart to enable.", s.network,
+        )
+        try:
+            while True:
+                time.sleep(3600)
+                log.info("funding daemon still DISABLED (FUNDING_ENABLED!=true) network=%s", s.network)
+        except KeyboardInterrupt:
+            log.info("fund stopped")
+        return
+    iv = interval or s.funding_poll_interval_sec
+    log.info(
+        "fund start network=%s interval=%ss wallet=%s bands: gas 250→400 · id 150→200",
+        s.network, iv, s.funding_wallet_name,
+    )
+    try:
+        while True:
+            try:
+                _fund_pass(dry_run=False, s=s)
+            except Exception as exc:  # noqa: BLE001 — a bad cycle must not kill the daemon
+                log.error("\033[1;31m🔴 fund cycle error: %s\033[0m", exc)
+            time.sleep(iv)
+    except KeyboardInterrupt:
+        log.info("fund stopped")
 
 
 if __name__ == "__main__":

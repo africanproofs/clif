@@ -108,6 +108,30 @@ services:
       retries: 3
       start_period: 1200s
 
+  # Keyless gas-funding daemons — keep the FSP accounts within their balance band
+  # via fwd's ap-funder (native-transfer capability). Own cadence (15m), separate
+  # from the epoch daemon; the epoch daemon SURFACES funding health each cycle so
+  # it's visible during reward-signing, these ENFORCE it. Hard-off (FUNDING_ENABLED).
+  clif-fund-songbird:
+    build: .
+    image: clif:dev
+    container_name: clif-fund-songbird
+    command: ["fund", "run"]
+    env_file: [.env.songbird]
+    networks: [fwd-net, egress]
+    profiles: ["multichain"]
+    restart: unless-stopped
+
+  clif-fund-flare:
+    build: .
+    image: clif:dev
+    container_name: clif-fund-flare
+    command: ["fund", "run"]
+    env_file: [.env.flare]
+    networks: [fwd-net, egress]
+    profiles: ["multichain"]
+    restart: unless-stopped
+
 networks:
   fwd-net:
     external: true
