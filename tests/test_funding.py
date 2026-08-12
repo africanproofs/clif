@@ -10,9 +10,11 @@ from clif import funding
 from clif.funding import (
     ACCOUNTS,
     _AP_FUNDER_ADDRESS,
+    apply_plan,
     read_health,
     render_health,
     run_funding,
+    validate_plan,
 )
 from clif.rpc import RpcError
 
@@ -168,3 +170,71 @@ def test_run_funding_no_balance_rise_is_failed():
     rpc.send_raw_transaction = lambda _raw: "0x" + "aa" * 32  # type: ignore[method-assign]
     res = run_funding(rpc=rpc, fwd=FakeFwd(rpc), network="flare", wallet="ap-funder", chain_id=14)
     assert [t.name for t in res.failed] == ["FastUpdates-3"] and res.funded == []
+
+
+# ---- validate_plan (the agent-facing membrane) ---------------------------------
+
+_FU1 = "0x8af4f6eb1a26516ccb0fe02ad7182f96c0ca5bbb"  # FastUpdates-1, GAS band 250-400
+_IDENTITY = "0x26534ac74153e3257ddd3471f96faa33d5d3b575"  # Identity, band 150-200
+
+
+def test_validate_plan_accepts_valid_topup():
+    lines = validate_plan("flare", [{"account": "FastUpdates-1", "amount": 200}],
+                          {_FU1: 100.0}, funder_balance=2000.0)
+    assert len(lines) == 1 and lines[0].accepted
+    assert lines[0].amount == pytest.approx(200.0) and lines[0].address.lower() == _FU1
+
+
+def test_validate_plan_rejects_unknown_account():
+    lines = validate_plan("flare", [{"account": "NotAThing", "amount": 100}], {}, 2000.0)
+    assert not lines[0].accepted and "unknown account" in lines[0].reason
+
+
+def test_validate_plan_rejects_over_per_tx_cap():
+    lines = validate_plan("flare", [{"account": "FastUpdates-1", "amount": 500}],
+                          {_FU1: 100.0}, 2000.0)
+    assert not lines[0].accepted and "per-tx cap" in lines[0].reason
+
+
+def test_validate_plan_rejects_push_above_band_upper():
+    # 300 + 150 = 450 > band upper 400.
+    lines = validate_plan("flare", [{"account": "FastUpdates-1", "amount": 150}],
+                          {_FU1: 300.0}, 2000.0)
+    assert not lines[0].accepted and "above band upper" in lines[0].reason
+
+
+def test_validate_plan_rejects_when_over_funder_runway():
+    lines = validate_plan(
+        "flare",
+        [{"account": "FastUpdates-1", "amount": 200}, {"account": "Identity", "amount": 40}],
+        {_FU1: 100.0, _IDENTITY: 150.0},
+        funder_balance=210.0,  # first (200) fits, second (40) overruns
+    )
+    assert lines[0].accepted and not lines[1].accepted
+    assert "ap-funder balance" in lines[1].reason
+
+
+def test_validate_plan_target_resolves_to_gap():
+    lines = validate_plan("flare", [{"account": "FastUpdates-1", "target": 400}],
+                          {_FU1: 260.0}, 2000.0)
+    assert lines[0].accepted and lines[0].amount == pytest.approx(140.0)
+
+
+def test_validate_plan_target_above_band_upper_rejected():
+    lines = validate_plan("flare", [{"account": "FastUpdates-1", "target": 500}],
+                          {_FU1: 260.0}, 2000.0)
+    assert not lines[0].accepted and "band upper" in lines[0].reason
+
+
+def test_apply_plan_executes_only_accepted():
+    bal = _healthy_balances()
+    bal[_FU1] = int(100 * _WEI)
+    rpc = FakeRpc(Chain(bal))
+    lines = validate_plan("flare",
+                          [{"account": "FastUpdates-1", "amount": 200},
+                           {"account": "NotAThing", "amount": 100}],
+                          {_FU1: 100.0}, funder_balance=2000.0)
+    res = apply_plan(rpc=rpc, fwd=FakeFwd(rpc), network="flare",
+                     wallet="ap-funder", chain_id=14, lines=lines)
+    assert [t.name for t in res.funded] == ["FastUpdates-1"]
+    assert res.funded[0].after == pytest.approx(300.0) and res.failed == []

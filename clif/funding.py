@@ -228,6 +228,77 @@ class FundingResult:
         return [t for t in self.topups if t.status == "funded"]
 
 
+def _execute_topup(
+    *,
+    rpc: RpcClient,
+    fwd: FwdClient,
+    account: Account,
+    before: float,
+    value_wei: int,
+    network: str,
+    wallet: str,
+    chain_id: int,
+    max_fee: int,
+    max_priority: int,
+    poll_timeout: float,
+) -> TopUp:
+    """The one keyless execute path: fwd signs → we broadcast → report back →
+    verify the balance rose (mined ≠ success). Shared by the auto pass and the
+    agent-driven plan so custody handling lives in exactly ONE place."""
+    idem = f"clif-funding:{network}:{account.address.lower()}:{int(time.time())}"
+    try:
+        resp = fwd.sign_transaction(
+            wallet=wallet,
+            chain=chain_id,
+            to=account.address,
+            gas=21_000,
+            max_fee_per_gas=max_fee,
+            max_priority_fee_per_gas=max_priority,
+            value_wei=str(value_wei),
+            data="0x",
+            idempotency_key=idem,
+        )
+    except (FwdTerminalError, FwdRetryableError, FwdError) as exc:
+        return TopUp(account.name, account.address, before, before, 0, "", "failed", f"fwd sign: {exc}")
+
+    try:
+        tx_hash = rpc.send_raw_transaction(resp.signed_raw_tx)
+    except RpcError as exc:
+        try:
+            fwd.report_broadcast_result(resp.tx_id, resp.hash, "rejected_releaseable")
+        except (FwdError, FwdRetryableError, FwdTerminalError):
+            pass
+        return TopUp(
+            account.name, account.address, before, before, 0, resp.hash, "failed", f"broadcast: {exc}"
+        )
+
+    try:
+        fwd.report_broadcast_result(resp.tx_id, tx_hash, "accepted")
+    except (FwdError, FwdRetryableError, FwdTerminalError):
+        pass
+
+    receipt = rpc.poll_receipt(tx_hash, timeout=poll_timeout)
+    block = int(str(receipt["blockNumber"]), 16) if receipt else 0
+    if receipt is not None:
+        try:
+            fwd.report_receipt(resp.tx_id, tx_hash, "mined_success", block)
+        except (FwdError, FwdRetryableError, FwdTerminalError):
+            pass
+    status_ok = receipt is not None and int(str(receipt["status"]), 16) == 1
+    after = rpc.get_balance(account.address) / _WEI
+    ok = status_ok and after > before  # mined ≠ success: verify the balance rose
+    return TopUp(
+        account.name,
+        account.address,
+        before,
+        after,
+        round(value_wei / _WEI, 4),
+        tx_hash,
+        "funded" if ok else "failed",
+        "" if ok else "no balance rise / reverted",
+    )
+
+
 def run_funding(
     *,
     rpc: RpcClient,
@@ -238,8 +309,7 @@ def run_funding(
     poll_timeout: float = 120.0,
 ) -> FundingResult:
     """Enforcement pass: top up every account below its band's lower bound to its
-    upper bound via fwd's native-transfer capability. Keyless: fwd signs, we
-    broadcast + report back + verify the balance rose (mined ≠ success)."""
+    upper bound. Deterministic (reactive) — the daemon's default. Keyless."""
     res = FundingResult(network=network)
     try:
         max_fee, max_priority = rpc.suggest_fees()
@@ -256,65 +326,125 @@ def run_funding(
         if before >= a.band.lower:
             res.skipped_ok += 1
             continue
-
         value = int(round((a.band.upper - before) * _WEI))
-        idem = f"clif-funding:{network}:{a.address.lower()}:{int(time.time())}"
-        try:
-            resp = fwd.sign_transaction(
-                wallet=wallet,
-                chain=chain_id,
-                to=a.address,
-                gas=21_000,
-                max_fee_per_gas=max_fee,
-                max_priority_fee_per_gas=max_priority,
-                value_wei=str(value),
-                data="0x",
-                idempotency_key=idem,
-            )
-        except (FwdTerminalError, FwdRetryableError, FwdError) as exc:
-            res.topups.append(
-                TopUp(a.name, a.address, before, before, 0, "", "failed", f"fwd sign: {exc}")
-            )
-            continue
-
-        try:
-            tx_hash = rpc.send_raw_transaction(resp.signed_raw_tx)
-        except RpcError as exc:
-            try:
-                fwd.report_broadcast_result(resp.tx_id, resp.hash, "rejected_releaseable")
-            except (FwdError, FwdRetryableError, FwdTerminalError):
-                pass
-            res.topups.append(
-                TopUp(a.name, a.address, before, before, 0, resp.hash, "failed", f"broadcast: {exc}")
-            )
-            continue
-
-        try:
-            fwd.report_broadcast_result(resp.tx_id, tx_hash, "accepted")
-        except (FwdError, FwdRetryableError, FwdTerminalError):
-            pass
-
-        receipt = rpc.poll_receipt(tx_hash, timeout=poll_timeout)
-        block = int(str(receipt["blockNumber"]), 16) if receipt else 0
-        if receipt is not None:
-            try:
-                fwd.report_receipt(resp.tx_id, tx_hash, "mined_success", block)
-            except (FwdError, FwdRetryableError, FwdTerminalError):
-                pass
-        status_ok = receipt is not None and int(str(receipt["status"]), 16) == 1
-        after = rpc.get_balance(a.address) / _WEI
-        # mined ≠ success: verify the balance actually rose.
-        ok = status_ok and after > before
         res.topups.append(
-            TopUp(
-                a.name,
-                a.address,
-                before,
-                after,
-                round(value / _WEI, 4),
-                tx_hash,
-                "funded" if ok else "failed",
-                "" if ok else "no balance rise / reverted",
+            _execute_topup(
+                rpc=rpc, fwd=fwd, account=a, before=before, value_wei=value,
+                network=network, wallet=wallet, chain_id=chain_id,
+                max_fee=max_fee, max_priority=max_priority, poll_timeout=poll_timeout,
+            )
+        )
+    return res
+
+
+# --- the agent membrane: validate a proposed plan against HARD bounds ----------
+#
+# An untrusted decision-maker (a future AI agent, ADR-0006) proposes a plan; this
+# deterministic membrane accepts/rejects each line BEFORE any execution. fwd's
+# policy (recipient allowlist + per-tx cap + rate + daily aggregate) is the
+# independent final gate — a line that slips a bug here still can't exceed fwd.
+
+
+@dataclass
+class PlanLine:
+    account: str
+    address: str = ""
+    amount: float = 0.0  # native token, resolved
+    accepted: bool = False
+    reason: str = ""
+
+
+def validate_plan(
+    network: str,
+    items: list[dict],
+    balances: dict[str, float],
+    funder_balance: float,
+    *,
+    per_tx_cap: float = 400.0,
+) -> list[PlanLine]:
+    """Validate a proposed funding plan against hard bounds. Each item is
+    {"account": <name>, "amount": <native>} or {"account": <name>, "target": <native>}.
+    Rejects (never raises): unknown account, non-positive amount, amount over the
+    per-tx cap, a top-up that would push the account ABOVE its band upper, or a
+    running total that exceeds the funder's balance. `balances` is keyed by
+    lowercased address (the plan's accounts + read fresh by the caller)."""
+    reg = {a.name.lower(): a for a in ACCOUNTS.get(network, [])}
+    out: list[PlanLine] = []
+    running = 0.0
+    for it in items:
+        name = str(it.get("account", "")).strip()
+        a = reg.get(name.lower())
+        if a is None:
+            out.append(PlanLine(name, reason="unknown account (not in the network registry)"))
+            continue
+        bal = balances.get(a.address.lower())
+        if bal is None:
+            out.append(PlanLine(a.name, a.address, reason="no balance provided for account"))
+            continue
+        if "target" in it:
+            target = float(it["target"])
+            if target > a.band.upper + 1e-9:
+                out.append(PlanLine(a.name, a.address, reason=f"target {target:g} > band upper {a.band.upper:g}"))
+                continue
+            amount = round(target - bal, 6)
+        else:
+            amount = round(float(it.get("amount", 0)), 6)
+        if amount <= 0:
+            out.append(PlanLine(a.name, a.address, amount, reason="amount ≤ 0 (already at/above target)"))
+            continue
+        if amount > per_tx_cap + 1e-9:
+            out.append(PlanLine(a.name, a.address, amount, reason=f"amount {amount:g} > per-tx cap {per_tx_cap:g}"))
+            continue
+        if bal + amount > a.band.upper + 1e-9:
+            out.append(PlanLine(a.name, a.address, amount, reason=f"would push {a.name} above band upper {a.band.upper:g}"))
+            continue
+        if running + amount > funder_balance + 1e-9:
+            out.append(PlanLine(a.name, a.address, amount, reason=f"exceeds ap-funder balance ({funder_balance:g})"))
+            continue
+        running += amount
+        out.append(PlanLine(a.name, a.address, amount, accepted=True))
+    return out
+
+
+def apply_plan(
+    *,
+    rpc: RpcClient,
+    fwd: FwdClient,
+    network: str,
+    wallet: str,
+    chain_id: int,
+    lines: list[PlanLine],
+    poll_timeout: float = 120.0,
+) -> FundingResult:
+    """Execute the ACCEPTED lines of a validated plan (rejected lines are never
+    touched). Same keyless execute path as the auto pass."""
+    res = FundingResult(network=network)
+    accepted = [ln for ln in lines if ln.accepted]
+    if not accepted:
+        return res
+    try:
+        max_fee, max_priority = rpc.suggest_fees()
+    except RpcError as exc:
+        res.error = f"fee read failed: {exc}"
+        return res
+    reg = {a.name.lower(): a for a in ACCOUNTS[network]}
+    for ln in accepted:
+        a = reg[ln.account.lower()]
+        try:
+            before = rpc.get_balance(a.address) / _WEI
+        except RpcError as exc:
+            res.topups.append(TopUp(a.name, a.address, 0, 0, 0, "", "failed", f"balance read: {exc}"))
+            continue
+        # Re-check the bound at execution time (balances move): never overfund.
+        value = int(round(min(ln.amount, max(0.0, a.band.upper - before)) * _WEI))
+        if value <= 0:
+            res.skipped_ok += 1
+            continue
+        res.topups.append(
+            _execute_topup(
+                rpc=rpc, fwd=fwd, account=a, before=before, value_wei=value,
+                network=network, wallet=wallet, chain_id=chain_id,
+                max_fee=max_fee, max_priority=max_priority, poll_timeout=poll_timeout,
             )
         )
     return res

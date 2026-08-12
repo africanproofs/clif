@@ -53,7 +53,15 @@ from clif.config import (
 )
 from clif.credentials import BundleError, check_bundle_mode, import_credentials
 from clif.discovery import classify_claim_frontier, collect_reward_claims
-from clif.funding import SYMBOL, read_health, render_health, run_funding
+from clif.funding import (
+    ACCOUNTS as FUNDING_ACCOUNTS,
+    SYMBOL,
+    apply_plan,
+    read_health,
+    render_health,
+    run_funding,
+    validate_plan,
+)
 from clif.fwd_client import (
     FwdClient,
     FwdRetryableError,
@@ -2311,15 +2319,126 @@ def _fund_pass(*, dry_run: bool, s: Settings) -> None:
 @fund_app.command(name="health")
 def fund_health(
     network: Annotated[Optional[str], typer.Option("--network", envvar="NETWORK")] = None,
+    json_out: Annotated[bool, typer.Option("--json", help="machine-readable (the MCP/agent scrape surface)")] = False,
 ) -> None:
-    """Print the COLOR-CODED funding health (read-only). Exit 0/1/2 = OK/WARN/CRIT."""
+    """Print the funding health (read-only). Color line, or --json. Exit 0/1/2 = OK/WARN/CRIT."""
     s = _settings()
     if network:
         s.network = network  # type: ignore[assignment]
     with RpcClient(s.rpc_url) as rpc:
         fh = read_health(rpc, s.network)
-    print(render_health(fh, active=False))
+    if json_out:
+        print(
+            json.dumps(
+                {
+                    "network": fh.network,
+                    "severity": fh.severity,
+                    "funder_balance": fh.funder_balance,
+                    "error": fh.error,
+                    "accounts": [
+                        {
+                            "name": a.name,
+                            "address": a.address,
+                            "balance": round(a.balance, 4),
+                            "lower": a.band.lower,
+                            "upper": a.band.upper,
+                            "below": a.below,
+                        }
+                        for a in fh.accounts
+                    ],
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(render_health(fh, active=False))
     raise typer.Exit(0 if fh.severity == "OK" else (1 if fh.severity == "WARN" else 2))
+
+
+def _resolve_plan(plan: str) -> list[dict]:
+    """Parse the --plan JSON: either a list of items or {"topups":[...]}."""
+    doc = json.loads(plan)
+    items = doc.get("topups", doc) if isinstance(doc, dict) else doc
+    if not isinstance(items, list):
+        raise ValueError("plan must be a JSON list or {\"topups\": [...]}")
+    return items
+
+
+@fund_app.command(name="propose")
+def fund_propose(
+    plan: Annotated[str, typer.Option("--plan", help='JSON: [{"account":"FastUpdates-1","amount":200}] or {"account":..,"target":400}')],
+    network: Annotated[Optional[str], typer.Option("--network", envvar="NETWORK")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """VALIDATE a proposed funding plan against the hard bounds — execute NOTHING.
+
+    The agent-facing dry-run (ADR-0006): accepts/rejects each line (registry
+    allowlist, per-tx cap, band upper, funder runway) so a human (or the agent)
+    can review before `fund apply`. Read-only."""
+    s = _settings()
+    if network:
+        s.network = network  # type: ignore[assignment]
+    items = _resolve_plan(plan)
+    reg = {a.name.lower(): a for a in FUNDING_ACCOUNTS.get(s.network, [])}
+    with RpcClient(s.rpc_url) as rpc:
+        balances: dict[str, float] = {}
+        for it in items:
+            a = reg.get(str(it.get("account", "")).lower())
+            if a is not None:
+                balances[a.address.lower()] = rpc.get_balance(a.address) / 1e18
+        funder = read_health(rpc, s.network).funder_balance or 0.0
+    lines = validate_plan(s.network, items, balances, funder)
+    if json_out:
+        print(json.dumps([vars(ln) for ln in lines], indent=2))
+    else:
+        for ln in lines:
+            mark = "\033[32m✓ accept\033[0m" if ln.accepted else "\033[1;31m✗ reject\033[0m"
+            print(f"  {mark} {ln.account:<16} {ln.amount:>8.2f}  {ln.reason}")
+    raise typer.Exit(0 if any(ln.accepted for ln in lines) else 1)
+
+
+@fund_app.command(name="apply")
+def fund_apply(
+    plan: Annotated[str, typer.Option("--plan", help="same JSON as `fund propose`")],
+    network: Annotated[Optional[str], typer.Option("--network", envvar="NETWORK")] = None,
+) -> None:
+    """VALIDATE a proposed plan, then EXECUTE the accepted lines keyless (the ACT
+    surface). Rejected lines are never touched; fwd's policy is the final gate."""
+    s = _settings()
+    if network:
+        s.network = network  # type: ignore[assignment]
+    if not s.funding_caller_token or not s.funding_wallet_name:
+        err.print("[bold red]fund apply: FUNDING_CALLER_TOKEN / FUNDING_WALLET_NAME not set[/]")
+        raise typer.Exit(2)
+    items = _resolve_plan(plan)
+    reg = {a.name.lower(): a for a in FUNDING_ACCOUNTS.get(s.network, [])}
+    sym = SYMBOL.get(s.network, "")
+    with RpcClient(s.rpc_url) as rpc:
+        balances = {}
+        for it in items:
+            a = reg.get(str(it.get("account", "")).lower())
+            if a is not None:
+                balances[a.address.lower()] = rpc.get_balance(a.address) / 1e18
+        funder = read_health(rpc, s.network).funder_balance or 0.0
+        lines = validate_plan(s.network, items, balances, funder)
+        for ln in lines:
+            if not ln.accepted:
+                log.warning("fund apply REJECTED %s %.2f: %s", ln.account, ln.amount, ln.reason)
+        with FwdClient(s.fwd_endpoint, s.funding_caller_token) as fwd:
+            res = apply_plan(
+                rpc=rpc, fwd=fwd, network=s.network,
+                wallet=s.funding_wallet_name, chain_id=s.net.chain_id, lines=lines,
+            )
+    for t in res.funded:
+        log.info(
+            "\033[32m💰 funded %s %.2f -> %.2f %s (+%.2f) %s\033[0m",
+            t.name, t.before, t.after, sym, t.after - t.before, t.tx_hash[:16],
+        )
+    for t in res.failed:
+        log.error("\033[1;31m🔴 fund FAILED %s: %s\033[0m", t.name, t.detail)
+    if res.error:
+        log.error("\033[1;31m🔴 fund apply error: %s\033[0m", res.error)
+    raise typer.Exit(0 if not res.failed and not res.error else 2)
 
 
 @fund_app.command(name="once")
