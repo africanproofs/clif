@@ -157,6 +157,21 @@ services:
     profiles: ["multichain"]
     restart: unless-stopped
 
+  # Per-block FTSO participation observer (fsp-observer native port, Phase 1).
+  # OBSERVE-only: streams blocks and tracks AP's own submit/reveal per ~90s round.
+  # Heavier than the other daemons (per-block) — points at an RPC that keeps up
+  # (OBSERVE_RPC; an AP observer node in prod). Songbird canary first. Hard-off
+  # (OBSERVE_ENABLED). Needs only egress (RPC reads); not on fwd-net.
+  clif-observe-songbird:
+    build: .
+    image: clif:dev
+    container_name: clif-observe-songbird
+    command: ["observe", "run"]
+    env_file: [.env.songbird]
+    networks: [egress]
+    profiles: ["multichain"]
+    restart: unless-stopped
+
 networks:
   fwd-net:
     external: true
