@@ -33,7 +33,11 @@ def run_engine(
     our_submit: str,
     our_sig: str,
     status_writer: Callable[[dict], None],
-    lookback_blocks: int = 250,
+    # Lookback must exceed ~270s + N*90s to SEED N rounds at startup: the boundary guard
+    # drops rounds begun before we started, and finalize lags a round's start by ~180s, so
+    # the effective seed window = span − 180s − one boundary round. ~900 blocks (~15min on
+    # Songbird) seeds ~8-10 rounds; the window then fills forward at ~1/90s to window_rounds.
+    lookback_blocks: int = 900,
     window_rounds: int = 40,
     poll_sec: float = 2.0,
     status_every_blocks: int = 100,
