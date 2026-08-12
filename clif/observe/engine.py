@@ -33,9 +33,10 @@ def run_engine(
     our_submit: str,
     our_sig: str,
     status_writer: Callable[[dict], None],
-    lookback_blocks: int = 2000,
+    lookback_blocks: int = 250,
     window_rounds: int = 40,
     poll_sec: float = 2.0,
+    status_every_blocks: int = 100,
     log=None,
     _max_blocks: int | None = None,  # test hook: process at most N blocks then return
 ) -> None:
@@ -55,7 +56,11 @@ def run_engine(
             "observe start network=%s from block %s (head %s, lookback %s) submission=%s",
             network, cursor, head, lookback_blocks, submission,
         )
+    # Write a status immediately so `observe status` shows "warming up", not a missing-file CRIT.
+    state.last_block = cursor
+    status_writer(build_status(state, network=network, enabled=True))
     processed = 0
+    since_status = 0
     while True:
         try:
             head = rpc.block_number()
@@ -92,10 +97,16 @@ def run_engine(
                     lvl("\033[38;5;208m OBS\033[0m round %s: %s", rs.round_id, "; ".join(rs.issues))
             cursor += 1
             processed += 1
+            since_status += 1
+            # Keep the status fresh DURING a long catch-up so `observe status` isn't stale.
+            if since_status >= status_every_blocks:
+                status_writer(build_status(state, network=network, enabled=True))
+                since_status = 0
             if _max_blocks is not None and processed >= _max_blocks:
                 status_writer(build_status(state, network=network, enabled=True))
                 return
         status_writer(build_status(state, network=network, enabled=True))
+        since_status = 0
         try:
             time.sleep(poll_sec)
         except KeyboardInterrupt:

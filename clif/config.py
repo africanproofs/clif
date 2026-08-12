@@ -251,7 +251,7 @@ class Settings(BaseSettings):
     # at an RPC that can keep up per-block (an AP observer node); falls back to rpc_url.
     observe_enabled: bool = False
     observe_rpc: str | None = None  # per-block streaming RPC (default: rpc_url)
-    observe_lookback_blocks: int = 2000  # restart re-sync depth (~1h on Songbird)
+    observe_lookback_blocks: int = 250  # restart re-sync depth (~7min; the window fills forward)
     observe_window_rounds: int = 40  # rolling health window (~1h of rounds)
     observe_poll_sec: int = 2  # new-block poll cadence
 
