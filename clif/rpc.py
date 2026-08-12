@@ -269,6 +269,13 @@ class RpcClient:
         result = self._call("eth_call", [{"to": to, "data": data}, "latest"])
         return bytes.fromhex(str(result)[2:])
 
+    def get_block(self, number: int, *, full_transactions: bool = False) -> dict | None:
+        """eth_getBlockByNumber(number, full_transactions) → block dict (or None if unknown).
+        With full_transactions=True the `transactions` array holds full tx objects (for the
+        observer's per-block submit scan). Keyless read."""
+        result = self._call("eth_getBlockByNumber", [hex(number), full_transactions])
+        return cast(dict, result) if result else None
+
     def get_transaction_receipt(self, tx_hash: str) -> dict | None:
         result = self._call("eth_getTransactionReceipt", [tx_hash])
         return cast(dict, result) if result else None  # null until mined

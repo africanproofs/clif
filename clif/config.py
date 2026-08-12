@@ -245,6 +245,16 @@ class Settings(BaseSettings):
     registration_gas_floor: float = 10.0  # Submit below this ⇒ can't afford registerVoter
     registration_sender_account: str = "Submit"  # the registerVoter gas payer
 
+    # --- Observer (per-block FTSO participation) — OBSERVE-only, no key. The
+    # `observe run` engine streams blocks and tracks whether AP's own submit/signatures
+    # addresses participate on-chain each ~90s voting round. Hard-off by default. Points
+    # at an RPC that can keep up per-block (an AP observer node); falls back to rpc_url.
+    observe_enabled: bool = False
+    observe_rpc: str | None = None  # per-block streaming RPC (default: rpc_url)
+    observe_lookback_blocks: int = 2000  # restart re-sync depth (~1h on Songbird)
+    observe_window_rounds: int = 40  # rolling health window (~1h of rounds)
+    observe_poll_sec: int = 2  # new-block poll cadence
+
     @property
     def net(self) -> NetworkConfig:
         return _NETWORKS[self.network]
@@ -285,6 +295,14 @@ class Settings(BaseSettings):
     @property
     def registration_status_file(self) -> Path:
         return Path(self.clif_state_dir) / f"registration-status-{self.network}.json"
+
+    @property
+    def observe_status_file(self) -> Path:
+        return Path(self.clif_state_dir) / f"observe-status-{self.network}.json"
+
+    @property
+    def observe_rpc_url(self) -> str:
+        return self.observe_rpc or self.rpc_url
 
 
 # --- fwd capability model (ADR-0001 §3) ----------------------------------------

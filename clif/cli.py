@@ -63,6 +63,8 @@ from clif.funding import (
     validate_plan,
 )
 from clif.registration import read_readiness, render_readiness
+from clif.observe import read_observe_status, render_observe
+from clif.observe.engine import run_engine
 from clif.fwd_client import (
     FwdClient,
     FwdRetryableError,
@@ -168,6 +170,18 @@ registration_app = typer.Typer(
     ),
 )
 app.add_typer(registration_app, name="registration")
+
+observe_app = typer.Typer(
+    add_completion=False,
+    pretty_exceptions_show_locals=False,
+    help=(
+        "Per-block FTSO participation observer (the fsp-observer native port). `observe run` "
+        "streams blocks and tracks whether AP's own submit/signatures addresses participate "
+        "on-chain each ~90s voting round (on-time + commit/reveal match); `observe status` "
+        "reads the rolling health. OBSERVE-only — never signs or sends."
+    ),
+)
+app.add_typer(observe_app, name="observe")
 console = Console()
 err = Console(stderr=True)
 
@@ -2691,6 +2705,66 @@ def registration_run(
             time.sleep(sleep_for)
     except KeyboardInterrupt:
         log.info("registration stopped")
+
+
+@observe_app.command(name="status")
+def observe_status(
+    network: Annotated[Optional[str], typer.Option("--network", envvar="NETWORK")] = None,
+    json_out: Annotated[bool, typer.Option("--json", help="machine-readable (the MCP scrape surface)")] = False,
+) -> None:
+    """The rolling FTSO participation health (read from the engine's status file). Exit 0/1/2
+    = OK/WARN/CRIT. CRIT = a reveal offence, sustained non-participation, or a stale engine."""
+    s = _settings()
+    if network:
+        s.network = network  # type: ignore[assignment]
+    h = read_observe_status(s.observe_status_file, enabled=s.observe_enabled)
+    if json_out:
+        print(json.dumps(h.to_dict(), indent=2))
+    else:
+        print(render_observe(h, active=False))
+    raise typer.Exit(0 if h.severity == "OK" else (1 if h.severity == "WARN" else 2))
+
+
+@observe_app.command(name="run")
+def observe_run() -> None:
+    """The per-block FTSO observer engine (the `clif-observe-<net>` service). Streams blocks,
+    classifies AP's submissions per voting round, writes the rolling status file. Hard-off
+    unless OBSERVE_ENABLED=true; refuses to start without an explicit NETWORK. OBSERVE-only."""
+    if not os.environ.get("NETWORK"):
+        err.print("[bold red]observe run refuses to start without an explicit NETWORK[/]")
+        raise typer.Exit(2)
+    s = _settings()
+    if not s.observe_enabled:
+        log.warning(
+            "observer DISABLED — OBSERVE_ENABLED is not true; idling. "
+            "Set OBSERVE_ENABLED=true in .env.%s and restart to enable.", s.network,
+        )
+        try:
+            while True:
+                time.sleep(3600)
+                log.info("observer still DISABLED network=%s", s.network)
+        except KeyboardInterrupt:
+            log.info("observe stopped")
+        return
+    accts = {a.name: a.address for a in FUNDING_ACCOUNTS.get(s.network, [])}
+    our_submit = accts.get("Submit")
+    our_sig = accts.get("SubmitSignatures")
+    if not our_submit or not our_sig:
+        err.print(f"[bold red]observe: no Submit/SubmitSignatures address for {s.network}[/]")
+        raise typer.Exit(2)
+    with RpcClient(s.observe_rpc_url) as rpc:
+        submission = rpc.contract_address_by_name("Submission")
+        if not submission or int(submission, 16) == 0:
+            err.print("[bold red]observe: could not resolve the Submission contract[/]")
+            raise typer.Exit(2)
+        run_engine(
+            rpc=rpc, network=s.network, submission_address=submission,
+            our_submit=our_submit, our_sig=our_sig,
+            status_writer=lambda d: write_status_atomic(s.observe_status_file, d),
+            lookback_blocks=s.observe_lookback_blocks,
+            window_rounds=s.observe_window_rounds,
+            poll_sec=s.observe_poll_sec, log=log,
+        )
 
 
 if __name__ == "__main__":
