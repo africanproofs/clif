@@ -2401,6 +2401,7 @@ def fund_propose(
 def fund_apply(
     plan: Annotated[str, typer.Option("--plan", help="same JSON as `fund propose`")],
     network: Annotated[Optional[str], typer.Option("--network", envvar="NETWORK")] = None,
+    json_out: Annotated[bool, typer.Option("--json", help="emit the FundingResult as JSON (the MCP ACT surface)")] = False,
 ) -> None:
     """VALIDATE a proposed plan, then EXECUTE the accepted lines keyless (the ACT
     surface). Rejected lines are never touched; fwd's policy is the final gate."""
@@ -2408,7 +2409,10 @@ def fund_apply(
     if network:
         s.network = network  # type: ignore[assignment]
     if not s.funding_caller_token or not s.funding_wallet_name:
-        err.print("[bold red]fund apply: FUNDING_CALLER_TOKEN / FUNDING_WALLET_NAME not set[/]")
+        if json_out:
+            print(json.dumps({"error": "FUNDING_CALLER_TOKEN / FUNDING_WALLET_NAME not set"}))
+        else:
+            err.print("[bold red]fund apply: FUNDING_CALLER_TOKEN / FUNDING_WALLET_NAME not set[/]")
         raise typer.Exit(2)
     items = _resolve_plan(plan)
     reg = {a.name.lower(): a for a in FUNDING_ACCOUNTS.get(s.network, [])}
@@ -2421,14 +2425,41 @@ def fund_apply(
                 balances[a.address.lower()] = rpc.get_balance(a.address) / 1e18
         funder = read_health(rpc, s.network).funder_balance or 0.0
         lines = validate_plan(s.network, items, balances, funder)
-        for ln in lines:
-            if not ln.accepted:
-                log.warning("fund apply REJECTED %s %.2f: %s", ln.account, ln.amount, ln.reason)
+        if not json_out:
+            for ln in lines:
+                if not ln.accepted:
+                    log.warning("fund apply REJECTED %s %.2f: %s", ln.account, ln.amount, ln.reason)
         with FwdClient(s.fwd_endpoint, s.funding_caller_token) as fwd:
             res = apply_plan(
                 rpc=rpc, fwd=fwd, network=s.network,
                 wallet=s.funding_wallet_name, chain_id=s.net.chain_id, lines=lines,
             )
+    ok = not res.failed and not res.error
+    if json_out:
+        print(
+            json.dumps(
+                {
+                    "network": res.network,
+                    "ok": ok,
+                    "error": res.error,
+                    "skipped_ok": res.skipped_ok,
+                    "rejected": [
+                        {"account": ln.account, "amount": round(ln.amount, 6), "reason": ln.reason}
+                        for ln in lines if not ln.accepted
+                    ],
+                    "funded": [
+                        {"account": t.name, "address": t.address, "before": round(t.before, 6),
+                         "after": round(t.after, 6), "sent": round(t.sent, 6), "tx_hash": t.tx_hash}
+                        for t in res.funded
+                    ],
+                    "failed": [
+                        {"account": t.name, "detail": t.detail} for t in res.failed
+                    ],
+                },
+                indent=2,
+            )
+        )
+        raise typer.Exit(0 if ok else 2)
     for t in res.funded:
         log.info(
             "\033[32m💰 funded %s %.2f -> %.2f %s (+%.2f) %s\033[0m",
@@ -2438,7 +2469,7 @@ def fund_apply(
         log.error("\033[1;31m🔴 fund FAILED %s: %s\033[0m", t.name, t.detail)
     if res.error:
         log.error("\033[1;31m🔴 fund apply error: %s\033[0m", res.error)
-    raise typer.Exit(0 if not res.failed and not res.error else 2)
+    raise typer.Exit(0 if ok else 2)
 
 
 @fund_app.command(name="once")
