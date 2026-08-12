@@ -29,7 +29,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from clif.funding import _GREEN, _RED, _RESET, _YELLOW, ACCOUNTS, SYMBOL
+from clif.funding import _BADGE_REG, _GREEN, _RED, _RESET, _YELLOW, ACCOUNTS, SYMBOL
 from clif.rpc import RpcClient, RpcError
 
 # Submit must hold at least this many native tokens or a registerVoter can't be
@@ -199,6 +199,12 @@ def read_readiness(
 
 
 def render_readiness(r: RegistrationReadiness, *, active: bool) -> str:
+    """The registration line, prefixed with the REG module badge (fixed blue) so it is
+    distinguishable from the epoch/funding lines the daemon interleaves."""
+    return f"{_BADGE_REG} {_render_readiness_body(r, active=active)}"
+
+
+def _render_readiness_body(r: RegistrationReadiness, *, active: bool) -> str:
     """One COLOR-CODED line for the epoch/registration daemons. `active` = the
     operator is in a reward-signing phase (turn the volume up on anything wrong)."""
     sym = SYMBOL.get(r.network, "")

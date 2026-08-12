@@ -35,6 +35,14 @@ _RED = "\033[1;31m"  # bold red — reserved for "something is going wrong"
 _DIM = "\033[2m"
 _CYAN = "\033[36m"
 
+# Per-module badges — a FIXED hue per module (independent of severity, which still
+# colors the message body). The epoch daemon interleaves three module lines every
+# cycle (epoch schedule · funding · registration); the badge tells them apart at a
+# glance even when two share a severity color (e.g. both CRIT-red).
+_BADGE_EPOCH = "\033[1;36mEPCH\033[0m"  # cyan
+_BADGE_FUND = "\033[1;35mFUND\033[0m"  # magenta
+_BADGE_REG = "\033[1;34m REG\033[0m"  # blue
+
 _WEI = 10**18
 _AP_FUNDER_ADDRESS = "0xEa1355cC14f91092E135Eb2B43092DAe61Ebba27"
 
@@ -161,6 +169,12 @@ def read_health(rpc: RpcClient, network: str) -> FundingHealth:
 
 
 def render_health(h: FundingHealth, *, active: bool) -> str:
+    """The funding line, prefixed with the FUND module badge (fixed magenta) so it is
+    distinguishable from the epoch/registration lines the daemon interleaves."""
+    return f"{_BADGE_FUND} {_render_health_body(h, active=active)}"
+
+
+def _render_health_body(h: FundingHealth, *, active: bool) -> str:
     """One COLOR-CODED line for the epoch daemon. `active` = the operator is in a
     reward-signing phase (turn the volume up on anything wrong)."""
     sym = SYMBOL.get(h.network, "")

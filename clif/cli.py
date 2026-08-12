@@ -2067,7 +2067,7 @@ def epoch_run(
                             initial_delay=s.epoch_reward_initial_delay_sec,
                         )
                         log.info(
-                            "epoch schedule: %s",
+                            "\033[1;36mEPCH\033[0m %s",
                             schedule_line(
                                 observations,
                                 current,
