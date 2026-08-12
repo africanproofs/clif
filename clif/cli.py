@@ -368,12 +368,14 @@ def doctor(
         )
     else:
         console.print(f"  contracts: {len(contracts)} pinned, no drift")
-    _rsev = registration.get("severity")
+    _rsev = registration.get("severity") or "CRIT"  # the except-branch dict has no severity
     _rmsg = (
-        f"RE{registration.get('current_epoch')} registered={registration.get('current_registered')} "
-        f"next=RE{registration.get('next_epoch')} window={'open' if registration.get('next_window_enabled') else 'closed'}"
-        if "error" not in registration
-        else f"read error: {registration.get('error')}"
+        f"read error: {registration.get('error')}"
+        if registration.get("error")
+        else (
+            f"RE{registration.get('current_epoch')} registered={registration.get('current_registered')} "
+            f"next=RE{registration.get('next_epoch')} window={'open' if registration.get('next_window_enabled') else 'closed'}"
+        )
     )
     if _rsev == "OK":
         console.print(f"  register : {_rmsg}")
@@ -2673,9 +2675,16 @@ def registration_run(
                 line = render_readiness(r, active=False)
                 sev = r.severity
                 (log.info if sev == "OK" else log.warning if sev == "WARN" else log.error)(line)
-                # Tighten the cadence near the boundary, where the window opens briefly.
+                # Tighten the cadence when it matters: the registration window is
+                # actually OPEN (poll fast to catch WARN→OK or a will-FAIL the moment
+                # it resolves), OR we're within the boundary window (belt-and-suspenders
+                # in case the on-chain window opens earlier than the time heuristic
+                # guesses). NOT on a persistent current-epoch exclusion — that is a
+                # known, unfixable state (the window for it has closed); polling it
+                # every 2 min for days would just spam. The 10-min line still shows it.
                 ttb = r.time_to_boundary_sec
-                if ttb is not None and 0 <= ttb <= s.registration_tight_window_sec:
+                near_boundary = ttb is not None and ttb <= s.registration_tight_window_sec
+                if r.next_window_enabled or near_boundary:
                     sleep_for = s.registration_tight_interval_sec
             except Exception as exc:  # noqa: BLE001 — a bad cycle must not kill the daemon
                 log.error("\033[1;31m🔴 registration cycle error: %s\033[0m", exc)

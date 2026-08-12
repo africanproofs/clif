@@ -214,11 +214,11 @@ def render_readiness(r: RegistrationReadiness, *, active: bool) -> str:
             f"treat as NOT REGISTERED{_RESET}"
         )
 
-    # Base: current-epoch membership — the RE423 detector.
+    # Base: current-epoch membership — the RE423 detector. A live exclusion is the
+    # loudest state there is, so it always gets the double marker.
     if not r.current_registered:
-        loud = "🔴🔴" if (active or True) else "🔴"
         head = (
-            f"{_RED}{loud} NOT REGISTERED — {net} RE{r.current_epoch} LIVE EXCLUSION "
+            f"{_RED}🔴🔴 NOT REGISTERED — {net} RE{r.current_epoch} LIVE EXCLUSION "
             f"(ZERO rewards this epoch){_RESET}"
         )
     else:
