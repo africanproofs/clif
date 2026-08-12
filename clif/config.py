@@ -234,6 +234,17 @@ class Settings(BaseSettings):
     funding_wallet_name: str | None = None
     funding_poll_interval_sec: int = 900  # 15m — funding cadence (independent of epochs)
 
+    # --- Registration readiness (RE423 defence) — OBSERVE-only, no key/token. The
+    # `registration run` daemon reads the on-chain registered set + window and pages
+    # loudly; it never signs. Hard-off by default. Cadence tightens near the reward-
+    # epoch boundary (where the registerVoter window opens for ~6.7 min).
+    registration_enabled: bool = False
+    registration_poll_interval_sec: int = 600  # 10m far from the boundary
+    registration_tight_interval_sec: int = 120  # 2m within the boundary window
+    registration_tight_window_sec: int = 7200  # tighten within 2h of the epoch boundary
+    registration_gas_floor: float = 10.0  # Submit below this ⇒ can't afford registerVoter
+    registration_sender_account: str = "Submit"  # the registerVoter gas payer
+
     @property
     def net(self) -> NetworkConfig:
         return _NETWORKS[self.network]
@@ -270,6 +281,10 @@ class Settings(BaseSettings):
     @property
     def epoch_status_file(self) -> Path:
         return Path(self.clif_state_dir) / f"epoch-status-{self.network}.json"
+
+    @property
+    def registration_status_file(self) -> Path:
+        return Path(self.clif_state_dir) / f"registration-status-{self.network}.json"
 
 
 # --- fwd capability model (ADR-0001 §3) ----------------------------------------

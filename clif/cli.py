@@ -62,6 +62,7 @@ from clif.funding import (
     run_funding,
     validate_plan,
 )
+from clif.registration import read_readiness, render_readiness
 from clif.fwd_client import (
     FwdClient,
     FwdRetryableError,
@@ -155,6 +156,18 @@ fund_app = typer.Typer(
     ),
 )
 app.add_typer(fund_app, name="fund")
+
+registration_app = typer.Typer(
+    add_completion=False,
+    pretty_exceptions_show_locals=False,
+    help=(
+        "Registration readiness — is AP registered, and ready to register, for the "
+        "current and next reward epoch (the RE423 defence). `registration status` "
+        "reads state; `registration run` is the boundary-aware daemon. OBSERVE-only "
+        "— never signs or sends."
+    ),
+)
+app.add_typer(registration_app, name="registration")
 console = Console()
 err = Console(stderr=True)
 
@@ -287,6 +300,23 @@ def doctor(
         contracts = [{"error": str(exc)}]
     stale_contracts = [c["name"] for c in contracts if c.get("stale")]
 
+    # Registration readiness — the RE423 detector, surfaced here for the coordinator/
+    # MCP scrape. Informational: it does NOT gate doctor's exit code (doctor is about
+    # clif+fwd health; the `registration status`/daemon own the registration alert).
+    registration: dict = {}
+    try:
+        with RpcClient(s.rpc_url) as _rpc:
+            registration = read_readiness(
+                _rpc, s.network,
+                flare_systems_manager=s.net.flare_systems_manager,
+                voter_registry=s.net.voter_registry,
+                entity_manager=s.net.entity_manager,
+                gas_floor=s.registration_gas_floor,
+                sender_account=s.registration_sender_account,
+            ).to_dict()
+    except Exception as exc:  # noqa: BLE001 — diagnostics only, never fail doctor
+        registration = {"error": str(exc)}
+
     report = read_status(s.epoch_status_file)
     daemon_code, daemon_line = status_exit_code(report)
     daemon = {
@@ -312,6 +342,7 @@ def doctor(
                     "fwd": fwd_info,
                     "capabilities": cap_status,
                     "contracts": contracts,
+                    "registration": registration,
                     "daemon": daemon,
                 },
                 indent=2,
@@ -337,6 +368,17 @@ def doctor(
         )
     else:
         console.print(f"  contracts: {len(contracts)} pinned, no drift")
+    _rsev = registration.get("severity")
+    _rmsg = (
+        f"RE{registration.get('current_epoch')} registered={registration.get('current_registered')} "
+        f"next=RE{registration.get('next_epoch')} window={'open' if registration.get('next_window_enabled') else 'closed'}"
+        if "error" not in registration
+        else f"read error: {registration.get('error')}"
+    )
+    if _rsev == "OK":
+        console.print(f"  register : {_rmsg}")
+    else:
+        err.print(f"  [{'yellow' if _rsev == 'WARN' else 'bold red'}]register : {_rsev} — {_rmsg}[/]")
     console.print(f"  daemon   : {daemon_line}")
     c = _compat()
     console.print(
@@ -2053,6 +2095,29 @@ def epoch_run(
                                 log.error("%s", _fline)
                         except Exception as _fexc:  # noqa: BLE001 — never break the cycle
                             log.warning("funding-health read skipped: %s", _fexc)
+                        # Registration readiness, surfaced the same way (the RE423
+                        # detector): are we in the registered voter set for THIS epoch,
+                        # and ready for the next? A CRIT here = a live exclusion (no
+                        # rewards this epoch) or a prereq that will fail the next
+                        # registerVoter. OBSERVE-only; read_readiness never raises.
+                        try:
+                            _rr = read_readiness(
+                                rpc, s.network,
+                                flare_systems_manager=s.net.flare_systems_manager,
+                                voter_registry=s.net.voter_registry,
+                                entity_manager=s.net.entity_manager,
+                                gas_floor=s.registration_gas_floor,
+                                sender_account=s.registration_sender_account,
+                            )
+                            _rline = render_readiness(_rr, active=bool(active))
+                            if _rr.severity == "OK":
+                                log.info("%s", _rline)
+                            elif _rr.severity == "WARN":
+                                log.warning("%s", _rline)
+                            else:
+                                log.error("%s", _rline)
+                        except Exception as _rexc:  # noqa: BLE001 — never break the cycle
+                            log.warning("registration-readiness read skipped: %s", _rexc)
                 except RpcError as exc:
                     log.warning("epoch rpc failure: %s (retry next cycle)", exc)
                 except FwdRetryableError as exc:
@@ -2527,6 +2592,96 @@ def fund_run(
             time.sleep(iv)
     except KeyboardInterrupt:
         log.info("fund stopped")
+
+
+def _read_readiness(s):
+    """One readiness read for the current settings' network (opens its own RPC)."""
+    with RpcClient(s.rpc_url) as rpc:
+        return read_readiness(
+            rpc, s.network,
+            flare_systems_manager=s.net.flare_systems_manager,
+            voter_registry=s.net.voter_registry,
+            entity_manager=s.net.entity_manager,
+            gas_floor=s.registration_gas_floor,
+            sender_account=s.registration_sender_account,
+        )
+
+
+@registration_app.command(name="status")
+def registration_status(
+    network: Annotated[Optional[str], typer.Option("--network", envvar="NETWORK")] = None,
+    json_out: Annotated[bool, typer.Option("--json", help="machine-readable (the MCP scrape surface)")] = False,
+) -> None:
+    """Are we registered, and ready to register, for the current + next reward epoch?
+
+    The RE423 detector (read-only). Exit 0/1/2 = OK/WARN/CRIT. A CRIT means either a
+    LIVE exclusion (not in the current registered set) or a prereq that will make the
+    next registerVoter fail (gas below floor / 0 vote power / entity gap) — or a read
+    error (never green on unknown)."""
+    s = _settings()
+    if network:
+        s.network = network  # type: ignore[assignment]
+    r = _read_readiness(s)
+    if json_out:
+        print(json.dumps(r.to_dict(), indent=2))
+    else:
+        print(render_readiness(r, active=False))
+    raise typer.Exit(0 if r.severity == "OK" else (1 if r.severity == "WARN" else 2))
+
+
+@registration_app.command(name="run")
+def registration_run(
+    interval: Annotated[
+        Optional[int], typer.Option("--interval", help="override the far-from-boundary poll seconds")
+    ] = None,
+) -> None:
+    """Boundary-aware registration-readiness daemon (the `clif-registration-<net>` service).
+
+    OBSERVE-only — reads the on-chain registered set + window and logs a COLOR-CODED
+    readiness line each cycle; NEVER signs or sends. Tightens its cadence within
+    `registration_tight_window_sec` of the reward-epoch boundary (where the registerVoter
+    window opens for ~6.7 min). Hard-off unless REGISTRATION_ENABLED=true; refuses to
+    start without an explicit NETWORK."""
+    if not os.environ.get("NETWORK"):
+        err.print("[bold red]registration run refuses to start without an explicit NETWORK[/]")
+        raise typer.Exit(2)
+    s = _settings()
+    if not s.registration_enabled:
+        log.warning(
+            "registration daemon DISABLED — REGISTRATION_ENABLED is not true; idling. "
+            "Set REGISTRATION_ENABLED=true in .env.%s and restart to enable.", s.network,
+        )
+        try:
+            while True:
+                time.sleep(3600)
+                log.info("registration daemon still DISABLED network=%s", s.network)
+        except KeyboardInterrupt:
+            log.info("registration stopped")
+        return
+    far = interval or s.registration_poll_interval_sec
+    log.info(
+        "registration start network=%s cadence=%ss (tight %ss within %ss of boundary) gas_floor=%s",
+        s.network, far, s.registration_tight_interval_sec, s.registration_tight_window_sec,
+        s.registration_gas_floor,
+    )
+    try:
+        while True:
+            sleep_for = far
+            try:
+                r = _read_readiness(s)
+                write_status_atomic(s.registration_status_file, r.to_dict())
+                line = render_readiness(r, active=False)
+                sev = r.severity
+                (log.info if sev == "OK" else log.warning if sev == "WARN" else log.error)(line)
+                # Tighten the cadence near the boundary, where the window opens briefly.
+                ttb = r.time_to_boundary_sec
+                if ttb is not None and 0 <= ttb <= s.registration_tight_window_sec:
+                    sleep_for = s.registration_tight_interval_sec
+            except Exception as exc:  # noqa: BLE001 — a bad cycle must not kill the daemon
+                log.error("\033[1;31m🔴 registration cycle error: %s\033[0m", exc)
+            time.sleep(sleep_for)
+    except KeyboardInterrupt:
+        log.info("registration stopped")
 
 
 if __name__ == "__main__":

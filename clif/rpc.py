@@ -553,6 +553,81 @@ class RpcClient:
         )
         return int(ws), int(nws), int(nws_pk)
 
+    # ---- registration readiness (VoterRegistry + FSM), revert-tolerant ----
+    #
+    # For a reward epoch whose registration has not been set up yet (typically N+1
+    # before the FSM emits VotePowerBlockSelected), these views REVERT with
+    # "reward epoch id not supported" (the same string that blindsided v0.5.43).
+    # That is a NORMAL "window not open yet" state, not an error, so each read
+    # below catches it and returns a not-open / not-registered / zero sentinel;
+    # any OTHER RpcError still propagates.
+
+    @staticmethod
+    def _is_benign_registration_revert(exc: RpcError) -> bool:
+        """A revert that means "not registered / window not open for this epoch" —
+        a NORMAL readiness state, not a transport error. `isVoterRegistered` returns
+        a clean bool, but `getVoterRegistrationWeight` REVERTS `voter not registered`
+        for an absent voter, and future-epoch views revert `... not supported`."""
+        m = str(exc).lower()
+        return "not supported" in m or "voter not registered" in m
+
+    def is_voter_registered(self, voter_registry: str, voter: str, epoch_id: int) -> bool:
+        """isVoterRegistered(address,uint256) → bool — is `voter` in the registered
+        set for `epoch_id`. THE positive membership signal (the RE423 blind spot).
+        Returns a clean bool (no revert); a not-supported revert ⇒ False."""
+        data = (
+            "0x"
+            + selector("isVoterRegistered(address,uint256)").hex()
+            + abi_encode(["address", "uint256"], [voter, epoch_id]).hex()
+        )
+        try:
+            (out,) = self._abi_decode(["bool"], self.eth_call(voter_registry, data))
+        except RpcError as exc:
+            if self._is_benign_registration_revert(exc):
+                return False
+            raise
+        return bool(out)
+
+    def voter_registration_weight(self, voter_registry: str, voter: str, epoch_id: int) -> int:
+        """getVoterRegistrationWeight(address,uint256) → uint256 (wei) — the vote
+        power `voter` will register / has registered with for `epoch_id`. 0 ⇒
+        effectively excluded even if the tx lands. REVERTS `voter not registered`
+        for an absent voter and `... not supported` for a future epoch ⇒ both 0."""
+        data = (
+            "0x"
+            + selector("getVoterRegistrationWeight(address,uint256)").hex()
+            + abi_encode(["address", "uint256"], [voter, epoch_id]).hex()
+        )
+        try:
+            (out,) = self._abi_decode(["uint256"], self.eth_call(voter_registry, data))
+        except RpcError as exc:
+            if self._is_benign_registration_revert(exc):
+                return 0
+            raise
+        return int(out)
+
+    def voter_registration_data(
+        self, flare_systems_manager: str, epoch_id: int
+    ) -> tuple[int, bool]:
+        """getVoterRegistrationData(uint256) → (votePowerBlock, enabled) — the
+        registration window for `epoch_id`: enabled=True once it is open, against
+        the vote-power block where weight is measured. Revert ⇒ (0, False) (the
+        FSM has not yet emitted VotePowerBlockSelected — window not open)."""
+        data = (
+            "0x"
+            + selector("getVoterRegistrationData(uint256)").hex()
+            + abi_encode(["uint256"], [epoch_id]).hex()
+        )
+        try:
+            vpb, enabled = self._abi_decode(
+                ["uint256", "bool"], self.eth_call(flare_systems_manager, data)
+            )
+        except RpcError as exc:
+            if self._is_benign_registration_revert(exc):
+                return 0, False
+            raise
+        return int(vpb), bool(enabled)
+
     def signing_policy_threshold_ppm(self, flare_systems_manager: str) -> int:
         """signingPolicyThresholdPPM() → uint24 (e.g. 500000 = 50%). Keyless read."""
         data = "0x" + selector("signingPolicyThresholdPPM()").hex()

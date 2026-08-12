@@ -132,6 +132,31 @@ services:
     profiles: ["multichain"]
     restart: unless-stopped
 
+  # Registration-readiness daemons (the RE423 detector) — OBSERVE-only, no key/token.
+  # Boundary-aware: tightens cadence near the reward-epoch boundary (where the
+  # registerVoter window opens for ~6.7 min). Reads the on-chain registered set +
+  # window and logs a color-coded readiness line; NEVER signs. Hard-off
+  # (REGISTRATION_ENABLED). Needs only egress (RPC reads); not on fwd-net.
+  clif-registration-songbird:
+    build: .
+    image: clif:dev
+    container_name: clif-registration-songbird
+    command: ["registration", "run"]
+    env_file: [.env.songbird]
+    networks: [egress]
+    profiles: ["multichain"]
+    restart: unless-stopped
+
+  clif-registration-flare:
+    build: .
+    image: clif:dev
+    container_name: clif-registration-flare
+    command: ["registration", "run"]
+    env_file: [.env.flare]
+    networks: [egress]
+    profiles: ["multichain"]
+    restart: unless-stopped
+
 networks:
   fwd-net:
     external: true
