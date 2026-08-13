@@ -124,12 +124,25 @@ def _block_ts_retry(rpc: RpcClient, n: int, *, tries: int = 4) -> int:
 
 
 def _find_block_for_ts(rpc: RpcClient, target_ts: int) -> int:
-    """First block with timestamp >= target_ts (binary search)."""
+    """First SERVABLE block with timestamp >= target_ts (binary search).
+
+    Robust against a PRUNED node: our targets are always recent (an epoch-N−1 start, days
+    back), so any block the node no longer serves is necessarily OLDER than the target — a
+    'not found' probe therefore means 'search higher', converging to the first retained block
+    ≥ target without a magic retention floor. Genuine transient blips are absorbed by
+    `_block_ts_retry`; only a persistent 'not found' is treated as pruned.
+    """
     hi = rpc.block_number()
     lo = 1
     while lo < hi:
         mid = (lo + hi) // 2
-        ts = _block_ts_retry(rpc, mid)
+        try:
+            ts = _block_ts_retry(rpc, mid)
+        except RpcError as exc:
+            if "not found" in str(exc):
+                lo = mid + 1  # pruned ⇒ older than our recent target ⇒ go higher
+                continue
+            raise
         if ts < target_ts:
             lo = mid + 1
         else:
