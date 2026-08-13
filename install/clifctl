@@ -11,8 +11,8 @@
 #   clifctl down <net>      # stop + remove it
 #   clifctl restart <net>
 #   clifctl status [<net>]  # compose state (+ `clif epoch status` when <net> is given)
-#   clifctl logs <net>      # follow ALL that net's daemons (epoch+fund+registration+observe)
-#   clifctl logs <net> --sorted   # bounded, merged, chronological history (no follow)
+#   clifctl logs <net>      # ALL that net's daemons, MERGED + time-sorted history, then follows live
+#   clifctl logs <net> --sorted   # the sorted history only (no live follow)
 #   clifctl run <net> …     # one-shot manual op: claim / fsp / preflight / chain nonce / rehearse
 #   clifctl build           # build the clif image from source
 #
@@ -119,13 +119,13 @@ case "$cmd" in
     # standalone fund, registration, and observe daemons. Only services actually
     # defined for the network are included (e.g. coston2 has epoch only).
     #
-    # Default = live follow (`docker compose logs -f`): new lines from all daemons
-    # interleave chronologically as they arrive; only the startup backlog is grouped
-    # per-container (a compose limitation). Pass `--sorted` for a BOUNDED, merged,
-    # timestamp-ordered history (no follow) — each app line carries an ISO timestamp
-    # right after the "| ", so we sort on that.
+    # DEFAULT = time-ordered: print the recent backlog MERGED + sorted by timestamp,
+    # then follow live (new lines appended in arrival order ≈ chronological). Each app
+    # line carries an ISO timestamp right after the "| ", so we sort on that, and we
+    # re-apply a FIXED hue per module (matching the badges: epoch cyan · fund magenta ·
+    # registration blue · observe orange) since piping strips compose's prefix colors.
+    # `--sorted` = the bounded sorted history WITHOUT the live follow (for review/piping).
     _net="${1:?clifctl logs needs a network}"; _net_ok "$_net"; shift
-    # Split out our own `--sorted` flag; everything else passes through to compose.
     _sorted=0; _rest=""
     for a in "$@"; do case "$a" in --sorted) _sorted=1 ;; *) _rest="$_rest $a" ;; esac; done
     _defined=$(docker compose --profile multichain config --services 2>/dev/null || true)
@@ -139,24 +139,20 @@ $_svc
 "*) _svcs="$_svcs $_svc" ;; esac
     done
     [ -n "$_svcs" ] || _svcs="clif-epoch-$_net"
-    if [ "$_sorted" -eq 1 ]; then
-      # Bounded, merged, chronological. Default a deeper backlog since there's no follow.
-      # Piping to sort makes compose drop its per-container prefix color, so re-apply a
-      # FIXED hue per module after the sort (matching the badge colors: epoch cyan ·
-      # fund magenta · registration blue · observe orange). The message body keeps its
-      # own embedded colors untouched.
-      case " $_rest " in *" --tail"*) _tail="" ;; *) _tail="--tail=100" ;; esac
-      docker compose --profile multichain logs $_tail $_svcs $_rest | sort -t'|' -k2 | awk '
-        { i=index($0,"|");
-          if(i){ pre=substr($0,1,i-1); rest=substr($0,i);
-            c=(pre~/-epoch-/)?"\033[36m":(pre~/-fund-/)?"\033[35m":(pre~/-registration-/)?"\033[34m":(pre~/-observe-/)?"\033[38;5;208m":"";
-            if(c!="") printf "%s%s\033[0m%s\n",c,pre,rest; else print }
-          else print }'
-      exit $?
-    fi
-    # Live follow: default a short backlog unless the caller sets their own --tail/-n.
+    # Colorizer: prefix (before the first "|") gets its module hue; body untouched; flush
+    # per line so it streams live in the follow phase.
+    _COLORIZE='{ i=index($0,"|");
+      if(i){ pre=substr($0,1,i-1); rest=substr($0,i);
+        c=(pre~/-epoch-/)?"\033[36m":(pre~/-fund-/)?"\033[35m":(pre~/-registration-/)?"\033[34m":(pre~/-observe-/)?"\033[38;5;208m":"";
+        if(c!="") printf "%s%s\033[0m%s\n",c,pre,rest; else print }
+      else print; fflush() }'
     case " $_rest " in *" --tail"*|*" -n "*) _tail="" ;; *) _tail="--tail=30" ;; esac
-    exec docker compose --profile multichain logs -f $_tail $_svcs $_rest ;;
+    # 1) sorted, colorized recent history
+    docker compose --profile multichain logs --no-color $_tail $_svcs $_rest 2>/dev/null | sort -t'|' -k2 | awk "$_COLORIZE" || true
+    [ "$_sorted" -eq 1 ] && exit 0
+    # 2) then follow live from now (no backlog), colorized the same way (can't `exec` a
+    # pipeline, so run it as the final command — it follows until interrupted).
+    docker compose --profile multichain logs -f --no-color --tail=0 $_svcs | awk "$_COLORIZE" ;;
   run)
     # one-shot: override the daemon's command with the given clif args, reusing .env.<net>
     # (NETWORK + caller tokens). `docker compose run` generates its own container name, so
@@ -212,7 +208,7 @@ $_svc
     echo "usage: clifctl {up|down|restart|status|logs|run|doctor} <net> [args] | import-credentials <net> <bundle> | nonce-sync [<net>] | build" >&2
     echo "       <net> = flare | songbird | coston2 ; clif is the SEPARATE reward-automation deployment" >&2
     echo "       up <net>      start the epoch sign→claim daemon (needs FSP_AUTO_ENABLED=true in .env.<net>)" >&2
-    echo "       logs <net> [--sorted]   ALL that net's daemons in one stream (epoch+fund+registration+observe); --sorted = bounded chronological history" >&2
+    echo "       logs <net> [--sorted]   ALL that net's daemons MERGED + time-sorted, then follows live; --sorted = sorted history only (no follow)" >&2
     echo "       status <net> [--json]   compose + daemon health (--json = machine-readable scrape)" >&2
     echo "       doctor <net> [--json]   consumer self-check: keyless, fwd, capabilities, compat (ADR-0001)" >&2
     echo "       run <net> …   one-shot: claim --type fee | fsp uptime --epoch N | preflight --identity 0x… | chain nonce --address 0x…" >&2
