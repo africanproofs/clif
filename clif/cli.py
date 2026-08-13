@@ -2775,6 +2775,9 @@ def observe_run() -> None:
             flare_systems_manager=s.net.flare_systems_manager,
             identity=identity,
             fdc_hub=fdc_hub,
+            entity_manager=s.net.entity_manager,
+            iqr_cache_dir=str(s.clif_state_dir),
+            iqr_enabled=s.observe_iqr,
             log=log,
         )
 

@@ -93,3 +93,55 @@ def test_overall_empty_is_none():
 
     ov = overall({})
     assert ov["inner_pct"] is None and ov["feed_rounds"] == 0
+
+
+# ---- streaming integration (ObserverState IQR path) -----------------------------
+
+
+def _offer(feeds, ppm=500):
+    from clif.observe.reward_rule import OfferParams
+
+    return OfferParams(
+        reward_epoch_id=1, network="songbird", block=0, primary_band_reward_share_ppm=400000,
+        min_rewarded_turnout_bips=0, feeds=feeds, decimals={f: 2 for f in feeds},
+        secondary_band_width_ppm={f: ppm for f in feeds},
+    )
+
+
+def test_state_scores_ap_at_finalize_and_clears_votes():
+    from clif.observe.state import ObserverState
+
+    ap = "0x" + "a" * 40
+    sig = "0x" + "b" * 40
+    v = [("0x" + c * 40) for c in ("1", "2", "3", "4", "5")]  # 5 registered voters
+    st = ObserverState("songbird", ap, sig)
+    st.set_iqr_context(_offer(["BTC/USD", "XRP/USD"]), {a.lower(): 1 for a in v})
+
+    R = 1_000_000
+    for a in v:  # unanimous consensus ⇒ median == Q1 == Q3 (deterministic)
+        st.record_reveal_values(R, a.lower(), [102000, 50000])
+    st.record_reveal_values(R, ap.lower(), [102000, 99999])  # BTC == median; XRP far outside
+
+    rs = st.rounds[R]
+    assert rs.iqr_votes[0] and rs.iqr_ap_values == [102000, 99999]
+    st._finalize(rs)
+
+    # BTC: value == Q1==Q3 ⇒ BOUNDARY, capped (Q3−Q1==0), and inside the tiny PCT band.
+    assert rs.iqr_results["BTC/USD"] == ("B", True, True)
+    # XRP: 99999 is outside the IQR and outside the PCT band around 50000 (unanimous ⇒ capped).
+    assert rs.iqr_results["XRP/USD"] == ("O", False, True)
+    assert rs.iqr_votes == {}  # per-round vote buffer freed
+
+    agg = st.aggregates()
+    assert agg["iqr_feed_rounds"] == 2 and agg["iqr_boundary"] == 1
+    assert agg["iqr_pct_hit"] == 1 and agg["iqr_capped"] == 2 and agg["iqr_scored_rounds"] == 1
+
+
+def test_iqr_off_when_no_context():
+    from clif.observe.state import ObserverState
+
+    st = ObserverState("songbird", "0x" + "a" * 40, "0x" + "b" * 40)
+    st.record_reveal_values(5, ("0x" + "a" * 40).lower(), [1, 2, 3])  # no context ⇒ AP vals kept, no votes
+    rs = st.rounds[5]
+    st._finalize(rs)
+    assert rs.iqr_results == {} and st.aggregates()["iqr_feed_rounds"] == 0

@@ -14,7 +14,9 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from py_flare_common.ftso.commit import commit_hash
+from py_flare_common.ftso.median import FtsoVote, calculate_median
 
+from clif.observe.reward_rule import BandClass, classify_bands
 from clif.observe.timing import submit1_window, submit2_window
 
 
@@ -36,6 +38,12 @@ class RoundState:
     fdc_num_requests_claimed: int | None = None
     fdc_sig_seen: bool = False  # AP submitted an FDC signature (submitSignatures.fdc)
     fdc_gap: bool = False  # set at finalize: requests existed but we didn't bitvote
+    # IQR reward-band scoring (Phase 2 — quality, not liveness). Transient per-round: all
+    # registered voters' reveals accumulate here, AP's own values kept aside, both consumed at
+    # finalize into `iqr_results` (then the raw votes are dropped to bound memory).
+    iqr_votes: dict[int, list] = field(default_factory=dict)  # feed_idx -> [FtsoVote]
+    iqr_ap_values: list | None = None  # AP's own submitted per-feed values this round
+    iqr_results: dict[str, tuple[str, bool, bool]] = field(default_factory=dict)  # feed -> (band, pct_hit, capped)
     # verdict (set at finalize)
     reveal_offence: bool = False
     issues: list[str] = field(default_factory=list)
@@ -75,6 +83,14 @@ class ObserverState:
         self.last_block: int | None = None
         self.last_ts: int | None = None
         self.last_round_finalized: int | None = None
+        # IQR context (set per reward epoch by the engine; None ⇒ IQR scoring off this session).
+        self.iqr_offer = None  # reward_rule.OfferParams | None
+        self.iqr_weight_map: dict[str, int] = {}  # {registered submit_addr_lc: weight}
+
+    def set_iqr_context(self, offer, weight_map: dict[str, int]) -> None:
+        """Install the per-reward-epoch band params + voter→weight map that turn on IQR scoring."""
+        self.iqr_offer = offer
+        self.iqr_weight_map = weight_map
 
     def _round(self, rid: int) -> RoundState:
         rs = self.rounds.get(rid)
@@ -113,6 +129,40 @@ class ObserverState:
             frs.fdc_bitvote_len = decoded.fdc_bitvote_len
             frs.fdc_num_requests_claimed = decoded.fdc_num_requests
 
+    def record_reveal_values(self, round_id: int, from_lc: str, values: list) -> None:
+        """One submit2's per-feed values, from AP or a registered voter (IQR scoring only). AP's
+        values are kept aside; a registered voter's are folded into the round's weighted votes."""
+        rs = self._round(round_id)
+        if from_lc == self._submit_lc:
+            rs.iqr_ap_values = values
+        w = self.iqr_weight_map.get(from_lc)
+        if w:
+            for i, v in enumerate(values):
+                if v is not None:
+                    rs.iqr_votes.setdefault(i, []).append(FtsoVote(value=int(v), weight=w))
+
+    def _score_iqr(self, rs: RoundState) -> None:
+        """At finalize: per feed, median/quartiles from ALL registered voters' reveals, then
+        classify AP's own value (inner=IQR band, outer=PCT band). Raw votes dropped afterwards."""
+        offer = self.iqr_offer
+        ap_vals = rs.iqr_ap_values
+        if offer is None or ap_vals is None:
+            rs.iqr_votes = {}
+            return
+        for i, name in enumerate(offer.feeds):
+            votes = rs.iqr_votes.get(i)
+            if not votes or i >= len(ap_vals) or ap_vals[i] is None:
+                continue
+            m = calculate_median(votes)
+            cls = classify_bands(
+                value_raw=int(ap_vals[i]),
+                q1_raw=m.first_quartile, q3_raw=m.third_quartile, median_raw=m.value,
+                secondary_band_width_ppm=offer.secondary_band_width_ppm.get(name, 0),
+            )
+            band = {BandClass.INSIDE: "I", BandClass.BOUNDARY: "B"}.get(cls["band_class"], "O")
+            rs.iqr_results[name] = (band, bool(cls["pct_hit"]), cls["band_ticks"] <= 1)
+        rs.iqr_votes = {}  # free the per-round vote buffer
+
     def record_fdc_request(self, round_id: int) -> None:
         """One FdcHub AttestationRequest observed for `round_id` (the round of the block it
         was emitted in). Rounds accumulate a request count that gates FDC-participation checks."""
@@ -149,6 +199,8 @@ class ObserverState:
         if rs.fdc_expected and not rs.fdc_bitvote_seen:
             rs.fdc_gap = True
             rs.issues.append(f"FDC: no bitvote (~{rs.fdc_request_count} request(s) this round)")
+        # IQR reward-band scoring (informational — never sets an issue or affects `clean`).
+        self._score_iqr(rs)
         self.finalized.append(rs)
         self.last_round_finalized = rs.round_id
 
@@ -170,6 +222,23 @@ class ObserverState:
     def aggregates(self) -> dict:
         w = list(self.finalized)
         n = len(w)
+        # IQR rollup over the window (feed-rounds): inner = inside + ½·boundary (expected primary
+        # rate under the boundary coin-flip); outer = pct-band hits. `capped` = Q3−Q1 ≤ 1 tick.
+        iqr_fr = iqr_inside = iqr_boundary = iqr_pct = iqr_capped = 0
+        iqr_scored_rounds = 0
+        for r in w:
+            if r.iqr_results:
+                iqr_scored_rounds += 1
+            for band, pct, capped in r.iqr_results.values():
+                iqr_fr += 1
+                if band == "I":
+                    iqr_inside += 1
+                elif band == "B":
+                    iqr_boundary += 1
+                if pct:
+                    iqr_pct += 1
+                if capped:
+                    iqr_capped += 1
         return {
             "window_rounds": n,
             "complete": sum(1 for r in w if r.clean),
@@ -180,5 +249,11 @@ class ObserverState:
             "fdc_request_rounds": sum(1 for r in w if r.fdc_expected),
             "fdc_participated": sum(1 for r in w if r.fdc_expected and r.fdc_bitvote_seen and not r.fdc_gap),
             "fdc_missing": sum(1 for r in w if r.fdc_gap),
+            "iqr_scored_rounds": iqr_scored_rounds,
+            "iqr_feed_rounds": iqr_fr,
+            "iqr_inside": iqr_inside,
+            "iqr_boundary": iqr_boundary,
+            "iqr_pct_hit": iqr_pct,
+            "iqr_capped": iqr_capped,
             "recent_issues": [f"RD{r.round_id}: {'; '.join(r.issues)}" for r in w if r.issues][-8:],
         }

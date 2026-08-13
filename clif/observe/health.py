@@ -57,6 +57,13 @@ class ObserveHealth:
     fdc_request_rounds: int = 0  # rounds in the window that had FDC attestation requests
     fdc_participated: int = 0  # of those, rounds AP bitvoted (clean)
     fdc_missing: int = 0  # request-rounds AP failed to bitvote
+    # IQR reward-band scoring (quality, not liveness — informational, never drives severity).
+    iqr_scored_rounds: int = 0  # finalized rounds where AP's values were band-scored
+    iqr_feed_rounds: int = 0  # feed×round observations scored
+    iqr_inside: int = 0  # inside the IQR (primary band)
+    iqr_boundary: int = 0  # on Q1/Q3 (coin-flip → counts ½ toward inner)
+    iqr_pct_hit: int = 0  # inside the secondary (PCT) band
+    iqr_capped: int = 0  # feed-rounds where Q3−Q1 ≤ 1 tick (structural ~50% inner ceiling)
     recent_issues: list[str] | None = None
     registered: bool | None = None  # in the registered voter set for the current reward epoch?
     reward_epoch: int | None = None
@@ -82,6 +89,19 @@ class ObserveHealth:
         if self.fdc_request_rounds <= 0:
             return None
         return round(100.0 * self.fdc_participated / self.fdc_request_rounds, 1)
+
+    @property
+    def iqr_inner_pct(self) -> float | None:
+        """Expected primary-band hit rate: (inside + ½·boundary) / feed-rounds."""
+        if self.iqr_feed_rounds <= 0:
+            return None
+        return round(100.0 * (self.iqr_inside + 0.5 * self.iqr_boundary) / self.iqr_feed_rounds, 1)
+
+    @property
+    def iqr_outer_pct(self) -> float | None:
+        if self.iqr_feed_rounds <= 0:
+            return None
+        return round(100.0 * self.iqr_pct_hit / self.iqr_feed_rounds, 1)
 
     @property
     def severity(self) -> str:
@@ -128,6 +148,11 @@ class ObserveHealth:
             "fdc_participated": self.fdc_participated,
             "fdc_missing": self.fdc_missing,
             "fdc_participation_pct": self.fdc_participation_pct,
+            "iqr_scored_rounds": self.iqr_scored_rounds,
+            "iqr_feed_rounds": self.iqr_feed_rounds,
+            "iqr_inner_pct": self.iqr_inner_pct,
+            "iqr_outer_pct": self.iqr_outer_pct,
+            "iqr_capped": self.iqr_capped,
             "registered": self.registered,
             "reward_epoch": self.reward_epoch,
             "recent_issues": self.recent_issues or [],
@@ -160,6 +185,12 @@ def read_observe_status(path: Path, *, enabled: bool) -> ObserveHealth:
         fdc_request_rounds=d.get("fdc_request_rounds", 0),
         fdc_participated=d.get("fdc_participated", 0),
         fdc_missing=d.get("fdc_missing", 0),
+        iqr_scored_rounds=d.get("iqr_scored_rounds", 0),
+        iqr_feed_rounds=d.get("iqr_feed_rounds", 0),
+        iqr_inside=d.get("iqr_inside", 0),
+        iqr_boundary=d.get("iqr_boundary", 0),
+        iqr_pct_hit=d.get("iqr_pct_hit", 0),
+        iqr_capped=d.get("iqr_capped", 0),
         registered=d.get("registered"),
         reward_epoch=d.get("reward_epoch"),
         recent_issues=d.get("recent_issues", []),
@@ -191,6 +222,9 @@ def render_observe(h: ObserveHealth, *, active: bool) -> str:
     # FDC clause — only meaningful when the window had request-rounds.
     if h.fdc_request_rounds:
         body += f" · FDC {h.fdc_participated}/{h.fdc_request_rounds} ({h.fdc_participation_pct}%)"
+    # IQR reward-band quality clause — only once a round has been band-scored.
+    if h.iqr_feed_rounds:
+        body += f" · IQR in {h.iqr_inner_pct}% / out {h.iqr_outer_pct}%"
     if sev == "OK":
         return f"{_BADGE_OBS} {_GREEN}✓ {body}{_RESET}"
     problems = []

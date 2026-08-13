@@ -254,6 +254,7 @@ class Settings(BaseSettings):
     observe_lookback_blocks: int = 900  # seed depth (~15min/~10 rounds; window fills forward to 40)
     observe_window_rounds: int = 40  # rolling health window (~1h of rounds)
     observe_poll_sec: int = 2  # new-block poll cadence
+    observe_iqr: bool = True  # score AP's inner/outer reward-band hit rates (needs the all-voter reveal decode)
 
     @property
     def net(self) -> NetworkConfig:
