@@ -211,9 +211,12 @@ def render_observe(h: ObserveHealth, *, active: bool) -> str:
         # The RE423 blind spot made explicit: we ARE submitting, but it earns nothing.
         subs = f"{h.complete}/{h.window_rounds}" if h.window_rounds else "0"
         loud = "🔴🔴" if active else "🔴"
+        # Still surface the WOULD-BE IQR quality — it's scored vs the registered consensus, so it
+        # stays meaningful (and visible) even while AP is excluded.
+        wb = f" · would-be IQR in {h.iqr_inner_pct}% / out {h.iqr_outer_pct}%" if h.iqr_feed_rounds else ""
         return (
             f"{_BADGE_OBS} {_RED}{loud} submitting {subs} rounds on {h.network} — but NOT REGISTERED "
-            f"for RE{h.reward_epoch}: these submissions earn ZERO{_RESET}"
+            f"for RE{h.reward_epoch}: these submissions earn ZERO{_RESET}{wb}"
         )
     if h.window_rounds == 0:
         return f"{_BADGE_OBS} {_YELLOW}⚠ warming up on {h.network} (no finalized round yet, block {h.last_block}){_RESET}"
