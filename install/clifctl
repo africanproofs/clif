@@ -11,7 +11,7 @@
 #   clifctl down <net>      # stop + remove it
 #   clifctl restart <net>
 #   clifctl status [<net>]  # compose state (+ `clif epoch status` when <net> is given)
-#   clifctl logs <net>      # follow the daemon's logs
+#   clifctl logs <net>      # follow ALL that net's daemons (epoch+fund+registration+observe)
 #   clifctl run <net> …     # one-shot manual op: claim / fsp / preflight / chain nonce / rehearse
 #   clifctl build           # build the clif image from source
 #
@@ -113,8 +113,25 @@ case "$cmd" in
     _net="${1:?clifctl doctor needs a network}"; _net_ok "$_net"; _envf "$_net"; shift
     exec docker compose --profile multichain run --rm "clif-epoch-$_net" doctor "$@" ;;
   logs)
+    # Follow ALL of that network's clif daemons in one prefixed stream: the epoch
+    # sign→claim daemon (which itself surfaces the EPCH/FUND/REG lines each cycle),
+    # plus the standalone fund, registration, and observe daemons. Only services
+    # actually defined for the network are included (e.g. coston2 has epoch only).
     _net="${1:?clifctl logs needs a network}"; _net_ok "$_net"; shift
-    exec docker compose --profile multichain logs -f "clif-epoch-$_net" "$@" ;;
+    _defined=$(docker compose --profile multichain config --services 2>/dev/null || true)
+    _svcs=""
+    for _role in epoch fund registration observe; do
+      _svc="clif-$_role-$_net"
+      case "
+$_defined
+" in *"
+$_svc
+"*) _svcs="$_svcs $_svc" ;; esac
+    done
+    [ -n "$_svcs" ] || _svcs="clif-epoch-$_net"
+    # Default to a short backlog unless the caller sets their own --tail/-n.
+    case " $* " in *" --tail"*|*" -n "*) _tail="" ;; *) _tail="--tail=30" ;; esac
+    exec docker compose --profile multichain logs -f $_tail $_svcs "$@" ;;
   run)
     # one-shot: override the daemon's command with the given clif args, reusing .env.<net>
     # (NETWORK + caller tokens). `docker compose run` generates its own container name, so
@@ -170,6 +187,7 @@ case "$cmd" in
     echo "usage: clifctl {up|down|restart|status|logs|run|doctor} <net> [args] | import-credentials <net> <bundle> | nonce-sync [<net>] | build" >&2
     echo "       <net> = flare | songbird | coston2 ; clif is the SEPARATE reward-automation deployment" >&2
     echo "       up <net>      start the epoch sign→claim daemon (needs FSP_AUTO_ENABLED=true in .env.<net>)" >&2
+    echo "       logs <net>    follow ALL that net's daemons in one stream (epoch+fund+registration+observe)" >&2
     echo "       status <net> [--json]   compose + daemon health (--json = machine-readable scrape)" >&2
     echo "       doctor <net> [--json]   consumer self-check: keyless, fwd, capabilities, compat (ADR-0001)" >&2
     echo "       run <net> …   one-shot: claim --type fee | fsp uptime --epoch N | preflight --identity 0x… | chain nonce --address 0x…" >&2
