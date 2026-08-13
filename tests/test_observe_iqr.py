@@ -65,3 +65,31 @@ def test_random_select_is_deterministic():
 def test_reward_epoch_id_for_vr():
     assert reward_epoch_id_for_vr(1424356) == 423  # 1424356 // 3360
     assert reward_epoch_id_for_vr(417 * 3360) == 417
+
+
+# ---- score aggregation (FeedScore + overall) -----------------------------------
+
+
+def test_feed_score_expected_inner_and_outer():
+    from clif.observe.iqr import FeedScore
+
+    fs = FeedScore("XRP/USD", rounds=10, inside=4, boundary=2, outside=4, pct_hit=9)
+    # expected primary = inside + 0.5*boundary = 4 + 1 = 5 → 50%
+    assert fs.expected_inner_pct == 50.0
+    assert fs.outer_pct == 90.0
+
+
+def test_overall_weights_by_feed_rounds():
+    from clif.observe.iqr import FeedScore, overall
+
+    a = FeedScore("A", rounds=10, inside=8, boundary=0, pct_hit=10)  # inner 80, outer 100
+    b = FeedScore("B", rounds=10, inside=2, boundary=0, pct_hit=6)  # inner 20, outer 60
+    ov = overall({"A": a, "B": b})
+    assert ov["inner_pct"] == 50.0 and ov["outer_pct"] == 80.0 and ov["feed_rounds"] == 20
+
+
+def test_overall_empty_is_none():
+    from clif.observe.iqr import overall
+
+    ov = overall({})
+    assert ov["inner_pct"] is None and ov["feed_rounds"] == 0

@@ -625,6 +625,17 @@ class RpcClient:
             raise
         return int(out)
 
+    def get_registered_voters(self, voter_registry: str, epoch_id: int) -> list[str]:
+        """getRegisteredVoters(uint256) → address[] — the identity addresses registered for
+        the epoch (the voter set whose values form the consensus median). Keyless read."""
+        data = (
+            "0x"
+            + selector("getRegisteredVoters(uint256)").hex()
+            + abi_encode(["uint256"], [epoch_id]).hex()
+        )
+        (out,) = self._abi_decode(["address[]"], self.eth_call(voter_registry, data))
+        return [str(a) for a in out]
+
     def voter_registration_data(
         self, flare_systems_manager: str, epoch_id: int
     ) -> tuple[int, bool]:

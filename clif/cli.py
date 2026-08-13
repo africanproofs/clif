@@ -2779,5 +2779,64 @@ def observe_run() -> None:
         )
 
 
+@observe_app.command(name="iqr")
+def observe_iqr(
+    network: Annotated[Optional[str], typer.Option("--network", envvar="NETWORK")] = None,
+    rounds: Annotated[int, typer.Option("--rounds", help="how many recent fully-revealed rounds to score")] = 10,
+    top: Annotated[int, typer.Option("--top", help="show the N worst-inner feeds (text mode)")] = 25,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Score AP's inner (primary/IQR) + outer (secondary/PCT) reward-band HIT RATES over the last
+    N fully-revealed rounds. Native: computes the consensus median/quartiles from ALL registered
+    voters' reveals, then scores AP's own submitted values. OBSERVE-only; works even while AP is
+    excluded (scores AP's values vs the registered consensus = would-be reward quality). One-shot
+    (scans the reveal windows) — a few minutes for ~10 rounds."""
+    from clif.observe.iqr import build_voter_weight_map, overall, score_ap
+    from clif.observe.reward_rule import get_offer_params, reward_epoch_id_for_vr
+    from clif.observe.timing import voting_factory
+
+    s = _settings()
+    if network:
+        s.network = network  # type: ignore[assignment]
+    ap_submit = {a.name: a.address for a in FUNDING_ACCOUNTS.get(s.network, [])}.get("Submit")
+    if not ap_submit:
+        err.print(f"[bold red]observe iqr: no Submit address for {s.network}[/]")
+        raise typer.Exit(2)
+    with RpcClient(s.observe_rpc_url) as rpc:
+        submission = rpc.contract_address_by_name("Submission")
+        f = voting_factory(s.network)
+        epoch = reward_epoch_id_for_vr(f.now_id())
+        log.info("iqr: resolving offer params + voter weights for %s epoch %s …", s.network, epoch)
+        offer = get_offer_params(rpc, s.network, epoch, cache_dir=str(s.clif_state_dir))
+        wmap = build_voter_weight_map(
+            rpc, voter_registry=s.net.voter_registry, entity_manager=s.net.entity_manager, epoch=epoch
+        )
+        scores, scored = score_ap(
+            rpc, network=s.network, submission=submission, ap_submit=ap_submit,
+            voter_registry=s.net.voter_registry, entity_manager=s.net.entity_manager,
+            offer=offer, weight_map=wmap, factory=f, rounds=rounds, log=log,
+        )
+    ov = overall(scores)
+    active = [fs for fs in scores.values() if fs.rounds > 0]
+    if json_out:
+        print(json.dumps({
+            "network": s.network, "reward_epoch": epoch, "scored_rounds": scored,
+            "registered_voters": len(wmap), "overall": ov,
+            "feeds": [fs.to_dict() for fs in active],
+        }, indent=2))
+    else:
+        console.print(
+            f"[bold]IQR scoring {s.network} epoch {epoch}[/] — {scored} rounds, {len(wmap)} voters"
+        )
+        oi, oo = ov["inner_pct"], ov["outer_pct"]
+        console.print(f"  [bold]OVERALL[/]: inner {oi}% · outer {oo}%  ({ov['feed_rounds']} feed-rounds)")
+        for fs in sorted(active, key=lambda x: (x.expected_inner_pct or 0))[:top]:
+            cap = " [dim](capped)[/]" if fs.capped >= fs.rounds * 0.5 else ""
+            console.print(
+                f"  {fs.feed:<12} n={fs.rounds:>2}  inner {fs.expected_inner_pct:>5}%  outer {fs.outer_pct:>5}%{cap}"
+            )
+    raise typer.Exit(0)
+
+
 if __name__ == "__main__":
     app()
