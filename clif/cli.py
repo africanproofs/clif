@@ -2754,7 +2754,17 @@ def observe_run() -> None:
         err.print(f"[bold red]observe: no Submit/SubmitSignatures address for {s.network}[/]")
         raise typer.Exit(2)
     with RpcClient(s.observe_rpc_url) as rpc:
-        submission = rpc.contract_address_by_name("Submission")
+        # Startup contract resolution — retry transient RPC blips (conn reset / node hiccup)
+        # with backoff and a ONE-LINE warning, rather than crashing the daemon with a full
+        # traceback (the engine's own loop already retries head/block reads once running).
+        submission = None
+        for attempt in range(1, 13):
+            try:
+                submission = rpc.contract_address_by_name("Submission")
+                break
+            except RpcError as exc:
+                log.warning("observe startup: Submission resolve failed (attempt %d): %s", attempt, exc)
+                time.sleep(min(5 * attempt, 30))
         if not submission or int(submission, 16) == 0:
             err.print("[bold red]observe: could not resolve the Submission contract[/]")
             raise typer.Exit(2)

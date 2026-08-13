@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -109,14 +110,27 @@ def _decode_feed_name(chunk21: bytes) -> str:
     return chunk21[1:].rstrip(b"\x00").decode("ascii").replace("_", "/")
 
 
+def _block_ts_retry(rpc: RpcClient, n: int, *, tries: int = 4) -> int:
+    """block_timestamp with a short retry — an archive-node probe over old blocks can blip
+    ('not found' / conn reset) under load; a transient miss shouldn't abort the whole scan."""
+    last: RpcError | None = None
+    for _ in range(tries):
+        try:
+            return rpc.block_timestamp(n)
+        except RpcError as exc:
+            last = exc
+            time.sleep(1.0)
+    raise last  # type: ignore[misc]
+
+
 def _find_block_for_ts(rpc: RpcClient, target_ts: int) -> int:
     """First block with timestamp >= target_ts (binary search)."""
     hi = rpc.block_number()
     lo = 1
     while lo < hi:
         mid = (lo + hi) // 2
-        ts = rpc.block_timestamp(mid)
-        if ts is None or ts < target_ts:
+        ts = _block_ts_retry(rpc, mid)
+        if ts < target_ts:
             lo = mid + 1
         else:
             hi = mid
