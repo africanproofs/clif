@@ -160,18 +160,12 @@ class ObserveHealth:
         }
 
 
-def read_observe_status(path: Path, *, enabled: bool) -> ObserveHealth:
-    """Read the engine's status file into an ObserveHealth. Never raises — a missing/corrupt
-    file with the observer ENABLED is CRIT (it should be writing); disabled ⇒ a benign OK."""
-    try:
-        d = json.loads(Path(path).read_text())
-    except (OSError, ValueError) as exc:
-        if not enabled:
-            return ObserveHealth(network="?", enabled=False)
-        return ObserveHealth(network="?", enabled=True, error=f"no observer status ({exc})")
+def observe_health_from_dict(d: dict, *, enabled_default: bool = True) -> ObserveHealth:
+    """Map a status dict (from `build_status`) into an ObserveHealth. Shared by the file reader
+    and the engine's own periodic status-log render."""
     return ObserveHealth(
         network=d.get("network", "?"),
-        enabled=bool(d.get("enabled", enabled)),
+        enabled=bool(d.get("enabled", enabled_default)),
         written_at=d.get("written_at"),
         last_block=d.get("last_block"),
         last_ts=d.get("last_ts"),
@@ -195,6 +189,18 @@ def read_observe_status(path: Path, *, enabled: bool) -> ObserveHealth:
         reward_epoch=d.get("reward_epoch"),
         recent_issues=d.get("recent_issues", []),
     )
+
+
+def read_observe_status(path: Path, *, enabled: bool) -> ObserveHealth:
+    """Read the engine's status file into an ObserveHealth. Never raises — a missing/corrupt
+    file with the observer ENABLED is CRIT (it should be writing); disabled ⇒ a benign OK."""
+    try:
+        d = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        if not enabled:
+            return ObserveHealth(network="?", enabled=False)
+        return ObserveHealth(network="?", enabled=True, error=f"no observer status ({exc})")
+    return observe_health_from_dict(d, enabled_default=enabled)
 
 
 def render_observe(h: ObserveHealth, *, active: bool) -> str:

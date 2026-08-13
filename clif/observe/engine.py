@@ -17,7 +17,7 @@ from collections.abc import Callable
 from py_flare_common.fsp.messaging import parse_submit2_tx
 
 from clif.observe.decode import decode_submit
-from clif.observe.health import build_status
+from clif.observe.health import build_status, observe_health_from_dict, render_observe
 from clif.observe.iqr import build_voter_weight_map
 from clif.observe.reward_rule import get_offer_params
 from clif.observe.state import ObserverState
@@ -54,6 +54,7 @@ def run_engine(
     flare_systems_manager: str | None = None,
     identity: str | None = None,
     registration_refresh_sec: float = 3600.0,  # registration changes per reward epoch (~3.5d)
+    status_log_sec: float = 3600.0,  # emit a rendered OBS status line to the log this often (+once seeded)
     fdc_hub: str | None = None,  # FdcHub address — enables FDC participation tracking when set
     entity_manager: str | None = None,  # with voter_registry + FSM ⇒ enables IQR reward-band scoring
     iqr_cache_dir: str | None = None,  # per-epoch offer-params disk cache (default: no disk cache)
@@ -136,6 +137,21 @@ def run_engine(
             registered=reg["registered"], reward_epoch=reg["epoch"],
         )
 
+    # Periodic self-report: the observer otherwise only logs issues, so its participation +
+    # (would-be) IQR quality never showed up in `clifctl logs` alongside REG/FUND/EPCH. Emit
+    # the rendered OBS line once the window is seeded, then every `status_log_sec` — at the
+    # severity-appropriate level so a healthy line is INFO and an excluded/degraded one stands out.
+    slog = {"last": 0.0}
+
+    def _maybe_log_status(now: float, *, force: bool = False) -> None:
+        if not log or (not force and now - slog["last"] < status_log_sec):
+            return
+        slog["last"] = now
+        h = observe_health_from_dict(_status())
+        line = render_observe(h, active=(h.severity == "CRIT"))
+        lvl = log.error if h.severity == "CRIT" else (log.warning if h.severity == "WARN" else log.info)
+        lvl(line)
+
     # Write a status immediately so `observe status` shows "warming up", not a missing-file CRIT.
     state.last_block = cursor
     _refresh_registration(time.time())
@@ -143,6 +159,7 @@ def run_engine(
     status_writer(_status())
     processed = 0
     since_status = 0
+    seeded = False
     while True:
         try:
             head = rpc.block_number()
@@ -216,6 +233,13 @@ def run_engine(
         _refresh_iqr(time.time())
         status_writer(_status())
         since_status = 0
+        # First time we're fully caught up, the lookback window is seeded (rounds finalized +
+        # IQR scored) — emit the opening status line; thereafter it self-reports hourly.
+        if not seeded and cursor > head:
+            seeded = True
+            _maybe_log_status(time.time(), force=True)
+        else:
+            _maybe_log_status(time.time())
         try:
             time.sleep(poll_sec)
         except KeyboardInterrupt:
