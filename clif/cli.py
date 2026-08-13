@@ -2758,6 +2758,12 @@ def observe_run() -> None:
         if not submission or int(submission, 16) == 0:
             err.print("[bold red]observe: could not resolve the Submission contract[/]")
             raise typer.Exit(2)
+        try:  # FdcHub is optional — FDC tracking degrades off if it can't be resolved
+            fdc_hub = rpc.contract_address_by_name("FdcHub")
+            if fdc_hub and int(fdc_hub, 16) == 0:
+                fdc_hub = None
+        except RpcError:
+            fdc_hub = None
         run_engine(
             rpc=rpc, network=s.network, submission_address=submission,
             our_submit=our_submit, our_sig=our_sig,
@@ -2768,6 +2774,7 @@ def observe_run() -> None:
             voter_registry=s.net.voter_registry,
             flare_systems_manager=s.net.flare_systems_manager,
             identity=identity,
+            fdc_hub=fdc_hub,
             log=log,
         )
 

@@ -32,6 +32,11 @@ class Decoded:
     reveal_random: int | None = None  # submit2 — for commit-hash reconstruction
     reveal_feed_bytes: bytes | None = None  # submit2 — raw feed values (bytes) for commit_hash
     reveal_value_count: int | None = None  # submit2 — number of parsed feed values
+    # FDC (protocol 200) rides in the SAME submit2/signatures tx alongside FTSO.
+    fdc_present: bool = False  # this tx carried an FDC payload
+    fdc_round: int | None = None  # the FDC voting_round_id
+    fdc_bitvote_len: int | None = None  # submit2 — len(bit_vector)
+    fdc_num_requests: int | None = None  # submit2 — number_of_requests the bitvote claims
 
 
 def decode_submit(tx_input: str) -> Decoded | None:
@@ -62,16 +67,26 @@ def decode_submit(tx_input: str) -> Decoded | None:
             bp = ByteParser(g.ftso.payload)
             rnd = bp.uint256()
             feed_v = bp.drain()
+            fdc = pm.fdc
             return Decoded(
                 "submit2", pm.ftso.voting_round_id,
                 reveal_random=rnd, reveal_feed_bytes=feed_v,
                 reveal_value_count=len(pm.ftso.payload.values),
+                fdc_present=fdc is not None,
+                fdc_round=fdc.voting_round_id if fdc else None,
+                fdc_bitvote_len=(len(fdc.payload.bit_vector) if fdc else None),
+                fdc_num_requests=(fdc.payload.number_of_requests if fdc else None),
             )
         if kind == "signatures":
             pm = parse_submit_signature_tx(body)
-            if pm.ftso is None:  # FDC-only signatures ignored in Phase 1 (FTSO focus)
+            if pm.ftso is None:  # FDC-only signatures ignored (AP always signs FTSO too)
                 return None
-            return Decoded("signatures", pm.ftso.voting_round_id)
+            fdc = pm.fdc
+            return Decoded(
+                "signatures", pm.ftso.voting_round_id,
+                fdc_present=fdc is not None,
+                fdc_round=fdc.voting_round_id if fdc else None,
+            )
     except Exception:  # noqa: BLE001 — a malformed tx is not our problem; skip it
         return None
     return None

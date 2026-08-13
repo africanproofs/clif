@@ -25,6 +25,10 @@ def _blk_int(v) -> int:
     return int(str(v), 16)
 
 
+# keccak256("AttestationRequest(bytes,uint256)") — FdcHub's per-request event topic0.
+_ATTESTATION_REQUEST_TOPIC = "0x251377668af6553101c9bb094ba89c0c536783e005e203625e6cd57345918cc9"
+
+
 def run_engine(
     *,
     rpc: RpcClient,
@@ -45,6 +49,7 @@ def run_engine(
     flare_systems_manager: str | None = None,
     identity: str | None = None,
     registration_refresh_sec: float = 3600.0,  # registration changes per reward epoch (~3.5d)
+    fdc_hub: str | None = None,  # FdcHub address — enables FDC participation tracking when set
     log=None,
     _max_blocks: int | None = None,  # test hook: process at most N blocks then return
 ) -> None:
@@ -123,6 +128,17 @@ def run_engine(
                 d = decode_submit(tx.get("input", "0x"))
                 if d is not None:
                     state.record(d, frm, ts, factory)
+            # FDC: count this block's AttestationRequests into the block's voting round
+            # (best-effort — an FDC-scan hiccup must never break the FTSO path).
+            if fdc_hub:
+                try:
+                    logs = rpc.get_logs(fdc_hub, [_ATTESTATION_REQUEST_TOPIC], cursor, cursor)
+                    if logs:
+                        rid = factory.from_timestamp(ts).id
+                        for _ in logs:
+                            state.record_fdc_request(rid)
+                except RpcError:
+                    pass
             state.last_block = cursor
             state.last_ts = ts
             for rs in state.finalize_due(ts, factory):

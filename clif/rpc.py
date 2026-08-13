@@ -276,6 +276,18 @@ class RpcClient:
         result = self._call("eth_getBlockByNumber", [hex(number), full_transactions])
         return cast(dict, result) if result else None
 
+    def get_logs(
+        self, address: str, topics: list, from_block: int, to_block: int
+    ) -> list[dict]:
+        """eth_getLogs for one address + topic filter over [from_block, to_block]. Keyless read.
+        Public Flare/Songbird RPCs cap the range at ~30 blocks — the caller chunks accordingly
+        (the per-block observer uses from==to)."""
+        result = self._call(
+            "eth_getLogs",
+            [{"address": address, "topics": topics, "fromBlock": hex(from_block), "toBlock": hex(to_block)}],
+        )
+        return cast(list, result) if result else []
+
     def get_transaction_receipt(self, tx_hash: str) -> dict | None:
         result = self._call("eth_getTransactionReceipt", [tx_hash])
         return cast(dict, result) if result else None  # null until mined

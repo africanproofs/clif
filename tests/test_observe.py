@@ -86,6 +86,67 @@ def test_boundary_round_dropped_not_counted():
     assert st.aggregates()["window_rounds"] == 0  # dropped, no false alarm
 
 
+def _fdc_decoded(kind, ftso_round, fdc_round, bits=None):
+    from clif.observe.decode import Decoded
+    return Decoded(
+        kind, ftso_round, fdc_present=True, fdc_round=fdc_round,
+        fdc_bitvote_len=(len(bits) if bits is not None else None),
+        fdc_num_requests=(len(bits) if bits is not None else None),
+        reveal_random=1, reveal_feed_bytes=b"\x01",
+    )
+
+
+def test_fdc_participated_when_requests_and_bitvote():
+    st = _state(observe_start_ts=_S1_LO - 10)
+    # a healthy FTSO round + FDC: requests existed and AP bitvoted.
+    # random/feed must match _fdc_decoded's defaults so the reveal reconstructs the commit.
+    random, feed = 1, b"\x01"
+    commit = bytes.fromhex(commit_hash(_SUBMIT, _RID, random, feed))
+    st.record(Decoded("submit1", _RID, commit_hash=commit), _SUBMIT, _S1_LO + 1, _F)
+    st.record_fdc_request(_RID)
+    st.record_fdc_request(_RID)
+    st.record(_fdc_decoded("submit2", _RID, _RID, bits=[True, False]), _SUBMIT, _S2_LO + 1, _F)
+    _finalize_one(st)
+    agg = st.aggregates()
+    assert agg["fdc_request_rounds"] == 1 and agg["fdc_participated"] == 1 and agg["fdc_missing"] == 0
+    # FDC does NOT affect FTSO cleanliness (decoupled)
+    assert agg["complete"] == 1
+
+
+def test_fdc_gap_when_requests_but_no_bitvote():
+    st = _state(observe_start_ts=_S1_LO - 10)
+    random, feed = 7, b"\x01"
+    commit = bytes.fromhex(commit_hash(_SUBMIT, _RID, random, feed))
+    st.record(Decoded("submit1", _RID, commit_hash=commit), _SUBMIT, _S1_LO + 1, _F)
+    st.record(Decoded("submit2", _RID, reveal_random=random, reveal_feed_bytes=feed), _SUBMIT, _S2_LO + 1, _F)
+    st.record_fdc_request(_RID)  # requests existed but no FDC bitvote in the submit2
+    _finalize_one(st)
+    agg = st.aggregates()
+    assert agg["fdc_missing"] == 1 and agg["fdc_participated"] == 0
+    assert agg["complete"] == 1  # FTSO still clean — FDC gap is separate
+
+
+def test_fdc_no_requests_no_penalty():
+    st = _state(observe_start_ts=_S1_LO - 10)
+    random, feed = 7, b"\x01"
+    commit = bytes.fromhex(commit_hash(_SUBMIT, _RID, random, feed))
+    st.record(Decoded("submit1", _RID, commit_hash=commit), _SUBMIT, _S1_LO + 1, _F)
+    st.record(Decoded("submit2", _RID, reveal_random=random, reveal_feed_bytes=feed), _SUBMIT, _S2_LO + 1, _F)
+    _finalize_one(st)  # no FDC requests recorded
+    agg = st.aggregates()
+    assert agg["fdc_request_rounds"] == 0 and agg["fdc_missing"] == 0
+
+
+def test_health_fdc_sustained_shortfall_is_crit():
+    h = _health(fdc_request_rounds=20, fdc_participated=10)  # 50% < 80
+    assert h.severity == "CRIT"
+
+
+def test_health_fdc_isolated_gap_is_warn():
+    h = _health(fdc_request_rounds=20, fdc_participated=19, fdc_missing=1)  # 95%
+    assert h.severity == "WARN"
+
+
 def test_late_submit1_is_off_window():
     st = _state(observe_start_ts=_S1_LO - 10)
     random, feed = 7, b"\x01"

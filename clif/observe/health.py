@@ -16,6 +16,7 @@ from clif.funding import _BADGE_OBS, _GREEN, _RED, _RESET, _YELLOW
 
 _STALE_AFTER_SEC = 300  # no fresh status write in 5 min ⇒ the engine is dead → CRIT
 _PARTICIPATION_CRIT_PCT = 90.0  # sustained on-time completeness below this ⇒ CRIT
+_FDC_CRIT_PCT = 80.0  # the FDC minimal condition; sustained below this ⇒ CRIT
 
 
 def build_status(
@@ -53,6 +54,9 @@ class ObserveHealth:
     missing_submit2: int = 0
     reveal_offences: int = 0
     off_window: int = 0
+    fdc_request_rounds: int = 0  # rounds in the window that had FDC attestation requests
+    fdc_participated: int = 0  # of those, rounds AP bitvoted (clean)
+    fdc_missing: int = 0  # request-rounds AP failed to bitvote
     recent_issues: list[str] | None = None
     registered: bool | None = None  # in the registered voter set for the current reward epoch?
     reward_epoch: int | None = None
@@ -74,6 +78,12 @@ class ObserveHealth:
         return round(100.0 * self.complete / self.window_rounds, 1)
 
     @property
+    def fdc_participation_pct(self) -> float | None:
+        if self.fdc_request_rounds <= 0:
+            return None
+        return round(100.0 * self.fdc_participated / self.fdc_request_rounds, 1)
+
+    @property
     def severity(self) -> str:
         if self.error is not None:
             return "CRIT"  # unknown = treat as bad
@@ -90,8 +100,11 @@ class ObserveHealth:
         pct = self.participation_pct
         if pct is not None and pct < _PARTICIPATION_CRIT_PCT:
             return "CRIT"  # sustained non-participation — the RE423-family "not on-chain" signal
-        if self.missing_submit1 or self.missing_submit2 or self.off_window:
-            return "WARN"  # isolated miss / off-window — worth a look, not yet systemic
+        fpct = self.fdc_participation_pct
+        if self.fdc_request_rounds >= 10 and fpct is not None and fpct < _FDC_CRIT_PCT:
+            return "CRIT"  # sustained FDC non-participation — the FDC minimal condition (80%) at risk
+        if self.missing_submit1 or self.missing_submit2 or self.off_window or self.fdc_missing:
+            return "WARN"  # isolated miss / off-window / FDC gap — worth a look, not yet systemic
         return "OK"
 
     def to_dict(self) -> dict:
@@ -111,6 +124,10 @@ class ObserveHealth:
             "missing_submit2": self.missing_submit2,
             "reveal_offences": self.reveal_offences,
             "off_window": self.off_window,
+            "fdc_request_rounds": self.fdc_request_rounds,
+            "fdc_participated": self.fdc_participated,
+            "fdc_missing": self.fdc_missing,
+            "fdc_participation_pct": self.fdc_participation_pct,
             "registered": self.registered,
             "reward_epoch": self.reward_epoch,
             "recent_issues": self.recent_issues or [],
@@ -140,6 +157,9 @@ def read_observe_status(path: Path, *, enabled: bool) -> ObserveHealth:
         missing_submit2=d.get("missing_submit2", 0),
         reveal_offences=d.get("reveal_offences", 0),
         off_window=d.get("off_window", 0),
+        fdc_request_rounds=d.get("fdc_request_rounds", 0),
+        fdc_participated=d.get("fdc_participated", 0),
+        fdc_missing=d.get("fdc_missing", 0),
         registered=d.get("registered"),
         reward_epoch=d.get("reward_epoch"),
         recent_issues=d.get("recent_issues", []),
@@ -168,6 +188,9 @@ def render_observe(h: ObserveHealth, *, active: bool) -> str:
         return f"{_BADGE_OBS} {_YELLOW}⚠ warming up on {h.network} (no finalized round yet, block {h.last_block}){_RESET}"
     pct = h.participation_pct
     body = f"FTSO {h.network} {h.complete}/{h.window_rounds} rounds clean ({pct}%)"
+    # FDC clause — only meaningful when the window had request-rounds.
+    if h.fdc_request_rounds:
+        body += f" · FDC {h.fdc_participated}/{h.fdc_request_rounds} ({h.fdc_participation_pct}%)"
     if sev == "OK":
         return f"{_BADGE_OBS} {_GREEN}✓ {body}{_RESET}"
     problems = []
@@ -179,6 +202,8 @@ def render_observe(h: ObserveHealth, *, active: bool) -> str:
         problems.append(f"{h.missing_submit2} missing reveal")
     if h.off_window:
         problems.append(f"{h.off_window} off-window")
+    if h.fdc_missing:
+        problems.append(f"{h.fdc_missing} FDC gap")
     color = _RED if sev == "CRIT" else _YELLOW
     mark = "🔴" if sev == "CRIT" else "⚠"
     loud = "🔴🔴" if (sev == "CRIT" and active) else mark

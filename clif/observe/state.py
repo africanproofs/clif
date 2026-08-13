@@ -29,13 +29,25 @@ class RoundState:
     submit2_random: int | None = None
     submit2_feed_bytes: bytes | None = None
     sig_seen: bool = False
+    # FDC (protocol 200) — participation only when the round had attestation requests.
+    fdc_request_count: int = 0  # AttestationRequests observed for this round (FdcHub)
+    fdc_bitvote_seen: bool = False  # AP submitted an FDC bitvote (submit2.fdc)
+    fdc_bitvote_len: int | None = None
+    fdc_num_requests_claimed: int | None = None
+    fdc_sig_seen: bool = False  # AP submitted an FDC signature (submitSignatures.fdc)
+    fdc_gap: bool = False  # set at finalize: requests existed but we didn't bitvote
     # verdict (set at finalize)
     reveal_offence: bool = False
     issues: list[str] = field(default_factory=list)
 
     @property
+    def fdc_expected(self) -> bool:
+        return self.fdc_request_count > 0
+
+    @property
     def clean(self) -> bool:
-        """A fully-healthy round: on-time commit + on-time reveal, no offence."""
+        """A fully-healthy FTSO round: on-time commit + on-time reveal, no offence. FDC is a
+        SEPARATE protocol tracked on its own axis (fdc_* aggregates), not folded in here."""
         return (
             self.submit1_seen and self.submit1_ontime
             and self.submit2_seen and self.submit2_ontime
@@ -89,6 +101,22 @@ class ObserverState:
             rs.submit2_feed_bytes = decoded.reveal_feed_bytes
         elif decoded.kind == "signatures" and frm == self._sig_lc:
             rs.sig_seen = True
+            if decoded.fdc_present and decoded.fdc_round is not None:
+                self._round(decoded.fdc_round).fdc_sig_seen = True
+        # FDC bitvote rides in AP's submit2 tx (same sender) — record it on the FDC round.
+        if (
+            decoded.kind == "submit2" and frm == self._submit_lc
+            and decoded.fdc_present and decoded.fdc_round is not None
+        ):
+            frs = self._round(decoded.fdc_round)
+            frs.fdc_bitvote_seen = True
+            frs.fdc_bitvote_len = decoded.fdc_bitvote_len
+            frs.fdc_num_requests_claimed = decoded.fdc_num_requests
+
+    def record_fdc_request(self, round_id: int) -> None:
+        """One FdcHub AttestationRequest observed for `round_id` (the round of the block it
+        was emitted in). Rounds accumulate a request count that gates FDC-participation checks."""
+        self._round(round_id).fdc_request_count += 1
 
     def _finalize(self, rs: RoundState) -> None:
         """Run the FTSO checks for a round whose windows have closed (ftso.py logic)."""
@@ -114,6 +142,13 @@ class ObserverState:
             if rs.submit1_commit.hex() != recon:
                 rs.reveal_offence = True
                 rs.issues.append("commit/reveal mismatch — REVEAL OFFENCE")
+        # FDC participation — only when the round actually had attestation requests. The
+        # ONLY robust signal is "requests existed → did AP bitvote at all": AP's own bitvote
+        # uses the protocol's exact request set, while our per-block request COUNT is ±1 at
+        # round boundaries, so we do NOT compare lengths (that produced false mismatches).
+        if rs.fdc_expected and not rs.fdc_bitvote_seen:
+            rs.fdc_gap = True
+            rs.issues.append(f"FDC: no bitvote (~{rs.fdc_request_count} request(s) this round)")
         self.finalized.append(rs)
         self.last_round_finalized = rs.round_id
 
@@ -142,5 +177,8 @@ class ObserverState:
             "missing_submit2": sum(1 for r in w if r.submit1_seen and not r.submit2_seen),
             "reveal_offences": sum(1 for r in w if r.reveal_offence),
             "off_window": sum(1 for r in w if (r.submit1_seen and not r.submit1_ontime) or (r.submit2_seen and not r.submit2_ontime)),
+            "fdc_request_rounds": sum(1 for r in w if r.fdc_expected),
+            "fdc_participated": sum(1 for r in w if r.fdc_expected and r.fdc_bitvote_seen and not r.fdc_gap),
+            "fdc_missing": sum(1 for r in w if r.fdc_gap),
             "recent_issues": [f"RD{r.round_id}: {'; '.join(r.issues)}" for r in w if r.issues][-8:],
         }
