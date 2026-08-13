@@ -18,8 +18,13 @@ _STALE_AFTER_SEC = 300  # no fresh status write in 5 min ⇒ the engine is dead 
 _PARTICIPATION_CRIT_PCT = 90.0  # sustained on-time completeness below this ⇒ CRIT
 
 
-def build_status(state, *, network: str, enabled: bool) -> dict:
-    """The JSON the engine writes each cycle."""
+def build_status(
+    state, *, network: str, enabled: bool,
+    registered: bool | None = None, reward_epoch: int | None = None,
+) -> dict:
+    """The JSON the engine writes each cycle. `registered` = is AP in the registered voter
+    set for the current reward epoch (None = not probed); when False, all the clean
+    submissions below earn ZERO (the RE423 blind spot) and severity is forced CRIT."""
     agg = state.aggregates()
     return {
         "network": network,
@@ -28,6 +33,8 @@ def build_status(state, *, network: str, enabled: bool) -> dict:
         "last_block": state.last_block,
         "last_ts": state.last_ts,
         "last_round_finalized": state.last_round_finalized,
+        "registered": registered,
+        "reward_epoch": reward_epoch,
         **agg,
     }
 
@@ -47,6 +54,8 @@ class ObserveHealth:
     reveal_offences: int = 0
     off_window: int = 0
     recent_issues: list[str] | None = None
+    registered: bool | None = None  # in the registered voter set for the current reward epoch?
+    reward_epoch: int | None = None
     error: str | None = None
 
     @property
@@ -72,6 +81,8 @@ class ObserveHealth:
             return "OK"  # explicitly off — nothing to assert
         if self.stale:
             return "CRIT"  # engine stopped writing → not observing
+        if self.registered is False:
+            return "CRIT"  # submitting but NOT in the registered set ⇒ these rounds earn ZERO
         if self.window_rounds == 0:
             return "WARN"  # warming up / no finalized round yet
         if self.reveal_offences > 0:
@@ -100,6 +111,8 @@ class ObserveHealth:
             "missing_submit2": self.missing_submit2,
             "reveal_offences": self.reveal_offences,
             "off_window": self.off_window,
+            "registered": self.registered,
+            "reward_epoch": self.reward_epoch,
             "recent_issues": self.recent_issues or [],
             "error": self.error,
         }
@@ -127,6 +140,8 @@ def read_observe_status(path: Path, *, enabled: bool) -> ObserveHealth:
         missing_submit2=d.get("missing_submit2", 0),
         reveal_offences=d.get("reveal_offences", 0),
         off_window=d.get("off_window", 0),
+        registered=d.get("registered"),
+        reward_epoch=d.get("reward_epoch"),
         recent_issues=d.get("recent_issues", []),
     )
 
@@ -141,6 +156,14 @@ def render_observe(h: ObserveHealth, *, active: bool) -> str:
     if h.stale:
         age = int(h.age_sec or 0)
         return f"{_BADGE_OBS} {_RED}🔴 observer STALE on {h.network} — no update for {age}s (engine down?){_RESET}"
+    if h.registered is False:
+        # The RE423 blind spot made explicit: we ARE submitting, but it earns nothing.
+        subs = f"{h.complete}/{h.window_rounds}" if h.window_rounds else "0"
+        loud = "🔴🔴" if active else "🔴"
+        return (
+            f"{_BADGE_OBS} {_RED}{loud} submitting {subs} rounds on {h.network} — but NOT REGISTERED "
+            f"for RE{h.reward_epoch}: these submissions earn ZERO{_RESET}"
+        )
     if h.window_rounds == 0:
         return f"{_BADGE_OBS} {_YELLOW}⚠ warming up on {h.network} (no finalized round yet, block {h.last_block}){_RESET}"
     pct = h.participation_pct

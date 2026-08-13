@@ -41,6 +41,10 @@ def run_engine(
     window_rounds: int = 40,
     poll_sec: float = 2.0,
     status_every_blocks: int = 100,
+    voter_registry: str | None = None,
+    flare_systems_manager: str | None = None,
+    identity: str | None = None,
+    registration_refresh_sec: float = 3600.0,  # registration changes per reward epoch (~3.5d)
     log=None,
     _max_blocks: int | None = None,  # test hook: process at most N blocks then return
 ) -> None:
@@ -60,9 +64,35 @@ def run_engine(
             "observe start network=%s from block %s (head %s, lookback %s) submission=%s",
             network, cursor, head, lookback_blocks, submission,
         )
+    # Registration overlay — hourly (registration only changes per reward epoch). We ARE
+    # submitting every round; if AP is NOT in the registered voter set for the current
+    # reward epoch, all those clean submissions earn ZERO (the RE423 blind spot). Best-effort:
+    # a probe failure leaves the last value (never breaks the engine).
+    reg = {"registered": None, "epoch": None, "checked": 0.0}
+
+    def _refresh_registration(now: float) -> None:
+        if not (voter_registry and flare_systems_manager and identity):
+            return
+        if reg["epoch"] is not None and now - reg["checked"] < registration_refresh_sec:
+            return
+        try:
+            ep = rpc.get_current_reward_epoch_id(flare_systems_manager)
+            reg["registered"] = rpc.is_voter_registered(voter_registry, identity, ep)
+            reg["epoch"] = ep
+            reg["checked"] = now
+        except RpcError:
+            pass  # keep the last known value
+
+    def _status() -> dict:
+        return build_status(
+            state, network=network, enabled=True,
+            registered=reg["registered"], reward_epoch=reg["epoch"],
+        )
+
     # Write a status immediately so `observe status` shows "warming up", not a missing-file CRIT.
     state.last_block = cursor
-    status_writer(build_status(state, network=network, enabled=True))
+    _refresh_registration(time.time())
+    status_writer(_status())
     processed = 0
     since_status = 0
     while True:
@@ -104,12 +134,13 @@ def run_engine(
             since_status += 1
             # Keep the status fresh DURING a long catch-up so `observe status` isn't stale.
             if since_status >= status_every_blocks:
-                status_writer(build_status(state, network=network, enabled=True))
+                status_writer(_status())
                 since_status = 0
             if _max_blocks is not None and processed >= _max_blocks:
-                status_writer(build_status(state, network=network, enabled=True))
+                status_writer(_status())
                 return
-        status_writer(build_status(state, network=network, enabled=True))
+        _refresh_registration(time.time())
+        status_writer(_status())
         since_status = 0
         try:
             time.sleep(poll_sec)

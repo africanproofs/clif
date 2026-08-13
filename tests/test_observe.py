@@ -133,6 +133,27 @@ def test_health_disabled_is_ok():
     assert _health(enabled=False).severity == "OK"
 
 
+def test_health_unregistered_is_crit_even_when_submitting_clean():
+    # The RE423 blind spot: 100% clean submissions but NOT in the registered set ⇒ ZERO reward.
+    h = _health(registered=False, reward_epoch=423)  # complete=40/40 otherwise
+    assert h.severity == "CRIT"
+
+
+def test_health_registered_true_stays_ok():
+    assert _health(registered=True).severity == "OK"
+
+
+def test_health_registered_none_does_not_override():
+    # Not probed (None) ⇒ fall through to participation logic, no false CRIT.
+    assert _health(registered=None).severity == "OK"
+
+
+def test_render_unregistered_says_earns_zero():
+    from clif.observe.health import render_observe
+    line = render_observe(_health(registered=False, reward_epoch=423), active=True)
+    assert "NOT REGISTERED" in line and "earn ZERO" in line
+
+
 def test_read_status_missing_file_enabled_is_crit(tmp_path):
     h = read_observe_status(tmp_path / "nope.json", enabled=True)
     assert h.severity == "CRIT" and h.error is not None

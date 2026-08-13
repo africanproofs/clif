@@ -2749,6 +2749,7 @@ def observe_run() -> None:
     accts = {a.name: a.address for a in FUNDING_ACCOUNTS.get(s.network, [])}
     our_submit = accts.get("Submit")
     our_sig = accts.get("SubmitSignatures")
+    identity = accts.get("Identity")  # the registered voter key — for the registration overlay
     if not our_submit or not our_sig:
         err.print(f"[bold red]observe: no Submit/SubmitSignatures address for {s.network}[/]")
         raise typer.Exit(2)
@@ -2763,7 +2764,11 @@ def observe_run() -> None:
             status_writer=lambda d: write_status_atomic(s.observe_status_file, d),
             lookback_blocks=s.observe_lookback_blocks,
             window_rounds=s.observe_window_rounds,
-            poll_sec=s.observe_poll_sec, log=log,
+            poll_sec=s.observe_poll_sec,
+            voter_registry=s.net.voter_registry,
+            flare_systems_manager=s.net.flare_systems_manager,
+            identity=identity,
+            log=log,
         )
 
 
