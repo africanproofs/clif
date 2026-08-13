@@ -36,6 +36,7 @@ def build_status(
         "last_round_finalized": state.last_round_finalized,
         "registered": registered,
         "reward_epoch": reward_epoch,
+        "iqr_windows": state.windowed_iqr(state.last_ts or int(time.time()), reward_epoch),
         **agg,
     }
 
@@ -64,6 +65,7 @@ class ObserveHealth:
     iqr_boundary: int = 0  # on Q1/Q3 (coin-flip → counts ½ toward inner)
     iqr_pct_hit: int = 0  # inside the secondary (PCT) band
     iqr_capped: int = 0  # feed-rounds where Q3−Q1 ≤ 1 tick (structural ~50% inner ceiling)
+    iqr_windows: dict | None = None  # {1h,6h,24h,epoch} → {inner_pct,outer_pct,feed_rounds,rounds,capped}
     recent_issues: list[str] | None = None
     registered: bool | None = None  # in the registered voter set for the current reward epoch?
     reward_epoch: int | None = None
@@ -153,6 +155,7 @@ class ObserveHealth:
             "iqr_inner_pct": self.iqr_inner_pct,
             "iqr_outer_pct": self.iqr_outer_pct,
             "iqr_capped": self.iqr_capped,
+            "iqr_windows": self.iqr_windows,
             "registered": self.registered,
             "reward_epoch": self.reward_epoch,
             "recent_issues": self.recent_issues or [],
@@ -185,6 +188,7 @@ def observe_health_from_dict(d: dict, *, enabled_default: bool = True) -> Observ
         iqr_boundary=d.get("iqr_boundary", 0),
         iqr_pct_hit=d.get("iqr_pct_hit", 0),
         iqr_capped=d.get("iqr_capped", 0),
+        iqr_windows=d.get("iqr_windows"),
         registered=d.get("registered"),
         reward_epoch=d.get("reward_epoch"),
         recent_issues=d.get("recent_issues", []),
@@ -201,6 +205,44 @@ def read_observe_status(path: Path, *, enabled: bool) -> ObserveHealth:
             return ObserveHealth(network="?", enabled=False)
         return ObserveHealth(network="?", enabled=True, error=f"no observer status ({exc})")
     return observe_health_from_dict(d, enabled_default=enabled)
+
+
+_IQR_HORIZONS = (("1h", "1h"), ("6h", "6h"), ("24h", "24h"), ("epoch", "ep"))
+
+
+def _win_pair(w: dict | None) -> str:
+    if not w or not w.get("feed_rounds"):
+        return "—"
+    return f"{w['inner_pct']:g}/{w['outer_pct']:g}"
+
+
+def render_iqr_windows_compact(h: ObserveHealth) -> str | None:
+    """One-line multi-horizon IQR (inner/outer) for the periodic log — None if nothing scored yet."""
+    win = h.iqr_windows or {}
+    if not any((win.get(k) or {}).get("feed_rounds") for k, _ in _IQR_HORIZONS):
+        return None
+    parts = " · ".join(f"{lbl} {_win_pair(win.get(k))}" for k, lbl in _IQR_HORIZONS)
+    tag = "would-be IQR" if h.registered is False else "IQR"
+    return f"{_BADGE_OBS} {tag}[in/out] {parts}"
+
+
+def render_iqr_windows(h: ObserveHealth) -> list[str]:
+    """Detailed per-horizon block for `observe status` (empty list if nothing scored yet)."""
+    win = h.iqr_windows or {}
+    if not any((win.get(k) or {}).get("feed_rounds") for k, _ in _IQR_HORIZONS):
+        return []
+    tag = "would-be IQR" if h.registered is False else "IQR"
+    lines = [f"  {tag} (inner = primary/IQR band, outer = secondary/PCT band):"]
+    for k, lbl in _IQR_HORIZONS:
+        w = win.get(k) or {}
+        if not w.get("feed_rounds"):
+            lines.append(f"    {lbl:>5}  —")
+            continue
+        lines.append(
+            f"    {lbl:>5}  inner {w['inner_pct']:>5}% · outer {w['outer_pct']:>5}%"
+            f"  ({w['rounds']} rounds, {w['feed_rounds']} feed-rounds)"
+        )
+    return lines
 
 
 def render_observe(h: ObserveHealth, *, active: bool) -> str:

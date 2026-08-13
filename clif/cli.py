@@ -63,7 +63,7 @@ from clif.funding import (
     validate_plan,
 )
 from clif.registration import read_readiness, render_readiness
-from clif.observe import read_observe_status, render_observe
+from clif.observe import read_observe_status, render_iqr_windows, render_observe
 from clif.observe.engine import run_engine
 from clif.fwd_client import (
     FwdClient,
@@ -2722,6 +2722,8 @@ def observe_status(
         print(json.dumps(h.to_dict(), indent=2))
     else:
         print(render_observe(h, active=False))
+        for line in render_iqr_windows(h):
+            print(line)
     raise typer.Exit(0 if h.severity == "OK" else (1 if h.severity == "WARN" else 2))
 
 
@@ -2788,6 +2790,7 @@ def observe_run() -> None:
             entity_manager=s.net.entity_manager,
             iqr_cache_dir=str(s.clif_state_dir),
             iqr_enabled=s.observe_iqr,
+            iqr_history_file=str(s.observe_iqr_history_file),
             log=log,
         )
 

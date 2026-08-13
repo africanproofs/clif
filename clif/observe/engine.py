@@ -13,13 +13,20 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from py_flare_common.fsp.messaging import parse_submit2_tx
 
 from clif.observe.decode import decode_submit
-from clif.observe.health import build_status, observe_health_from_dict, render_observe
+from clif.observe.health import (
+    build_status,
+    observe_health_from_dict,
+    render_iqr_windows_compact,
+    render_observe,
+)
 from clif.observe.iqr import build_voter_weight_map
-from clif.observe.reward_rule import get_offer_params
+from clif.observe.iqr_history import append_tally, load_history, prune_history
+from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH, get_offer_params
 from clif.observe.state import ObserverState
 from clif.observe.timing import voting_factory
 from clif.rpc import RpcClient, RpcError
@@ -59,6 +66,7 @@ def run_engine(
     entity_manager: str | None = None,  # with voter_registry + FSM ⇒ enables IQR reward-band scoring
     iqr_cache_dir: str | None = None,  # per-epoch offer-params disk cache (default: no disk cache)
     iqr_enabled: bool = True,  # gate the (per-block all-voter reveal decode) IQR scoring
+    iqr_history_file: str | None = None,  # persist per-round IQR tallies (multi-horizon; survives restart)
     log=None,
     _max_blocks: int | None = None,  # test hook: process at most N blocks then return
 ) -> None:
@@ -151,11 +159,35 @@ def run_engine(
         line = render_observe(h, active=(h.severity == "CRIT"))
         lvl = log.error if h.severity == "CRIT" else (log.warning if h.severity == "WARN" else log.info)
         lvl(line)
+        hz = render_iqr_windows_compact(h)  # the 1h/6h/24h/epoch trend line
+        if hz:
+            log.info(hz)
+        if iqr_history_file:  # bound the persisted log on the same (hourly) cadence
+            ep_hist = iqr["epoch"] if iqr["epoch"] is not None else reg["epoch"]
+            prune_history(
+                Path(iqr_history_file), now_ts=state.last_ts or int(now),
+                reward_epoch=ep_hist, vrs_per_epoch=VRS_PER_REWARD_EPOCH,
+            )
 
     # Write a status immediately so `observe status` shows "warming up", not a missing-file CRIT.
     state.last_block = cursor
     _refresh_registration(time.time())
     _refresh_iqr(time.time())
+    # Seed the multi-horizon IQR history from the persisted log (so 24h / since-epoch survive a
+    # restart). Scope to the now-known reward epoch; deduped on load + against re-finalized rounds.
+    if iqr_history_file:
+        ep_hist = iqr["epoch"] if iqr["epoch"] is not None else reg["epoch"]
+        state.seed_iqr_history(
+            load_history(
+                Path(iqr_history_file), now_ts=start_ts, reward_epoch=ep_hist,
+                vrs_per_epoch=VRS_PER_REWARD_EPOCH,
+            )
+        )
+        if log and state.iqr_history:
+            log.info(
+                "\033[38;5;208m OBS\033[0m IQR history seeded: %d rounds from %s",
+                len(state.iqr_history), iqr_history_file,
+            )
     status_writer(_status())
     processed = 0
     since_status = 0
@@ -219,6 +251,8 @@ def run_engine(
                 if rs.issues and log:
                     lvl = log.error if rs.reveal_offence else log.warning
                     lvl("\033[38;5;208m OBS\033[0m round %s: %s", rs.round_id, "; ".join(rs.issues))
+                if iqr_history_file and rs.iqr_tally is not None and rs.iqr_tally_new:
+                    append_tally(Path(iqr_history_file), rs.iqr_tally)
             cursor += 1
             processed += 1
             since_status += 1

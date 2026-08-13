@@ -16,6 +16,16 @@ offence (commit-hash mismatch). Phase 2+ (marked TODO): minimal-conditions value
 (need all-voter medians), signature-vs-finalization recovery, FDC, fast-updates, uptime.
 """
 
-from clif.observe.health import ObserveHealth, read_observe_status, render_observe
+from clif.observe.health import (
+    ObserveHealth,
+    read_observe_status,
+    render_iqr_windows,
+    render_observe,
+)
 
-__all__ = ["ObserveHealth", "read_observe_status", "render_observe"]
+__all__ = [
+    "ObserveHealth",
+    "read_observe_status",
+    "render_iqr_windows",
+    "render_observe",
+]

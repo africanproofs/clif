@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from py_flare_common.ftso.commit import commit_hash
 from py_flare_common.ftso.median import FtsoVote, calculate_median
 
-from clif.observe.reward_rule import BandClass, classify_bands
+from clif.observe.iqr_history import IqrTally
+from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH, BandClass, classify_bands
 from clif.observe.timing import submit1_window, submit2_window
 
 
@@ -44,6 +45,8 @@ class RoundState:
     iqr_votes: dict[int, list] = field(default_factory=dict)  # feed_idx -> [FtsoVote]
     iqr_ap_values: list | None = None  # AP's own submitted per-feed values this round
     iqr_results: dict[str, tuple[str, bool, bool]] = field(default_factory=dict)  # feed -> (band, pct_hit, capped)
+    iqr_tally: object | None = None  # the compact IqrTally built at finalize (for persistence)
+    iqr_tally_new: bool = False  # True ⇒ this rid wasn't already in history (persist it)
     # verdict (set at finalize)
     reveal_offence: bool = False
     issues: list[str] = field(default_factory=list)
@@ -86,11 +89,30 @@ class ObserverState:
         # IQR context (set per reward epoch by the engine; None ⇒ IQR scoring off this session).
         self.iqr_offer = None  # reward_rule.OfferParams | None
         self.iqr_weight_map: dict[str, int] = {}  # {registered submit_addr_lc: weight}
+        # Per-round IQR tallies for the multi-horizon rates (1h/6h/24h/since-epoch). Bounded to
+        # a hair over one reward epoch; the engine seeds this from the persisted log on start.
+        self.iqr_history: deque[IqrTally] = deque(maxlen=VRS_PER_REWARD_EPOCH + 240)
+        self._iqr_rids: set[int] = set()  # dedup guard (a restart re-finalizes recent rounds)
 
     def set_iqr_context(self, offer, weight_map: dict[str, int]) -> None:
         """Install the per-reward-epoch band params + voter→weight map that turn on IQR scoring."""
         self.iqr_offer = offer
         self.iqr_weight_map = weight_map
+
+    def _remember_tally(self, t: IqrTally) -> bool:
+        """Add a tally to the multi-horizon history, deduped by round id. Returns True if new."""
+        if t.rid in self._iqr_rids:
+            return False
+        self._iqr_rids.add(t.rid)
+        self.iqr_history.append(t)
+        if len(self._iqr_rids) > (self.iqr_history.maxlen or 0):
+            self._iqr_rids = {x.rid for x in self.iqr_history}  # resync after deque eviction
+        return True
+
+    def seed_iqr_history(self, tallies: list[IqrTally]) -> None:
+        """Seed the history from the persisted log on start (deduped)."""
+        for t in tallies:
+            self._remember_tally(t)
 
     def _round(self, rid: int) -> RoundState:
         rs = self.rounds.get(rid)
@@ -168,7 +190,7 @@ class ObserverState:
         was emitted in). Rounds accumulate a request count that gates FDC-participation checks."""
         self._round(round_id).fdc_request_count += 1
 
-    def _finalize(self, rs: RoundState) -> None:
+    def _finalize(self, rs: RoundState, ts: int = 0) -> None:
         """Run the FTSO checks for a round whose windows have closed (ftso.py logic)."""
         # submit1 (commit)
         if not rs.submit1_seen:
@@ -201,6 +223,15 @@ class ObserverState:
             rs.issues.append(f"FDC: no bitvote (~{rs.fdc_request_count} request(s) this round)")
         # IQR reward-band scoring (informational — never sets an issue or affects `clean`).
         self._score_iqr(rs)
+        if rs.iqr_results:  # one compact tally per scored round → the multi-horizon history
+            ins = sum(1 for band, _p, _c in rs.iqr_results.values() if band == "I")
+            bnd = sum(1 for band, _p, _c in rs.iqr_results.values() if band == "B")
+            pct = sum(1 for _b, p, _c in rs.iqr_results.values() if p)
+            cap = sum(1 for _b, _p, c in rs.iqr_results.values() if c)
+            rs.iqr_tally = IqrTally(
+                rid=rs.round_id, ts=ts, fr=len(rs.iqr_results), ins=ins, bnd=bnd, pct=pct, cap=cap
+            )
+            rs.iqr_tally_new = self._remember_tally(rs.iqr_tally)
         self.finalized.append(rs)
         self.last_round_finalized = rs.round_id
 
@@ -214,9 +245,38 @@ class ObserverState:
                 rs = self.rounds.pop(rid)
                 if ep.start_s < self.observe_start_ts:
                     continue  # boundary round — we couldn't have seen its commit; drop, don't count
-                self._finalize(rs)
+                self._finalize(rs, now_ts)
                 done.append(rs)
         return done
+
+    def windowed_iqr(self, now_ts: int, reward_epoch: int | None) -> dict:
+        """IQR inner/outer rates over 1h / 6h / 24h / since-epoch, from the retained tallies.
+        `now_ts` is chain time (state.last_ts); since-epoch = tallies whose round is in
+        `reward_epoch`. Each horizon: {inner_pct, outer_pct, feed_rounds, rounds, capped}."""
+        hist = list(self.iqr_history)
+
+        def _agg(rows: list) -> dict:
+            fr = sum(r.fr for r in rows)
+            if fr == 0:
+                return {"inner_pct": None, "outer_pct": None, "feed_rounds": 0, "rounds": len(rows), "capped": 0}
+            ins = sum(r.ins for r in rows)
+            bnd = sum(r.bnd for r in rows)
+            return {
+                "inner_pct": round(100.0 * (ins + 0.5 * bnd) / fr, 1),
+                "outer_pct": round(100.0 * sum(r.pct for r in rows) / fr, 1),
+                "feed_rounds": fr,
+                "rounds": len(rows),
+                "capped": sum(r.cap for r in rows),
+            }
+
+        return {
+            "1h": _agg([r for r in hist if now_ts and r.ts >= now_ts - 3_600]),
+            "6h": _agg([r for r in hist if now_ts and r.ts >= now_ts - 21_600]),
+            "24h": _agg([r for r in hist if now_ts and r.ts >= now_ts - 86_400]),
+            "epoch": _agg(
+                [r for r in hist if reward_epoch is not None and r.rid // VRS_PER_REWARD_EPOCH == reward_epoch]
+            ),
+        }
 
     # --- rolling aggregates over the finalized window ---
     def aggregates(self) -> dict:

@@ -145,3 +145,60 @@ def test_iqr_off_when_no_context():
     rs = st.rounds[5]
     st._finalize(rs)
     assert rs.iqr_results == {} and st.aggregates()["iqr_feed_rounds"] == 0
+
+
+# ---- multi-horizon history (1h / 6h / 24h / since-epoch) -------------------------
+
+
+def _seed(st, tallies):
+    from clif.observe.iqr_history import IqrTally
+
+    st.seed_iqr_history([IqrTally(**t) for t in tallies])
+
+
+def test_windowed_iqr_horizons_and_epoch_filter():
+    from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH
+    from clif.observe.state import ObserverState
+
+    st = ObserverState("songbird", "0x" + "a" * 40, "0x" + "b" * 40)
+    now = 1_000_000
+    ep = 423
+    base = ep * VRS_PER_REWARD_EPOCH
+    # one round 30 min ago (in-epoch), one 5 h ago (in-epoch), one 20 h ago (PREVIOUS epoch)
+    _seed(st, [
+        {"rid": base + 10, "ts": now - 1800, "fr": 10, "ins": 8, "bnd": 0, "pct": 10, "cap": 1},
+        {"rid": base + 5, "ts": now - 5 * 3600, "fr": 10, "ins": 4, "bnd": 0, "pct": 9, "cap": 0},
+        {"rid": base - 3, "ts": now - 20 * 3600, "fr": 10, "ins": 0, "bnd": 0, "pct": 5, "cap": 0},
+    ])
+    w = st.windowed_iqr(now, ep)
+    assert w["1h"]["feed_rounds"] == 10 and w["1h"]["inner_pct"] == 80.0
+    assert w["6h"]["feed_rounds"] == 20 and w["6h"]["inner_pct"] == 60.0  # (8+4)/20
+    assert w["24h"]["feed_rounds"] == 30 and w["24h"]["outer_pct"] == 80.0  # (10+9+5)/30
+    # since-epoch excludes the previous-epoch round → only the two in-epoch rounds
+    assert w["epoch"]["feed_rounds"] == 20 and w["epoch"]["rounds"] == 2
+
+
+def test_seed_iqr_history_dedups_by_rid():
+    from clif.observe.state import ObserverState
+
+    st = ObserverState("songbird", "0x" + "a" * 40, "0x" + "b" * 40)
+    _seed(st, [{"rid": 7, "ts": 100, "fr": 5, "ins": 5, "bnd": 0, "pct": 5, "cap": 0}])
+    _seed(st, [{"rid": 7, "ts": 100, "fr": 5, "ins": 5, "bnd": 0, "pct": 5, "cap": 0}])  # dup rid
+    assert len(st.iqr_history) == 1
+
+
+def test_iqr_history_load_prune_roundtrip(tmp_path):
+    from clif.observe.iqr_history import IqrTally, append_tally, load_history, prune_history
+    from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH
+
+    p = tmp_path / "hist.jsonl"
+    now = 2_000_000
+    ep = 400
+    base = ep * VRS_PER_REWARD_EPOCH
+    append_tally(p, IqrTally(base + 1, now - 100, 5, 5, 0, 5, 0))  # recent, in-epoch
+    append_tally(p, IqrTally(base + 1, now - 50, 5, 4, 0, 5, 0))  # DUP rid (newer) → last wins
+    append_tally(p, IqrTally(base - 99999, now - 200_000, 5, 0, 0, 0, 0))  # old + prev epoch → dropped
+    got = load_history(p, now_ts=now, reward_epoch=ep, vrs_per_epoch=VRS_PER_REWARD_EPOCH)
+    assert len(got) == 1 and got[0].ins == 4  # deduped to the newer, stale one dropped
+    prune_history(p, now_ts=now, reward_epoch=ep, vrs_per_epoch=VRS_PER_REWARD_EPOCH)
+    assert len(p.read_text().splitlines()) == 1

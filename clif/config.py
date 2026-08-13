@@ -302,6 +302,10 @@ class Settings(BaseSettings):
         return Path(self.clif_state_dir) / f"observe-status-{self.network}.json"
 
     @property
+    def observe_iqr_history_file(self) -> Path:
+        return Path(self.clif_state_dir) / f"observe-iqr-history-{self.network}.jsonl"
+
+    @property
     def observe_rpc_url(self) -> str:
         return self.observe_rpc or self.rpc_url
 
