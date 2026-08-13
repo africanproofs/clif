@@ -141,8 +141,17 @@ $_svc
     [ -n "$_svcs" ] || _svcs="clif-epoch-$_net"
     if [ "$_sorted" -eq 1 ]; then
       # Bounded, merged, chronological. Default a deeper backlog since there's no follow.
+      # Piping to sort makes compose drop its per-container prefix color, so re-apply a
+      # FIXED hue per module after the sort (matching the badge colors: epoch cyan ·
+      # fund magenta · registration blue · observe orange). The message body keeps its
+      # own embedded colors untouched.
       case " $_rest " in *" --tail"*) _tail="" ;; *) _tail="--tail=100" ;; esac
-      docker compose --profile multichain logs --no-color $_tail $_svcs $_rest | sort -t'|' -k2
+      docker compose --profile multichain logs $_tail $_svcs $_rest | sort -t'|' -k2 | awk '
+        { i=index($0,"|");
+          if(i){ pre=substr($0,1,i-1); rest=substr($0,i);
+            c=(pre~/-epoch-/)?"\033[36m":(pre~/-fund-/)?"\033[35m":(pre~/-registration-/)?"\033[34m":(pre~/-observe-/)?"\033[38;5;208m":"";
+            if(c!="") printf "%s%s\033[0m%s\n",c,pre,rest; else print }
+          else print }'
       exit $?
     fi
     # Live follow: default a short backlog unless the caller sets their own --tail/-n.
