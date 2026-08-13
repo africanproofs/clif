@@ -172,6 +172,16 @@ services:
     profiles: ["multichain"]
     restart: unless-stopped
 
+  clif-observe-flare:
+    build: .
+    image: clif:dev
+    container_name: clif-observe-flare
+    command: ["observe", "run"]
+    env_file: [.env.flare]
+    networks: [egress]
+    profiles: ["multichain"]
+    restart: unless-stopped
+
 networks:
   fwd-net:
     external: true
