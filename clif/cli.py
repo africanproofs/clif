@@ -63,7 +63,12 @@ from clif.funding import (
     validate_plan,
 )
 from clif.registration import read_readiness, render_readiness
-from clif.observe import read_observe_status, render_iqr_windows, render_observe
+from clif.observe import (
+    read_observe_status,
+    render_iqr_windows,
+    render_observe,
+    render_protocol_report,
+)
 from clif.observe.engine import run_engine
 from clif.fwd_client import (
     FwdClient,
@@ -2711,6 +2716,7 @@ def registration_run(
 def observe_status(
     network: Annotated[Optional[str], typer.Option("--network", envvar="NETWORK")] = None,
     json_out: Annotated[bool, typer.Option("--json", help="machine-readable (the MCP scrape surface)")] = False,
+    full: Annotated[bool, typer.Option("--full", help="explicit per-protocol FSP health report")] = False,
 ) -> None:
     """The rolling FTSO participation health (read from the engine's status file). Exit 0/1/2
     = OK/WARN/CRIT. CRIT = a reveal offence, sustained non-participation, or a stale engine."""
@@ -2720,6 +2726,11 @@ def observe_status(
     h = read_observe_status(s.observe_status_file, enabled=s.observe_enabled)
     if json_out:
         print(json.dumps(h.to_dict(), indent=2))
+    elif full:
+        for line in render_protocol_report(h):
+            print(line)
+        for line in render_iqr_windows(h):
+            print(line)
     else:
         print(render_observe(h, active=False))
         for line in render_iqr_windows(h):
@@ -2752,6 +2763,7 @@ def observe_run() -> None:
     our_submit = accts.get("Submit")
     our_sig = accts.get("SubmitSignatures")
     identity = accts.get("Identity")  # the registered voter key — for the registration overlay
+    ap_signing_policy = accts.get("SigningPolicy")  # for fast-update (255) attribution
     if not our_submit or not our_sig:
         err.print(f"[bold red]observe: no Submit/SubmitSignatures address for {s.network}[/]")
         raise typer.Exit(2)
@@ -2787,6 +2799,8 @@ def observe_run() -> None:
             flare_systems_manager=s.net.flare_systems_manager,
             identity=identity,
             fdc_hub=fdc_hub,
+            ap_signing_policy=ap_signing_policy,
+            validator_node_id=s.net.validator_node_id or None,
             entity_manager=s.net.entity_manager,
             iqr_cache_dir=str(s.clif_state_dir),
             iqr_enabled=s.observe_iqr,

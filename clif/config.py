@@ -37,6 +37,8 @@ class NetworkConfig:
     default_rpc: str
     # `{epoch}` is substituted with the reward epoch id.
     reward_data_url_template: str
+    # AP's P-chain validator NodeID for the uptime check ("" = AP runs no validator on this net).
+    validator_node_id: str = ""
 
 
 _NETWORKS: dict[str, NetworkConfig] = {
@@ -53,6 +55,7 @@ _NETWORKS: dict[str, NetworkConfig] = {
             "https://raw.githubusercontent.com/flare-foundation/fsp-rewards/"
             "refs/heads/main/flare/{epoch}/reward-distribution-data-tuples.json"
         ),
+        validator_node_id="NodeID-FLPF99Gi1c79NGHw7GYyhttWPVxpCq713",
     ),
     "songbird": NetworkConfig(
         name="songbird",

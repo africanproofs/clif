@@ -22,6 +22,8 @@ _FDC_CRIT_PCT = 80.0  # the FDC minimal condition; sustained below this ⇒ CRIT
 def build_status(
     state, *, network: str, enabled: bool,
     registered: bool | None = None, reward_epoch: int | None = None,
+    uptime_pct: float | None = None, uptime_connected: bool | None = None,
+    validator_node: str | None = None,
 ) -> dict:
     """The JSON the engine writes each cycle. `registered` = is AP in the registered voter
     set for the current reward epoch (None = not probed); when False, all the clean
@@ -37,6 +39,10 @@ def build_status(
         "registered": registered,
         "reward_epoch": reward_epoch,
         "iqr_windows": state.windowed_iqr(state.last_ts or int(time.time()), reward_epoch),
+        "fu_windows": state.windowed_fastupdates(state.last_ts or int(time.time())),
+        "uptime_pct": uptime_pct,
+        "uptime_connected": uptime_connected,
+        "validator_node": validator_node,
         **agg,
     }
 
@@ -66,6 +72,11 @@ class ObserveHealth:
     iqr_pct_hit: int = 0  # inside the secondary (PCT) band
     iqr_capped: int = 0  # feed-rounds where Q3−Q1 ≤ 1 tick (structural ~50% inner ceiling)
     iqr_windows: dict | None = None  # {1h,6h,24h,epoch} → {inner_pct,outer_pct,feed_rounds,rounds,capped}
+    signatures_seen: int = 0  # submitSignatures seen in the rolling window
+    fu_windows: dict | None = None  # fast-updates (255): {1h,6h,24h} AP counts + total_tracked
+    uptime_pct: float | None = None  # P-chain validator uptime %
+    uptime_connected: bool | None = None
+    validator_node: str | None = None
     recent_issues: list[str] | None = None
     registered: bool | None = None  # in the registered voter set for the current reward epoch?
     reward_epoch: int | None = None
@@ -156,6 +167,11 @@ class ObserveHealth:
             "iqr_outer_pct": self.iqr_outer_pct,
             "iqr_capped": self.iqr_capped,
             "iqr_windows": self.iqr_windows,
+            "signatures_seen": self.signatures_seen,
+            "fu_windows": self.fu_windows,
+            "uptime_pct": self.uptime_pct,
+            "uptime_connected": self.uptime_connected,
+            "validator_node": self.validator_node,
             "registered": self.registered,
             "reward_epoch": self.reward_epoch,
             "recent_issues": self.recent_issues or [],
@@ -189,6 +205,11 @@ def observe_health_from_dict(d: dict, *, enabled_default: bool = True) -> Observ
         iqr_pct_hit=d.get("iqr_pct_hit", 0),
         iqr_capped=d.get("iqr_capped", 0),
         iqr_windows=d.get("iqr_windows"),
+        signatures_seen=d.get("signatures_seen", 0),
+        fu_windows=d.get("fu_windows"),
+        uptime_pct=d.get("uptime_pct"),
+        uptime_connected=d.get("uptime_connected"),
+        validator_node=d.get("validator_node"),
         registered=d.get("registered"),
         reward_epoch=d.get("reward_epoch"),
         recent_issues=d.get("recent_issues", []),
@@ -242,6 +263,77 @@ def render_iqr_windows(h: ObserveHealth) -> list[str]:
             f"    {lbl:>5}  inner {w['inner_pct']:>5}% · outer {w['outer_pct']:>5}%"
             f"  ({w['rounds']} rounds, {w['feed_rounds']} feed-rounds)"
         )
+    return lines
+
+
+def render_protocol_report(h: ObserveHealth) -> list[str]:
+    """Explicit per-protocol FSP health block — the hourly report. One line per protocol, from
+    the data the observer already tracks. Colour by the overall severity headline."""
+    w = h.window_rounds or 0
+    ep = f"RE{h.reward_epoch}" if h.reward_epoch is not None else "RE?"
+    head_c = _RED if h.severity == "CRIT" else (_YELLOW if h.severity == "WARN" else _GREEN)
+    lines = [f"{_BADGE_OBS} {head_c}══ FSP protocol health — {h.network} {ep} (rolling {w} rounds ≈1h) ══{_RESET}"]
+
+    # registration
+    if h.registered is False:
+        reg = f"{_RED}✗ NOT REGISTERED — submissions earn ZERO{_RESET}"
+    elif h.registered is True:
+        reg = f"{_GREEN}✓ registered{_RESET}"
+    else:
+        reg = "· (unknown)"
+    lines.append(f"  registration : {reg}")
+
+    # FTSO (100) — commit / reveal / signatures, broken out
+    if w:
+        c_seen = w - h.missing_submit1
+        r_seen = max(0, w - h.missing_submit1 - h.missing_submit2)
+        off = f", {h.off_window} off-window" if h.off_window else ""
+        offc = f"{_RED} · {h.reveal_offences} REVEAL OFFENCE{_RESET}" if h.reveal_offences else ""
+        lines.append(
+            f"  FTSO (100)   : commit {c_seen}/{w} · reveal {r_seen}/{w} · sigs {h.signatures_seen}/{w}"
+            f" · clean {h.complete}/{w} ({h.participation_pct}%){off}{offc}"
+        )
+    else:
+        lines.append("  FTSO (100)   : · (warming up)")
+
+    # FDC (200)
+    if h.fdc_request_rounds:
+        fdc = f"{h.fdc_participated}/{h.fdc_request_rounds} bitvoted ({h.fdc_participation_pct}%)"
+        if h.fdc_missing:
+            fdc += f"{_YELLOW} · {h.fdc_missing} gap{_RESET}"
+    else:
+        fdc = "· no attestation requests this window"
+    lines.append(f"  FDC (200)    : {fdc}")
+
+    # Fast updates (255)
+    fw = h.fu_windows or {}
+    if fw.get("total_tracked"):
+        fu = f"1h {fw.get('1h', 0)} · 6h {fw.get('6h', 0)} · 24h {fw.get('24h', 0)} updates"
+    elif h.registered:
+        fu = f"{_YELLOW}0 updates (registered — expected some; sortition-weighted){_RESET}"
+    else:
+        fu = "0 updates (not registered ⇒ no sortition weight)"
+    lines.append(f"  FastUpd (255): {fu}")
+
+    # Validator uptime (P-chain) — Flare-only
+    if h.validator_node:
+        if h.uptime_pct is None and h.uptime_connected is None:
+            upl = "· (not yet probed)"
+        else:
+            conn = f"{_GREEN}connected{_RESET}" if h.uptime_connected else f"{_RED}DISCONNECTED{_RESET}"
+            upl = f"{h.uptime_pct:g}% · {conn}"
+    else:
+        upl = "· n/a (no validator on this net)"
+    lines.append(f"  uptime       : {upl}")
+
+    # IQR quality horizons (would-be while excluded)
+    win = h.iqr_windows or {}
+    if any((win.get(k) or {}).get("feed_rounds") for k, _ in _IQR_HORIZONS):
+        tag = "would-be IQR" if h.registered is False else "IQR quality"
+        seg = " · ".join(f"{lbl} {_win_pair(win.get(k))}" for k, lbl in _IQR_HORIZONS)
+        lines.append(f"  {tag} : {seg}  [in/out %]")
+    else:
+        lines.append("  IQR quality  : · (warming up)")
     return lines
 
 

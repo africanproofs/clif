@@ -21,6 +21,7 @@ from clif.observe.health import (
     read_observe_status,
     render_iqr_windows,
     render_observe,
+    render_protocol_report,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "read_observe_status",
     "render_iqr_windows",
     "render_observe",
+    "render_protocol_report",
 ]

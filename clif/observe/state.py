@@ -93,6 +93,9 @@ class ObserverState:
         # a hair over one reward epoch; the engine seeds this from the persisted log on start.
         self.iqr_history: deque[IqrTally] = deque(maxlen=VRS_PER_REWARD_EPOCH + 240)
         self._iqr_rids: set[int] = set()  # dedup guard (a restart re-finalizes recent rounds)
+        # Fast-updates (protocol 255): AP's FastUpdateFeedsSubmitted event timestamps — a
+        # per-BLOCK signal (sortition-weighted), so a time-windowed count, not round-based.
+        self.fu_events: deque[int] = deque(maxlen=4000)  # ~24h+ of AP updates
 
     def set_iqr_context(self, offer, weight_map: dict[str, int]) -> None:
         """Install the per-reward-epoch band params + voter→weight map that turn on IQR scoring."""
@@ -184,6 +187,20 @@ class ObserverState:
             band = {BandClass.INSIDE: "I", BandClass.BOUNDARY: "B"}.get(cls["band_class"], "O")
             rs.iqr_results[name] = (band, bool(cls["pct_hit"]), cls["band_ticks"] <= 1)
         rs.iqr_votes = {}  # free the per-round vote buffer
+
+    def record_fast_update(self, ts: int) -> None:
+        """One AP FastUpdateFeedsSubmitted event observed at block time `ts` (protocol 255)."""
+        self.fu_events.append(ts)
+
+    def windowed_fastupdates(self, now_ts: int) -> dict:
+        """AP fast-update counts over 1h / 6h / 24h from the rolling event log."""
+        ev = list(self.fu_events)
+        return {
+            "1h": sum(1 for t in ev if now_ts and t >= now_ts - 3_600),
+            "6h": sum(1 for t in ev if now_ts and t >= now_ts - 21_600),
+            "24h": sum(1 for t in ev if now_ts and t >= now_ts - 86_400),
+            "total_tracked": len(ev),
+        }
 
     def record_fdc_request(self, round_id: int) -> None:
         """One FdcHub AttestationRequest observed for `round_id` (the round of the block it
@@ -306,6 +323,7 @@ class ObserverState:
             "missing_submit2": sum(1 for r in w if r.submit1_seen and not r.submit2_seen),
             "reveal_offences": sum(1 for r in w if r.reveal_offence),
             "off_window": sum(1 for r in w if (r.submit1_seen and not r.submit1_ontime) or (r.submit2_seen and not r.submit2_ontime)),
+            "signatures_seen": sum(1 for r in w if r.sig_seen),
             "fdc_request_rounds": sum(1 for r in w if r.fdc_expected),
             "fdc_participated": sum(1 for r in w if r.fdc_expected and r.fdc_bitvote_seen and not r.fdc_gap),
             "fdc_missing": sum(1 for r in w if r.fdc_gap),

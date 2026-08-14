@@ -21,8 +21,7 @@ from clif.observe.decode import decode_submit
 from clif.observe.health import (
     build_status,
     observe_health_from_dict,
-    render_iqr_windows_compact,
-    render_observe,
+    render_protocol_report,
 )
 from clif.observe.iqr import build_voter_weight_map
 from clif.observe.iqr_history import append_tally, load_history, prune_history
@@ -39,6 +38,9 @@ def _blk_int(v) -> int:
 # keccak256("AttestationRequest(bytes,uint256)") — FdcHub's per-request event topic0.
 _ATTESTATION_REQUEST_TOPIC = "0x251377668af6553101c9bb094ba89c0c536783e005e203625e6cd57345918cc9"
 _SUBMIT2_SELECTOR = "9d00c9fd"
+# keccak256("FastUpdateFeedsSubmitted(uint32,address)") — FastUpdater's per-submission event;
+# topic[2] = the submitter's signingPolicyAddress (indexed), so AP's updates filter directly.
+_FAST_UPDATE_TOPIC = "0x63db91b14b3d088c677f046180aefcea7a236649704d90ce810cde455d38d936"
 
 
 def run_engine(
@@ -63,6 +65,8 @@ def run_engine(
     registration_refresh_sec: float = 3600.0,  # registration changes per reward epoch (~3.5d)
     status_log_sec: float = 3600.0,  # emit a rendered OBS status line to the log this often (+once seeded)
     fdc_hub: str | None = None,  # FdcHub address — enables FDC participation tracking when set
+    ap_signing_policy: str | None = None,  # AP's signingPolicyAddress — enables fast-update (255) tracking
+    validator_node_id: str | None = None,  # AP's P-chain NodeID — enables the validator uptime check
     entity_manager: str | None = None,  # with voter_registry + FSM ⇒ enables IQR reward-band scoring
     iqr_cache_dir: str | None = None,  # per-epoch offer-params disk cache (default: no disk cache)
     iqr_enabled: bool = True,  # gate the (per-block all-voter reveal decode) IQR scoring
@@ -107,6 +111,34 @@ def run_engine(
         except RpcError:
             pass  # keep the last known value
 
+    # Fast-updates (protocol 255): FastUpdater emits FastUpdateFeedsSubmitted per submission; we
+    # filter AP's by its signingPolicyAddress (indexed topic[2]). Resolve the contract once.
+    fast_updater = None
+    if ap_signing_policy:
+        try:
+            fu = rpc.contract_address_by_name("FastUpdater")
+            fast_updater = fu if fu and int(fu, 16) != 0 else None
+        except RpcError:
+            fast_updater = None
+    spa_topic = "0x" + "0" * 24 + ap_signing_policy[2:].lower() if ap_signing_policy else None
+
+    # Validator uptime (P-chain) — hourly poll of platform.getCurrentValidators (Flare-only; AP
+    # runs no Songbird validator). Best-effort: a probe failure keeps the last value.
+    up = {"pct": None, "connected": None, "checked": 0.0}
+
+    def _refresh_uptime(now: float) -> None:
+        if not validator_node_id:
+            return
+        if up["checked"] and now - up["checked"] < registration_refresh_sec:
+            return
+        try:
+            res = rpc.validator_uptime(validator_node_id)
+            if res is not None:
+                up["pct"], up["connected"] = res
+            up["checked"] = now
+        except RpcError:
+            pass  # keep the last known value
+
     # IQR reward-band scoring overlay — per reward epoch (offer band params + voter→weight map,
     # both disk-cached), then AP's inner/outer band hit rates are scored natively at finalize
     # (median from ALL registered voters' reveals). Best-effort: if the offer/weight can't be
@@ -143,6 +175,7 @@ def run_engine(
         return build_status(
             state, network=network, enabled=True,
             registered=reg["registered"], reward_epoch=reg["epoch"],
+            uptime_pct=up["pct"], uptime_connected=up["connected"], validator_node=validator_node_id,
         )
 
     # Periodic self-report: the observer otherwise only logs issues, so its participation +
@@ -156,12 +189,11 @@ def run_engine(
             return
         slog["last"] = now
         h = observe_health_from_dict(_status())
-        line = render_observe(h, active=(h.severity == "CRIT"))
+        # The explicit, per-protocol FSP health report (registration, FTSO commit/reveal/sigs,
+        # FDC, fast-updates, uptime, IQR) — logged at the overall-severity level.
         lvl = log.error if h.severity == "CRIT" else (log.warning if h.severity == "WARN" else log.info)
-        lvl(line)
-        hz = render_iqr_windows_compact(h)  # the 1h/6h/24h/epoch trend line
-        if hz:
-            log.info(hz)
+        for ln in render_protocol_report(h):
+            lvl(ln)
         if iqr_history_file:  # bound the persisted log on the same (hourly) cadence
             ep_hist = iqr["epoch"] if iqr["epoch"] is not None else reg["epoch"]
             prune_history(
@@ -173,6 +205,7 @@ def run_engine(
     state.last_block = cursor
     _refresh_registration(time.time())
     _refresh_iqr(time.time())
+    _refresh_uptime(time.time())
     # Seed the multi-horizon IQR history from the persisted log (so 24h / since-epoch survive a
     # restart). Scope to the now-known reward epoch; deduped on load + against re-finalized rounds.
     if iqr_history_file:
@@ -245,6 +278,14 @@ def run_engine(
                             state.record_fdc_request(rid)
                 except RpcError:
                     pass
+            # Fast updates (255): count AP's FastUpdateFeedsSubmitted (per-block, sortition-driven).
+            if fast_updater and spa_topic:
+                try:
+                    fus = rpc.get_logs(fast_updater, [_FAST_UPDATE_TOPIC, None, spa_topic], cursor, cursor)
+                    for _ in fus:
+                        state.record_fast_update(ts)
+                except RpcError:
+                    pass
             state.last_block = cursor
             state.last_ts = ts
             for rs in state.finalize_due(ts, factory):
@@ -265,6 +306,7 @@ def run_engine(
                 return
         _refresh_registration(time.time())
         _refresh_iqr(time.time())
+        _refresh_uptime(time.time())
         status_writer(_status())
         since_status = 0
         # First time we're fully caught up, the lookback window is seeded (rounds finalized +

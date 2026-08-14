@@ -485,6 +485,35 @@ class RpcClient:
             raise RpcError(f"block {block_number} not found")
         return int(str(cast(dict, result)["timestamp"]), 16)
 
+    def validator_uptime(self, node_id: str) -> tuple[float | None, bool] | None:
+        """P-chain `platform.getCurrentValidators` for one NodeID → (uptime_percent, connected).
+
+        The P-chain lives at `/ext/bc/P` on the SAME host as the C-chain RPC (which uses
+        `/ext/bc/C/rpc`); it takes an OBJECT param, not the EVM list form. Returns None if the
+        node isn't in the current validator set. Keyless read."""
+        p_url = self._url.split("/ext/", 1)[0] + "/ext/bc/P"
+        self._id += 1
+        try:
+            resp = self._client.post(
+                p_url,
+                json={
+                    "jsonrpc": "2.0", "id": self._id,
+                    "method": "platform.getCurrentValidators", "params": {"nodeIDs": [node_id]},
+                },
+            )
+            resp.raise_for_status()
+            body = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RpcError(f"platform.getCurrentValidators transport failure: {exc}") from exc
+        if "error" in body:
+            raise RpcError(f"platform.getCurrentValidators rpc error: {body['error']}")
+        vals = (body.get("result") or {}).get("validators") or []
+        if not vals:
+            return None
+        v = vals[0]
+        up = v.get("uptime")
+        return (float(up) if up is not None else None, bool(v.get("connected", False)))
+
     def signed_logs(
         self,
         flare_systems_manager: str,
