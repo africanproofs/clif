@@ -233,3 +233,27 @@ def get_offer_params(
         except OSError:
             pass
     return params
+
+
+def prune_offer_cache(cache_dir: str | None, network: str, keep_epoch: int) -> None:
+    """Delete `offer-params-<network>-<epoch>.json` files older than `keep_epoch - 1` (keep the
+    current + previous reward epoch). Best-effort — the cache is tiny, this just bounds the count
+    over indefinite runtime. Network names have no '-', so the epoch is the last '-' field."""
+    if not cache_dir:
+        return
+    prefix = f"offer-params-{network}-"
+    try:
+        for name in os.listdir(cache_dir):
+            if not (name.startswith(prefix) and name.endswith(".json")):
+                continue
+            try:
+                epoch = int(name[len(prefix):-len(".json")])
+            except ValueError:
+                continue
+            if epoch < keep_epoch - 1:
+                try:
+                    os.remove(os.path.join(cache_dir, name))
+                except OSError:
+                    pass
+    except OSError:
+        pass

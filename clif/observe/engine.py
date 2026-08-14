@@ -25,7 +25,7 @@ from clif.observe.health import (
 )
 from clif.observe.iqr import build_voter_weight_map
 from clif.observe.iqr_history import append_tally, load_history, prune_history
-from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH, get_offer_params
+from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH, get_offer_params, prune_offer_cache
 from clif.observe.state import ObserverState
 from clif.observe.timing import voting_factory
 from clif.rpc import RpcClient, RpcError
@@ -86,7 +86,10 @@ def run_engine(
     # before this are incomplete-by-construction and won't be counted).
     _first = rpc.get_block(cursor, full_transactions=False)
     start_ts = _blk_int(_first.get("timestamp", "0x0")) if _first else 0
-    state = ObserverState(network, our_submit, our_sig, window_rounds=window_rounds, observe_start_ts=start_ts)
+    state = ObserverState(
+        network, our_submit, our_sig, window_rounds=window_rounds,
+        observe_start_ts=start_ts, factory=factory,
+    )
     if log:
         log.info(
             "observe start network=%s from block %s (head %s, lookback %s) submission=%s",
@@ -217,12 +220,14 @@ def run_engine(
         lvl = log.error if h.severity == "CRIT" else (log.warning if h.severity == "WARN" else log.info)
         for ln in render_protocol_report(h):
             lvl(ln)
+        ep_hist = iqr["epoch"] if iqr["epoch"] is not None else reg["epoch"]
         if iqr_history_file:  # bound the persisted log on the same (hourly) cadence
-            ep_hist = iqr["epoch"] if iqr["epoch"] is not None else reg["epoch"]
             prune_history(
                 Path(iqr_history_file), now_ts=state.last_ts or int(now),
                 reward_epoch=ep_hist, vrs_per_epoch=VRS_PER_REWARD_EPOCH,
             )
+        if iqr_cache_dir and ep_hist is not None:  # bound the offer-params cache file count
+            prune_offer_cache(iqr_cache_dir, network, ep_hist)
 
     # Write a status immediately so `observe status` shows "warming up", not a missing-file CRIT.
     state.last_block = cursor

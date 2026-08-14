@@ -27,6 +27,15 @@
 # or all three networks:
 #   docker compose --profile multichain up -d
 
+# Resource preservation (indefinite runtime): cap container logs so the json-file driver can't
+# fill the host disk (≤30 MB/container), and — applied per service below — mem_limit/cpus so a
+# leak is CONTAINED (OOM → graceful restart, persisted state survives) rather than unbounded.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   clif-epoch:
     build: .
@@ -36,6 +45,10 @@ services:
     env_file: [.env]
     networks: [fwd-net, egress]
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
     healthcheck:
       # `clif epoch status` exits non-zero when degraded or when the daemon is
       # dead/stale — the scrapeable money-path health signal.
@@ -51,6 +64,7 @@ services:
     profiles: ["cli"]
     env_file: [.env]
     networks: [fwd-net, egress]
+    logging: *logging
     entrypoint: ["clif"]
     # one-shot, e.g.:  docker compose run --rm clif claim --type fee
     # rehearsal:        docker compose run --rm clif rehearse
@@ -69,6 +83,10 @@ services:
     networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
     healthcheck:
       test: ["CMD", "clif", "epoch", "status"]
       interval: 300s
@@ -85,6 +103,10 @@ services:
     networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
     healthcheck:
       test: ["CMD", "clif", "epoch", "status"]
       interval: 300s
@@ -101,6 +123,10 @@ services:
     networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
     healthcheck:
       test: ["CMD", "clif", "epoch", "status"]
       interval: 300s
@@ -121,6 +147,10 @@ services:
     networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
 
   clif-fund-flare:
     build: .
@@ -131,6 +161,10 @@ services:
     networks: [fwd-net, egress]
     profiles: ["multichain"]
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
 
   # Registration-readiness daemons (the RE423 detector) — OBSERVE-only, no key/token.
   # Boundary-aware: tightens cadence near the reward-epoch boundary (where the
@@ -146,6 +180,10 @@ services:
     networks: [egress]
     profiles: ["multichain"]
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
 
   clif-registration-flare:
     build: .
@@ -156,6 +194,10 @@ services:
     networks: [egress]
     profiles: ["multichain"]
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
 
   # Per-block FTSO participation observer (fsp-observer native port, Phase 1).
   # OBSERVE-only: streams blocks and tracks AP's own submit/reveal per ~90s round.
@@ -171,6 +213,10 @@ services:
     networks: [egress]
     profiles: ["multichain"]
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.5
 
   clif-observe-flare:
     build: .
@@ -181,6 +227,10 @@ services:
     networks: [egress]
     profiles: ["multichain"]
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.5
 
 networks:
   fwd-net:

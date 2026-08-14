@@ -122,3 +122,58 @@ def test_report_reflects_exclusion_and_no_validator():
 def test_report_flags_reveal_offence():
     out = _plain(render_protocol_report(_health(reveal_offences=2)))
     assert "2 REVEAL OFFENCE" in out
+
+
+def test_report_includes_resource_gauge():
+    out = _plain(render_protocol_report(
+        _health(resources={"in_flight_rounds": 2, "iqr_hist": 120, "fu_events": 33, "rss_mib": 84.2})
+    ))
+    assert "resources    : in-flight-rounds 2 · iqr-hist 120 · fu-events 33 · rss 84.2 MiB" in out
+
+
+# ---- leak prevention: bounded in-flight rounds -----------------------------------
+
+
+class _FakeEpoch:
+    def __init__(self, rid):
+        self.id = rid
+
+
+class _FakeFactory:
+    """Minimal timing factory: round id = ts // 90 (matches from_timestamp(ts).id contract)."""
+
+    def from_timestamp(self, ts):
+        return _FakeEpoch(ts // 90)
+
+
+def test_round_future_orphan_guard_not_retained():
+    st = ObserverState("flare", "0x" + "a" * 40, "0x" + "b" * 40, factory=_FakeFactory())
+    st.last_ts = 90_000  # current round = 1000
+    st._round(1002)  # within margin (≤ cur+4) → retained
+    st._round(9999)  # far future → throwaway, NOT stored
+    assert 1002 in st.rounds and 9999 not in st.rounds
+
+
+def test_round_hard_cap_evicts_stalest():
+    from clif.observe.state import _ROUNDS_CAP
+
+    st = ObserverState("flare", "0x" + "a" * 40, "0x" + "b" * 40)  # no factory ⇒ guard off, cap on
+    for rid in range(_ROUNDS_CAP + 50):
+        st._round(rid)
+    assert len(st.rounds) <= _ROUNDS_CAP
+    assert 0 not in st.rounds  # stalest (lowest) evicted
+
+
+# ---- leak prevention: offer-params cache prune -----------------------------------
+
+
+def test_prune_offer_cache_keeps_current_and_prev(tmp_path):
+    from clif.observe.reward_rule import prune_offer_cache
+
+    for ep in (420, 421, 422, 423):
+        (tmp_path / f"offer-params-flare-{ep}.json").write_text("{}")
+    (tmp_path / "offer-params-songbird-100.json").write_text("{}")  # other net untouched
+    prune_offer_cache(str(tmp_path), "flare", keep_epoch=423)
+    remaining = sorted(p.name for p in tmp_path.glob("offer-params-flare-*.json"))
+    assert remaining == ["offer-params-flare-422.json", "offer-params-flare-423.json"]
+    assert (tmp_path / "offer-params-songbird-100.json").exists()

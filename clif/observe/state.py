@@ -20,6 +20,10 @@ from clif.observe.iqr_history import IqrTally
 from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH, BandClass, classify_bands
 from clif.observe.timing import submit1_window, submit2_window
 
+# Bounds on the in-flight rounds dict (leak prevention on indefinite runtime):
+_FUTURE_ROUND_MARGIN = 4  # accept rounds up to this many ahead of current (clock skew / boundary)
+_ROUNDS_CAP = 512  # hard ceiling; normal in-flight is ~1–3, so this only trips on orphan accretion
+
 
 @dataclass
 class RoundState:
@@ -71,7 +75,7 @@ class ObserverState:
 
     def __init__(
         self, network: str, our_submit: str, our_sig: str, window_rounds: int = 40,
-        observe_start_ts: int = 0,
+        observe_start_ts: int = 0, factory=None,
     ) -> None:
         self.network = network
         self.our_submit = our_submit  # checksum form used for commit_hash
@@ -81,6 +85,7 @@ class ObserverState:
         # construction (we couldn't have seen their commit) — dropped, never counted, so a
         # fresh start / restart doesn't false-alarm on the boundary round.
         self.observe_start_ts = observe_start_ts
+        self.factory = factory  # timing factory — lets _round() reject implausibly-far rounds
         self.rounds: dict[int, RoundState] = {}
         self.finalized: deque[RoundState] = deque(maxlen=window_rounds)
         self.last_block: int | None = None
@@ -117,11 +122,32 @@ class ObserverState:
         for t in tallies:
             self._remember_tally(t)
 
+    def _current_round(self) -> int | None:
+        """The voting round of the last-processed block (None until we have a factory + last_ts)."""
+        if self.factory is None or self.last_ts is None:
+            return None
+        try:
+            return self.factory.from_timestamp(self.last_ts).id
+        except Exception:  # noqa: BLE001 — timing math never breaks the engine
+            return None
+
     def _round(self, rid: int) -> RoundState:
         rs = self.rounds.get(rid)
-        if rs is None:
-            rs = RoundState(rid)
-            self.rounds[rid] = rs
+        if rs is not None:
+            return rs
+        # Future/orphan guard: a reveal/FDC tx carrying an implausibly-far-ahead voting_round_id
+        # would create a RoundState that never finalizes (finalize needs its next round to end) —
+        # an unbounded leak vector. Return a THROWAWAY (unstored) for such ids so the caller can
+        # write to it harmlessly; it's discarded when the call returns.
+        cur = self._current_round()
+        if cur is not None and rid > cur + _FUTURE_ROUND_MARGIN:
+            return RoundState(rid)
+        rs = RoundState(rid)
+        self.rounds[rid] = rs
+        # Hard cap (defense-in-depth): normal in-flight is ~1–3 rounds; exceeding the cap means
+        # orphans accreted — evict the stalest (lowest) rid, which would have finalized by now.
+        if len(self.rounds) > _ROUNDS_CAP:
+            del self.rounds[min(self.rounds)]
         return rs
 
     def record(self, decoded, from_addr: str, tx_ts: int, factory) -> None:

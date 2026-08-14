@@ -8,6 +8,7 @@ Never green on a read error or a stale engine (the RE423 doctrine: silence is ne
 from __future__ import annotations
 
 import json
+import resource
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,14 @@ def build_status(
         "uptime_pct": uptime_pct,
         "uptime_connected": uptime_connected,
         "validator_node": validator_node,
+        # Resource gauge — bounded-collection sizes + process RSS, so a slow leak shows as a
+        # trend in the hourly report long before it could OOM (ru_maxrss is KiB on Linux).
+        "resources": {
+            "in_flight_rounds": len(state.rounds),
+            "iqr_hist": len(state.iqr_history),
+            "fu_events": len(state.fu_events),
+            "rss_mib": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1),
+        },
         **agg,
     }
 
@@ -77,6 +86,7 @@ class ObserveHealth:
     uptime_pct: float | None = None  # P-chain validator uptime %
     uptime_connected: bool | None = None
     validator_node: str | None = None
+    resources: dict | None = None  # {in_flight_rounds, iqr_hist, fu_events, rss_mib} — leak gauge
     recent_issues: list[str] | None = None
     registered: bool | None = None  # in the registered voter set for the current reward epoch?
     reward_epoch: int | None = None
@@ -172,6 +182,7 @@ class ObserveHealth:
             "uptime_pct": self.uptime_pct,
             "uptime_connected": self.uptime_connected,
             "validator_node": self.validator_node,
+            "resources": self.resources,
             "registered": self.registered,
             "reward_epoch": self.reward_epoch,
             "recent_issues": self.recent_issues or [],
@@ -210,6 +221,7 @@ def observe_health_from_dict(d: dict, *, enabled_default: bool = True) -> Observ
         uptime_pct=d.get("uptime_pct"),
         uptime_connected=d.get("uptime_connected"),
         validator_node=d.get("validator_node"),
+        resources=d.get("resources"),
         registered=d.get("registered"),
         reward_epoch=d.get("reward_epoch"),
         recent_issues=d.get("recent_issues", []),
@@ -334,6 +346,15 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
         lines.append(f"  {tag} : {seg}  [in/out %]")
     else:
         lines.append("  IQR quality  : · (warming up)")
+
+    # Resource gauge — bounded-collection sizes + RSS; a leak shows as a trend here first.
+    r = h.resources or {}
+    if r:
+        lines.append(
+            f"  resources    : in-flight-rounds {r.get('in_flight_rounds', '?')} · "
+            f"iqr-hist {r.get('iqr_hist', '?')} · fu-events {r.get('fu_events', '?')} · "
+            f"rss {r.get('rss_mib', '?')} MiB"
+        )
     return lines
 
 
