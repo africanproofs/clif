@@ -2729,8 +2729,6 @@ def observe_status(
     elif full:
         for line in render_protocol_report(h):
             print(line)
-        for line in render_iqr_windows(h):
-            print(line)
     else:
         print(render_observe(h, active=False))
         for line in render_iqr_windows(h):

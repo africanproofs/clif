@@ -171,6 +171,29 @@ def run_engine(
             if log and not iqr["ready"]:
                 log.warning("IQR context unavailable (%s) — band scoring off this cycle", exc)
 
+    # FDC + fast-update events are scanned in 30-block CHUNKS (get_logs' cap), not per block —
+    # a per-block get_logs made startup catch-up crawl (900 blocks × 2 extra calls). Each event
+    # is attributed via its own block's timestamp (from the per-block `ts_map` we already build).
+    def _flush_events(lo: int, hi: int, ts_map: dict[int, int]) -> None:
+        if lo > hi:
+            return
+        if fdc_hub:
+            try:
+                for lv in rpc.get_logs(fdc_hub, [_ATTESTATION_REQUEST_TOPIC], lo, hi):
+                    bts = ts_map.get(_blk_int(lv.get("blockNumber", "0x0")))
+                    if bts is not None:
+                        state.record_fdc_request(factory.from_timestamp(bts).id)
+            except RpcError:
+                pass
+        if fast_updater and spa_topic:
+            try:
+                for lv in rpc.get_logs(fast_updater, [_FAST_UPDATE_TOPIC, None, spa_topic], lo, hi):
+                    bts = ts_map.get(_blk_int(lv.get("blockNumber", "0x0")))
+                    if bts is not None:
+                        state.record_fast_update(bts)
+            except RpcError:
+                pass
+
     def _status() -> dict:
         return build_status(
             state, network=network, enabled=True,
@@ -225,6 +248,8 @@ def run_engine(
     processed = 0
     since_status = 0
     seeded = False
+    scan_lo = cursor  # first block whose FDC/FU events haven't been flushed yet
+    ts_map: dict[int, int] = {}
     while True:
         try:
             head = rpc.block_number()
@@ -244,6 +269,7 @@ def run_engine(
             if blk is None:
                 break
             ts = _blk_int(blk.get("timestamp", "0x0"))
+            ts_map[cursor] = ts
             for tx in blk.get("transactions", []):
                 if (tx.get("to") or "").lower() != submission:
                     continue
@@ -267,25 +293,13 @@ def run_engine(
                             )
                     except Exception:  # noqa: BLE001
                         pass
-            # FDC: count this block's AttestationRequests into the block's voting round
-            # (best-effort — an FDC-scan hiccup must never break the FTSO path).
-            if fdc_hub:
-                try:
-                    logs = rpc.get_logs(fdc_hub, [_ATTESTATION_REQUEST_TOPIC], cursor, cursor)
-                    if logs:
-                        rid = factory.from_timestamp(ts).id
-                        for _ in logs:
-                            state.record_fdc_request(rid)
-                except RpcError:
-                    pass
-            # Fast updates (255): count AP's FastUpdateFeedsSubmitted (per-block, sortition-driven).
-            if fast_updater and spa_topic:
-                try:
-                    fus = rpc.get_logs(fast_updater, [_FAST_UPDATE_TOPIC, None, spa_topic], cursor, cursor)
-                    for _ in fus:
-                        state.record_fast_update(ts)
-                except RpcError:
-                    pass
+            # FDC (200) + fast-updates (255) events — flushed in ≤30-block chunks (get_logs cap),
+            # well within the ~180s finalize lag so a round's FDC requests are always recorded
+            # before it finalizes.
+            if cursor - scan_lo + 1 >= 30:
+                _flush_events(scan_lo, cursor, ts_map)
+                scan_lo = cursor + 1
+                ts_map = {}
             state.last_block = cursor
             state.last_ts = ts
             for rs in state.finalize_due(ts, factory):
@@ -302,8 +316,15 @@ def run_engine(
                 status_writer(_status())
                 since_status = 0
             if _max_blocks is not None and processed >= _max_blocks:
+                _flush_events(scan_lo, cursor - 1, ts_map)
                 status_writer(_status())
                 return
+        # Caught up (or paused on a read error) — flush the trailing partial chunk so recent
+        # FDC/FU events aren't withheld until 30 blocks accrue.
+        if cursor - 1 >= scan_lo:
+            _flush_events(scan_lo, cursor - 1, ts_map)
+            scan_lo = cursor
+            ts_map = {}
         _refresh_registration(time.time())
         _refresh_iqr(time.time())
         _refresh_uptime(time.time())
