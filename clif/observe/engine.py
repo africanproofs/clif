@@ -289,14 +289,32 @@ def run_engine(
     seeded = False
     scan_lo = cursor  # first block whose FDC/FU events haven't been flushed yet
     ts_map: dict[int, int] = {}
+    # Temperance on a sustained RPC outage: log the FIRST head-read failure, then at most once a
+    # minute (with a running count), and a single recovery line — not every poll (~2s).
+    hf = {"since": 0.0, "count": 0, "last_log": 0.0}
     while True:
         try:
             head = rpc.block_number()
         except RpcError as exc:
-            if log:
-                log.error("\033[1;31m🔴 observe head read failed: %s\033[0m", exc)
+            now = time.time()
+            hf["count"] += 1
+            if not hf["since"]:
+                hf["since"] = now
+            if log and (hf["count"] == 1 or now - hf["last_log"] >= 60):
+                hf["last_log"] = now
+                log.error(
+                    "\033[1;31m🔴 observe RPC unreachable — %d fail(s) over %ds: %s\033[0m",
+                    hf["count"], int(now - hf["since"]), exc,
+                )
             time.sleep(poll_sec)
             continue
+        if hf["since"]:  # recovered from an outage streak
+            if log:
+                log.info(
+                    "\033[32m✓ observe RPC recovered after %ds (%d fail(s))\033[0m",
+                    int(time.time() - hf["since"]), hf["count"],
+                )
+            hf = {"since": 0.0, "count": 0, "last_log": 0.0}
         # Confirmation lag — on Avalanche `latest` is already the accepted (final) block, so this
         # is belt-and-suspenders: never observe/attribute a block newer than head-confirmations.
         safe_head = head - confirmations
