@@ -255,6 +255,15 @@ class Settings(BaseSettings):
     registration_poll_interval_sec: int = 600  # 10m far from the boundary
     registration_tight_interval_sec: int = 120  # 2m within the boundary window
     registration_tight_window_sec: int = 7200  # tighten within 2h of the epoch boundary
+
+    # Push alerting — the last-mile from "detected + logged" to "you are paged". The alert daemon
+    # pulls registration + funding health on the (boundary-aware) registration cadence and POSTs to
+    # a webhook on CRIT/WARN. Hard-off unless ALERT_ENABLED=true. Debounced so a transient blip
+    # doesn't page; re-pages every `alert_repeat_sec` while still bad; sends a RESOLVED on recovery.
+    alert_enabled: bool = False
+    alert_webhook_url: str | None = None  # Slack/Discord/generic JSON webhook ({"text","content"})
+    alert_repeat_sec: int = 3600  # re-page interval while a bad state persists
+    alert_confirm_cycles: int = 2  # consecutive same-level reads before (de)escalating — debounce
     registration_gas_floor: float = 10.0  # Submit below this ⇒ can't afford registerVoter
     registration_sender_account: str = "Submit"  # the registerVoter gas payer
 
@@ -322,6 +331,10 @@ class Settings(BaseSettings):
     @property
     def epoch_status_file(self) -> Path:
         return Path(self.clif_state_dir) / f"epoch-status-{self.network}.json"
+
+    @property
+    def alert_status_file(self) -> Path:
+        return Path(self.clif_state_dir) / f"alert-state-{self.network}.json"
 
     @property
     def registration_status_file(self) -> Path:

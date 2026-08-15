@@ -232,6 +232,37 @@ services:
     memswap_limit: 512m
     cpus: 1.5
 
+  # Push-alert daemons — the last mile from detected+logged to PAGED. Pull registration + funding
+  # health on the boundary-aware cadence and POST a webhook on CRIT/WARN (debounced). Hard-off
+  # (ALERT_ENABLED); need only egress (RPC reads + the webhook). OBSERVE + send-only, no key.
+  clif-alert-songbird:
+    build: .
+    image: clif:dev
+    container_name: clif-alert-songbird
+    command: ["alert", "run"]
+    env_file: [.env.songbird]
+    networks: [egress]
+    profiles: ["multichain"]
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+
+  clif-alert-flare:
+    build: .
+    image: clif:dev
+    container_name: clif-alert-flare
+    command: ["alert", "run"]
+    env_file: [.env.flare]
+    networks: [egress]
+    profiles: ["multichain"]
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+
 networks:
   fwd-net:
     external: true

@@ -62,6 +62,7 @@ from clif.funding import (
     run_funding,
     validate_plan,
 )
+from clif.alert import alert_level, decide, format_alert, post_webhook
 from clif.registration import read_readiness, render_readiness
 from clif.observe import (
     read_observe_status,
@@ -187,6 +188,18 @@ observe_app = typer.Typer(
     ),
 )
 app.add_typer(observe_app, name="observe")
+
+alert_app = typer.Typer(
+    add_completion=False,
+    pretty_exceptions_show_locals=False,
+    help=(
+        "Push alerting — the last mile from detected+logged to paged. `alert run` pulls "
+        "registration + funding health on the boundary-aware cadence and POSTs a webhook on "
+        "CRIT/WARN (debounced; re-pages while bad; RESOLVED on recovery). `alert check` is a "
+        "one-shot (add --send to actually post). OBSERVE + send-only — holds no key."
+    ),
+)
+app.add_typer(alert_app, name="alert")
 console = Console()
 err = Console(stderr=True)
 
@@ -2867,6 +2880,114 @@ def observe_iqr(
                 f"  {fs.feed:<12} n={fs.rounds:>2}  inner {fs.expected_inner_pct:>5}%  outer {fs.outer_pct:>5}%{cap}"
             )
     raise typer.Exit(0)
+
+
+def _load_json(path) -> dict:
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _redact_url(url: str) -> str:
+    """Show the host but hide a webhook's secret token path."""
+    try:
+        from urllib.parse import urlparse
+
+        u = urlparse(url)
+        return f"{u.scheme}://{u.hostname}/…"
+    except ValueError:
+        return "<webhook>"
+
+
+@alert_app.command(name="check")
+def alert_check(
+    network: Annotated[Optional[str], typer.Option("--network", envvar="NETWORK")] = None,
+    send: Annotated[bool, typer.Option("--send", help="actually POST to the webhook")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """One-shot: compute the current alert level (registration + funding) + the message. Exit
+    0/1/2 = OK/WARN/CRIT. `--send` posts it to ALERT_WEBHOOK_URL."""
+    s = _settings()
+    if network:
+        s.network = network  # type: ignore[assignment]
+    readiness = _read_readiness(s).to_dict()
+    with RpcClient(s.rpc_url) as rpc:
+        fh = read_health(rpc, s.network)
+    level, reasons = alert_level(readiness, fh)
+    epoch = readiness.get("current_epoch")
+    msg = format_alert(s.network, epoch, level, reasons, "CHECK")
+    if json_out:
+        print(json.dumps({"network": s.network, "level": level, "epoch": epoch, "reasons": reasons}, indent=2))
+    else:
+        console.print(msg)
+    if send:
+        if not s.alert_webhook_url:
+            err.print("[bold red]alert check --send: ALERT_WEBHOOK_URL not set[/]")
+            raise typer.Exit(2)
+        console.print(f"[dim]webhook: {'sent' if post_webhook(s.alert_webhook_url, msg) else 'FAILED'}[/]")
+    raise typer.Exit(0 if level == "OK" else (1 if level == "WARN" else 2))
+
+
+@alert_app.command(name="run")
+def alert_run() -> None:
+    """The push-alert daemon (`clif-alert-<net>`). Pulls registration + funding health on the
+    boundary-aware cadence; POSTs to the webhook on CRIT/WARN (debounced by `alert_confirm_cycles`,
+    re-pages every `alert_repeat_sec`, RESOLVED on recovery). Hard-off unless ALERT_ENABLED=true."""
+    if not os.environ.get("NETWORK"):
+        err.print("[bold red]alert run refuses to start without an explicit NETWORK[/]")
+        raise typer.Exit(2)
+    s = _settings()
+
+    def _idle(reason: str) -> None:
+        log.warning("alert daemon idling — %s. Set ALERT_ENABLED=true + ALERT_WEBHOOK_URL and restart.", reason)
+        try:
+            while True:
+                time.sleep(3600)
+                log.info("alert daemon still idle network=%s (%s)", s.network, reason)
+        except KeyboardInterrupt:
+            log.info("alert stopped")
+
+    if not s.alert_enabled:
+        return _idle("ALERT_ENABLED is not true")
+    if not s.alert_webhook_url:
+        return _idle("ALERT_WEBHOOK_URL is not set")
+
+    far = s.registration_poll_interval_sec
+    log.info(
+        "alert start network=%s cadence=%ss (tight %ss near boundary) webhook=%s repeat=%ss confirm=%s",
+        s.network, far, s.registration_tight_interval_sec, _redact_url(s.alert_webhook_url),
+        s.alert_repeat_sec, s.alert_confirm_cycles,
+    )
+    state = _load_json(s.alert_status_file)
+    try:
+        while True:
+            sleep_for = far
+            try:
+                readiness = _read_readiness(s).to_dict()
+                with RpcClient(s.rpc_url) as rpc:
+                    fh = read_health(rpc, s.network)
+                level, reasons = alert_level(readiness, fh)
+                epoch = readiness.get("current_epoch")
+                send, kind, state = decide(
+                    state, level, time.time(),
+                    repeat_sec=s.alert_repeat_sec, confirm=s.alert_confirm_cycles,
+                )
+                write_status_atomic(
+                    s.alert_status_file, {**state, "network": s.network, "epoch": epoch, "reasons": reasons}
+                )
+                lvl_log = log.info if level == "OK" else (log.warning if level == "WARN" else log.error)
+                lvl_log("\033[38;5;198m ALRT\033[0m %s — %s", level, f"paged ({kind})" if send else "no page")
+                if send and not post_webhook(s.alert_webhook_url, format_alert(s.network, epoch, state["level"], reasons, kind)):
+                    log.error("\033[1;31m ALRT webhook POST failed — retrying next cycle\033[0m")
+                ttb = readiness.get("time_to_boundary_sec")
+                if ttb is not None and ttb <= s.registration_tight_window_sec:
+                    sleep_for = s.registration_tight_interval_sec
+            except RpcError as exc:
+                log.error(" ALRT cycle RPC error: %s (retry next cycle)", exc)
+            time.sleep(sleep_for)
+    except KeyboardInterrupt:
+        log.info("alert stopped")
 
 
 if __name__ == "__main__":
