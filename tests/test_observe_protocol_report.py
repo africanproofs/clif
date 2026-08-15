@@ -103,7 +103,7 @@ def test_report_has_a_line_per_protocol_when_registered():
     assert "FTSO (100)   : commit 40/40 · reveal 40/40 · sigs 40/40" in out
     assert "FDC (200)    : 12/12 bitvoted" in out
     assert "FastUpd (255): 1h 33 · 6h 190 · 24h 760" in out
-    assert "uptime       : 100% · connected" in out
+    assert "uptime       : our-node 100% · connected" in out
     assert "IQR quality" in out
 
 
@@ -165,6 +165,63 @@ def test_round_hard_cap_evicts_stalest():
 
 
 # ---- leak prevention: offer-params cache prune -----------------------------------
+
+
+# ---- trustlessness: independent-RPC quorum ---------------------------------------
+
+
+class _StubRpc:
+    def __init__(self, val=None, raise_exc=False):
+        self._val = val
+        self._raise = raise_exc
+
+    def read(self):
+        from clif.rpc import RpcError
+
+        if self._raise:
+            raise RpcError("verify node down")
+        return self._val
+
+
+def test_verifier_agree_dispute_unavailable():
+    from clif.observe.verify import CrossVerifier, quorum_overall
+
+    v_true = CrossVerifier(_StubRpc(True), "verify.example")
+    assert v_true.compare(True, lambda r: r.read())["status"] == "agree"
+    assert v_true.compare(False, lambda r: r.read())["status"] == "dispute"
+
+    v_down = CrossVerifier(_StubRpc(raise_exc=True), "verify.example")
+    assert v_down.compare(True, lambda r: r.read())["status"] == "unavailable"
+
+    assert quorum_overall({}) == "off"
+    assert quorum_overall({"a": {"status": "agree"}, "b": {"status": "unavailable"}}) == "agree"
+    assert quorum_overall({"a": {"status": "agree"}, "b": {"status": "dispute"}}) == "dispute"
+
+
+def test_verifier_voter_set_order_insensitive():
+    from clif.observe.verify import CrossVerifier
+
+    v = CrossVerifier(_StubRpc(["0xBB", "0xaa"]), "verify.example")
+    res = v.compare(["0xAA", "0xbb"], lambda r: r.read(), key=lambda x: sorted(a.lower() for a in x))
+    assert res["status"] == "agree"  # same set, different order/case
+
+
+def test_report_quorum_lines_and_severity():
+    q_agree = {"registration": {"status": "agree"}, "reward_epoch": {"status": "agree"}}
+    out = _plain(render_protocol_report(_health(quorum=q_agree, verify_host="flare-api.flare.network")))
+    assert "quorum       : ✓ 2 gating facts agree (verify: flare-api.flare.network)" in out
+
+    q_disp = {"registration": {"status": "dispute", "primary": "True", "verify": "False"}}
+    hd = _health(quorum=q_disp, verify_host="flare-api.flare.network")
+    out = _plain(render_protocol_report(hd))
+    assert "DISPUTED — registration our=True verify=False" in out
+    assert hd.severity == "WARN"  # dispute ⇒ WARN by default
+    assert _health(quorum=q_disp, quorum_crit=True).severity == "CRIT"  # escalatable
+
+
+def test_report_dual_uptime():
+    out = _plain(render_protocol_report(_health(uptime_verify=[99.98, True])))
+    assert "our-node 100% · " in out and "verify-node 99.98%" in out
 
 
 def test_prune_offer_cache_keeps_current_and_prev(tmp_path):

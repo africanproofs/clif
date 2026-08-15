@@ -159,6 +159,16 @@ class Settings(BaseSettings):
     songbird_logs_rpc: str | None = None
     coston2_logs_rpc: str | None = None
 
+    # Independent verification RPC — a SECOND, independent node used to cross-check the observer's
+    # low-frequency gating reads (registration, reward epoch, registered-voter set). A mismatch is
+    # flagged DISPUTED in the report. Default = the public Foundation RPC (net.default_rpc), which
+    # is independent of AP's own node; override to any independent source. Quorum is a no-op when it
+    # resolves to the same URL as the primary observe RPC (can't verify against yourself).
+    flare_verify_rpc: str | None = None
+    songbird_verify_rpc: str | None = None
+    coston2_verify_rpc: str | None = None
+    observe_quorum_crit: bool = False  # a DISPUTED gating fact ⇒ CRIT (default: WARN)
+
     identity_address: str | None = None
     signing_policy_address: str | None = None
     claim_recipient_address: str | None = None
@@ -258,6 +268,10 @@ class Settings(BaseSettings):
     observe_window_rounds: int = 40  # rolling health window (~1h of rounds)
     observe_poll_sec: int = 2  # new-block poll cadence
     observe_iqr: bool = True  # score AP's inner/outer reward-band hit rates (needs the all-voter reveal decode)
+    # Confirmation lag: stay this many blocks behind the tip. Flare's Avalanche consensus has
+    # deterministic finality (`latest` = last ACCEPTED = final), so this is defense-in-depth so the
+    # per-block event scans never attribute a block that isn't yet accepted. 0 = read the tip.
+    observe_confirmations: int = 2
 
     @property
     def net(self) -> NetworkConfig:
@@ -275,6 +289,19 @@ class Settings(BaseSettings):
         blocks/request); else fall back to the main rpc_url (partial)."""
         override = getattr(self, f"{self.network}_logs_rpc", None)
         return override or self.rpc_url
+
+    @property
+    def verify_rpc_url(self) -> str:
+        """Independent RPC for cross-verifying gating reads. Prefer <NET>_VERIFY_RPC; else the
+        public Foundation RPC (independent of AP's node). Quorum is skipped when this equals the
+        primary observe RPC (see `quorum_enabled`)."""
+        override = getattr(self, f"{self.network}_verify_rpc", None)
+        return override or self.net.default_rpc
+
+    @property
+    def quorum_enabled(self) -> bool:
+        """Cross-verification is meaningful only against an INDEPENDENT node."""
+        return self.verify_rpc_url != self.observe_rpc_url
 
     def reward_data_url(self, epoch: int) -> str:
         return self.net.reward_data_url_template.format(epoch=epoch)

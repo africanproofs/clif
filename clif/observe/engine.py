@@ -14,6 +14,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlparse
 
 from py_flare_common.fsp.messaging import parse_submit2_tx
 
@@ -28,6 +29,7 @@ from clif.observe.iqr_history import append_tally, load_history, prune_history
 from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH, get_offer_params, prune_offer_cache
 from clif.observe.state import ObserverState
 from clif.observe.timing import voting_factory
+from clif.observe.verify import CrossVerifier
 from clif.rpc import RpcClient, RpcError
 
 
@@ -63,11 +65,14 @@ def run_engine(
     flare_systems_manager: str | None = None,
     identity: str | None = None,
     registration_refresh_sec: float = 3600.0,  # registration changes per reward epoch (~3.5d)
+    confirmations: int = 0,  # stay this many blocks behind the tip (finality defense-in-depth)
     status_log_sec: float = 3600.0,  # emit a rendered OBS status line to the log this often (+once seeded)
     fdc_hub: str | None = None,  # FdcHub address — enables FDC participation tracking when set
     ap_signing_policy: str | None = None,  # AP's signingPolicyAddress — enables fast-update (255) tracking
     validator_node_id: str | None = None,  # AP's P-chain NodeID — enables the validator uptime check
     entity_manager: str | None = None,  # with voter_registry + FSM ⇒ enables IQR reward-band scoring
+    verify_rpc_url: str | None = None,  # independent RPC for cross-verifying gating reads (quorum)
+    quorum_crit: bool = False,  # a DISPUTED gating fact ⇒ CRIT severity (else WARN)
     iqr_cache_dir: str | None = None,  # per-epoch offer-params disk cache (default: no disk cache)
     iqr_enabled: bool = True,  # gate the (per-block all-voter reveal decode) IQR scoring
     iqr_history_file: str | None = None,  # persist per-round IQR tallies (multi-horizon; survives restart)
@@ -95,6 +100,15 @@ def run_engine(
             "observe start network=%s from block %s (head %s, lookback %s) submission=%s",
             network, cursor, head, lookback_blocks, submission,
         )
+    # Independent-RPC quorum: cross-check the low-frequency gating reads (registration, reward
+    # epoch, registered-voter set) against a second, INDEPENDENT node. A mismatch → DISPUTED in the
+    # report. Its own long-lived client; closed at the (test/KeyboardInterrupt) exits.
+    vrpc = RpcClient(verify_rpc_url) if verify_rpc_url else None
+    verifier = CrossVerifier(vrpc, urlparse(verify_rpc_url).hostname or verify_rpc_url) if vrpc else None
+    quorum: dict = {}
+    if verifier and log:
+        log.info("\033[38;5;208m OBS\033[0m quorum on — cross-verifying gating reads vs %s", verifier.host)
+
     # Registration overlay — hourly (registration only changes per reward epoch). We ARE
     # submitting every round; if AP is NOT in the registered voter set for the current
     # reward epoch, all those clean submissions earn ZERO (the RE423 blind spot). Best-effort:
@@ -111,6 +125,13 @@ def run_engine(
             reg["registered"] = rpc.is_voter_registered(voter_registry, identity, ep)
             reg["epoch"] = ep
             reg["checked"] = now
+            if verifier:  # cross-verify the two gating facts against the independent node
+                quorum["reward_epoch"] = verifier.compare(
+                    ep, lambda r: r.get_current_reward_epoch_id(flare_systems_manager)
+                )
+                quorum["registration"] = verifier.compare(
+                    reg["registered"], lambda r: r.is_voter_registered(voter_registry, identity, ep)
+                )
         except RpcError:
             pass  # keep the last known value
 
@@ -139,6 +160,11 @@ def run_engine(
             if res is not None:
                 up["pct"], up["connected"] = res
             up["checked"] = now
+            if verifier:  # uptime is NODE-SUBJECTIVE — report the verify node's view too, don't "agree"
+                try:
+                    up["verify"] = verifier.rpc.validator_uptime(validator_node_id)
+                except RpcError:
+                    up["verify"] = None
         except RpcError:
             pass  # keep the last known value
 
@@ -163,6 +189,12 @@ def run_engine(
             wmap = build_voter_weight_map(
                 rpc, voter_registry=voter_registry, entity_manager=entity_manager, epoch=ep
             )
+            if verifier:  # cross-verify the registered-voter set that the IQR median is built from
+                quorum["voter_set"] = verifier.compare(
+                    rpc.get_registered_voters(voter_registry, ep),
+                    lambda r: r.get_registered_voters(voter_registry, ep),
+                    key=lambda v: sorted(a.lower() for a in v),
+                )
             state.set_iqr_context(offer, wmap)
             iqr.update(epoch=ep, checked=now, ready=True)
             if log:
@@ -202,6 +234,8 @@ def run_engine(
             state, network=network, enabled=True,
             registered=reg["registered"], reward_epoch=reg["epoch"],
             uptime_pct=up["pct"], uptime_connected=up["connected"], validator_node=validator_node_id,
+            quorum=quorum or None, verify_host=(verifier.host if verifier else None),
+            uptime_verify=up.get("verify"), quorum_crit=quorum_crit,
         )
 
     # Periodic self-report: the observer otherwise only logs issues, so its participation +
@@ -263,7 +297,10 @@ def run_engine(
                 log.error("\033[1;31m🔴 observe head read failed: %s\033[0m", exc)
             time.sleep(poll_sec)
             continue
-        while cursor <= head:
+        # Confirmation lag — on Avalanche `latest` is already the accepted (final) block, so this
+        # is belt-and-suspenders: never observe/attribute a block newer than head-confirmations.
+        safe_head = head - confirmations
+        while cursor <= safe_head:
             try:
                 blk = rpc.get_block(cursor, full_transactions=True)
             except RpcError as exc:
@@ -323,6 +360,8 @@ def run_engine(
             if _max_blocks is not None and processed >= _max_blocks:
                 _flush_events(scan_lo, cursor - 1, ts_map)
                 status_writer(_status())
+                if vrpc:
+                    vrpc.close()
                 return
         # Caught up (or paused on a read error) — flush the trailing partial chunk so recent
         # FDC/FU events aren't withheld until 30 blocks accrue.
@@ -337,7 +376,7 @@ def run_engine(
         since_status = 0
         # First time we're fully caught up, the lookback window is seeded (rounds finalized +
         # IQR scored) — emit the opening status line; thereafter it self-reports hourly.
-        if not seeded and cursor > head:
+        if not seeded and cursor > safe_head:
             seeded = True
             _maybe_log_status(time.time(), force=True)
         else:
@@ -347,4 +386,6 @@ def run_engine(
         except KeyboardInterrupt:
             if log:
                 log.info("observe stopped")
+            if vrpc:
+                vrpc.close()
             return

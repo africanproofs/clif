@@ -25,6 +25,8 @@ def build_status(
     registered: bool | None = None, reward_epoch: int | None = None,
     uptime_pct: float | None = None, uptime_connected: bool | None = None,
     validator_node: str | None = None,
+    quorum: dict | None = None, verify_host: str | None = None,
+    uptime_verify: tuple | None = None, quorum_crit: bool = False,
 ) -> dict:
     """The JSON the engine writes each cycle. `registered` = is AP in the registered voter
     set for the current reward epoch (None = not probed); when False, all the clean
@@ -44,6 +46,10 @@ def build_status(
         "uptime_pct": uptime_pct,
         "uptime_connected": uptime_connected,
         "validator_node": validator_node,
+        "quorum": quorum,  # {fact: {status: agree|dispute|unavailable, [primary, verify]}}
+        "verify_host": verify_host,
+        "uptime_verify": list(uptime_verify) if uptime_verify else None,
+        "quorum_crit": quorum_crit,
         # Resource gauge — bounded-collection sizes + process RSS, so a slow leak shows as a
         # trend in the hourly report long before it could OOM (ru_maxrss is KiB on Linux).
         "resources": {
@@ -86,6 +92,10 @@ class ObserveHealth:
     uptime_pct: float | None = None  # P-chain validator uptime %
     uptime_connected: bool | None = None
     validator_node: str | None = None
+    quorum: dict | None = None  # independent-RPC cross-check {fact: {status, [primary, verify]}}
+    verify_host: str | None = None
+    uptime_verify: list | None = None  # [pct, connected] from the verify node (uptime is subjective)
+    quorum_crit: bool = False  # a DISPUTED gating fact ⇒ CRIT (else WARN)
     resources: dict | None = None  # {in_flight_rounds, iqr_hist, fu_events, rss_mib} — leak gauge
     recent_issues: list[str] | None = None
     registered: bool | None = None  # in the registered voter set for the current reward epoch?
@@ -127,11 +137,25 @@ class ObserveHealth:
         return round(100.0 * self.iqr_pct_hit / self.iqr_feed_rounds, 1)
 
     @property
+    def quorum_status(self) -> str:
+        """Overall independent-RPC verdict: agree / dispute / unavailable / off."""
+        from clif.observe.verify import quorum_overall
+
+        return quorum_overall(self.quorum or {})
+
+    @property
+    def disputed_facts(self) -> list[str]:
+        """Gating facts where the independent node DISAGREED with ours (data may be untrustworthy)."""
+        return [k for k, v in (self.quorum or {}).items() if (v or {}).get("status") == "dispute"]
+
+    @property
     def severity(self) -> str:
         if self.error is not None:
             return "CRIT"  # unknown = treat as bad
         if not self.enabled:
             return "OK"  # explicitly off — nothing to assert
+        if self.disputed_facts and self.quorum_crit:
+            return "CRIT"  # an independent node disagrees on a gating fact — trust the disagreement
         if self.stale:
             return "CRIT"  # engine stopped writing → not observing
         if self.registered is False:
@@ -148,6 +172,8 @@ class ObserveHealth:
             return "CRIT"  # sustained FDC non-participation — the FDC minimal condition (80%) at risk
         if self.missing_submit1 or self.missing_submit2 or self.off_window or self.fdc_missing:
             return "WARN"  # isolated miss / off-window / FDC gap — worth a look, not yet systemic
+        if self.disputed_facts:
+            return "WARN"  # independent node disagrees — surface it (CRIT only if quorum_crit)
         return "OK"
 
     def to_dict(self) -> dict:
@@ -182,6 +208,10 @@ class ObserveHealth:
             "uptime_pct": self.uptime_pct,
             "uptime_connected": self.uptime_connected,
             "validator_node": self.validator_node,
+            "quorum": self.quorum,
+            "verify_host": self.verify_host,
+            "uptime_verify": self.uptime_verify,
+            "quorum_status": self.quorum_status,
             "resources": self.resources,
             "registered": self.registered,
             "reward_epoch": self.reward_epoch,
@@ -221,6 +251,10 @@ def observe_health_from_dict(d: dict, *, enabled_default: bool = True) -> Observ
         uptime_pct=d.get("uptime_pct"),
         uptime_connected=d.get("uptime_connected"),
         validator_node=d.get("validator_node"),
+        quorum=d.get("quorum"),
+        verify_host=d.get("verify_host"),
+        uptime_verify=d.get("uptime_verify"),
+        quorum_crit=d.get("quorum_crit", False),
         resources=d.get("resources"),
         registered=d.get("registered"),
         reward_epoch=d.get("reward_epoch"),
@@ -327,13 +361,15 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
         fu = "0 updates (not registered ⇒ no sortition weight)"
     lines.append(f"  FastUpd (255): {fu}")
 
-    # Validator uptime (P-chain) — Flare-only
+    # Validator uptime (P-chain) — Flare-only. NODE-SUBJECTIVE: show both nodes' views, don't "agree".
     if h.validator_node:
         if h.uptime_pct is None and h.uptime_connected is None:
             upl = "· (not yet probed)"
         else:
             conn = f"{_GREEN}connected{_RESET}" if h.uptime_connected else f"{_RED}DISCONNECTED{_RESET}"
-            upl = f"{h.uptime_pct:g}% · {conn}"
+            upl = f"our-node {h.uptime_pct:g}% · {conn}"
+            if h.uptime_verify and h.uptime_verify[0] is not None:
+                upl += f" · verify-node {h.uptime_verify[0]:g}%"
     else:
         upl = "· n/a (no validator on this net)"
     lines.append(f"  uptime       : {upl}")
@@ -346,6 +382,21 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
         lines.append(f"  {tag} : {seg}  [in/out %]")
     else:
         lines.append("  IQR quality  : · (warming up)")
+
+    # Trust: independent-RPC quorum on the gating reads (registration, epoch, voter-set).
+    q = h.quorum or {}
+    qs = h.quorum_status
+    if qs == "agree":
+        n = sum(1 for v in q.values() if (v or {}).get("status") == "agree")
+        lines.append(f"  quorum       : {_GREEN}✓ {n} gating facts agree{_RESET} (verify: {h.verify_host})")
+    elif qs == "dispute":
+        det = "; ".join(
+            f"{k} our={v.get('primary')} verify={v.get('verify')}"
+            for k, v in q.items() if (v or {}).get("status") == "dispute"
+        )
+        lines.append(f"  quorum       : {_RED}⚠ DISPUTED — {det}{_RESET} (verify: {h.verify_host})")
+    elif qs == "unavailable":
+        lines.append(f"  quorum       : {_YELLOW}· verify node unavailable{_RESET} ({h.verify_host})")
 
     # Resource gauge — bounded-collection sizes + RSS; a leak shows as a trend here first.
     r = h.resources or {}
