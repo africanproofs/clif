@@ -217,6 +217,7 @@ services:
     mem_limit: 512m
     memswap_limit: 512m
     cpus: 1.5
+    volumes: ["clif-observe-songbird-state:/home/clif/.clif-state"]  # persist accumulating history
 
   clif-observe-flare:
     build: .
@@ -231,6 +232,9 @@ services:
     mem_limit: 512m
     memswap_limit: 512m
     cpus: 1.5
+    # Persist CLIF_STATE_DIR (.clif-state under /home/clif) so the accumulating history — IQR
+    # multi-horizon, outage/gap ledger, delegation-delta snapshots — SURVIVES `--force-recreate`.
+    volumes: ["clif-observe-flare-state:/home/clif/.clif-state"]
 
   # Push-alert daemons — the last mile from detected+logged to PAGED. Pull registration + funding
   # health on the boundary-aware cadence and POST a webhook on CRIT/WARN (debounced). Hard-off
@@ -262,6 +266,12 @@ services:
     mem_limit: 256m
     memswap_limit: 256m
     cpus: 0.5
+
+volumes:
+  # Persistent observer state (IQR history, gap ledger, delegation-delta snapshots, offer cache) —
+  # so accumulating history survives `--force-recreate` (the container fs is otherwise ephemeral).
+  clif-observe-flare-state:
+  clif-observe-songbird-state:
 
 networks:
   fwd-net:
