@@ -31,7 +31,10 @@ RUN ( pip install --no-cache-dir --timeout 300 --retries 5 -r /tmp/requirements.
  && rm -rf /tmp/requirements.txt /tmp/*.whl
 USER clif
 WORKDIR /home/clif
-# Status file lives in the clif user's home (writable, non-root). No secrets.
+# State lives in the clif user's home (writable, non-root). No secrets. Pre-create the dir owned by
+# clif (uid 1000) so a named volume mounted here INHERITS clif ownership on first mount — otherwise
+# Docker creates the volume root-owned and the non-root clif user can't write (PermissionError).
+RUN mkdir -p /home/clif/.clif-state
 ENV CLIF_STATE_DIR=/home/clif/.clif-state
 ENTRYPOINT ["clif"]
 CMD ["epoch", "run"]
