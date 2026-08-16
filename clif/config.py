@@ -359,6 +359,10 @@ class Settings(BaseSettings):
         return Path(self.clif_state_dir) / f"observe-gaps-{self.network}.jsonl"
 
     @property
+    def observe_deleg_history_file(self) -> Path:
+        return Path(self.clif_state_dir) / f"observe-deleg-history-{self.network}.jsonl"
+
+    @property
     def observe_rpc_url(self) -> str:
         return self.observe_rpc or self.rpc_url
 

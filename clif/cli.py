@@ -2816,6 +2816,7 @@ def observe_run() -> None:
             ap_signing_policy=ap_signing_policy,
             validator_node_id=s.net.validator_node_id or None,
             delegation_addr=accts.get("Delegation"),
+            deleg_history_file=str(s.observe_deleg_history_file),
             entity_manager=s.net.entity_manager,
             verify_rpc_url=(s.verify_rpc_url if s.quorum_enabled else None),
             quorum_crit=s.observe_quorum_crit,
@@ -3044,7 +3045,12 @@ def delegation_cmd(
     json_out: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Live delegation snapshot — validator (P-chain self-bond + delegated) + FTSO (WNat vote power)."""
+    import time as _time
+
+    from clif.observe.deleg_history import DelegSnap, compute_deltas, load_snaps
     from clif.observe.delegation import read_delegation
+    from clif.observe.reward_rule import reward_epoch_id_for_vr
+    from clif.observe.timing import voting_factory
 
     s = _settings()
     if network:
@@ -3053,10 +3059,20 @@ def delegation_cmd(
     with RpcClient(s.observe_rpc_url) as rpc:
         d = read_delegation(rpc, network=s.network, node_id=s.net.validator_node_id or None,
                             delegation_addr=deleg_addr)
+    # 24h / reward-epoch deltas from the observer's persisted snapshot log (read-only here).
+    now = int(_time.time())
+    epoch = reward_epoch_id_for_vr(voting_factory(s.network).now_id())
+    v0, f0 = d.get("validator") or {}, d.get("ftso") or {}
+    if v0 or f0:
+        cur = DelegSnap(ts=now, epoch=epoch, val_delegated=float(v0.get("delegated") or 0.0),
+                        val_dels=int(v0.get("delegators") or 0), ftso_vp=float(f0.get("vote_power") or 0.0))
+        d["deltas"] = compute_deltas(
+            load_snaps(s.observe_deleg_history_file, now=now), now=now, epoch=epoch, current=cur
+        )
     if json_out:
         print(json.dumps(d, indent=2))
     else:
-        console.print(f"[bold]delegation — {s.network}[/]")
+        console.print(f"[bold]delegation — {s.network} RE{epoch}[/]")
         v = d.get("validator")
         if v:
             console.print(f"  validator : {v['total']:,.0f} FLR total = {v['self_bond']:,.0f} self-bond "
@@ -3066,6 +3082,13 @@ def delegation_cmd(
             console.print("  validator : · (none on this net)")
         f = d.get("ftso")
         console.print(f"  FTSO      : {f['vote_power']:,.0f} WFLR vote power" if f else "  FTSO      : · (unavailable)")
+        dl = d.get("deltas") or {}
+        for hz, lbl in (("h24", "Δ 24h "), ("epoch", "Δ epoch")):
+            vd = (dl.get("val_delegated") or {}).get(hz)
+            fv = (dl.get("ftso_vp") or {}).get(hz)
+            if vd is not None or fv is not None:
+                vc = (dl.get("val_dels") or {}).get(hz)
+                console.print(f"  {lbl}   : validator {vd:+,.0f} FLR ({vc:+d} dels) · FTSO {fv:+,.0f} WFLR")
     raise typer.Exit(0)
 
 

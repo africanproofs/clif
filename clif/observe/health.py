@@ -498,6 +498,24 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
             segs.append(f"FTSO {_flr(f['vote_power'])} vote power")
         if segs:
             lines.append(f"  delegation   : {' · '.join(segs)}")
+        # 24h / reward-epoch deltas — is stake flowing in or out?
+        dl = d.get("deltas") or {}
+        if dl:
+            def _amt(x):
+                return "n/a" if x is None else (f"+{_flr(x)}" if x >= 0 else f"-{_flr(-x)}")
+
+            def _cnt(x):
+                return "n/a" if x is None else f"{x:+d}"
+
+            for horizon, lbl in (("h24", "24h"), ("epoch", "epoch")):
+                vd = (dl.get("val_delegated") or {}).get(horizon)
+                vc = (dl.get("val_dels") or {}).get(horizon)
+                fv = (dl.get("ftso_vp") or {}).get(horizon)
+                if vd is None and fv is None:
+                    continue
+                lines.append(
+                    f"  Δ {lbl:<9}: validator {_amt(vd)} ({_cnt(vc)} dels) · FTSO {_amt(fv)}"
+                )
 
     # Outage/backfill ledger — every recorded RPC outage + whether it's been backfilled, so a gap
     # in coverage is never silent. `backfilled ✓` = the observer replayed those blocks from chain.

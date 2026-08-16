@@ -26,6 +26,7 @@ from clif.observe.health import (
     render_protocol_report,
 )
 from clif.observe.budget import read_ftso_budget
+from clif.observe.deleg_history import DelegSnap, append_snap, compute_deltas, load_snaps, prune_snaps
 from clif.observe.delegation import read_delegation
 from clif.observe.gaps import Gap, append_gap, hms, load_gaps, prune_gaps
 from clif.observe.iqr import build_voter_weight_map
@@ -77,6 +78,7 @@ def run_engine(
     ap_signing_policy: str | None = None,  # AP's signingPolicyAddress — enables fast-update (255) tracking
     validator_node_id: str | None = None,  # AP's P-chain NodeID — enables the validator uptime check
     delegation_addr: str | None = None,  # AP's FTSO delegation address — enables the FTSO delegation read
+    deleg_history_file: str | None = None,  # persist delegation snapshots for 24h / epoch deltas
     entity_manager: str | None = None,  # with voter_registry + FSM ⇒ enables IQR reward-band scoring
     verify_rpc_url: str | None = None,  # independent RPC for cross-verifying gating reads (quorum)
     quorum_crit: bool = False,  # a DISPUTED gating fact ⇒ CRIT severity (else WARN)
@@ -181,9 +183,26 @@ def run_engine(
         if deleg["checked"] and now - deleg["checked"] < registration_refresh_sec:
             return
         try:  # best-effort — never crash the engine
-            deleg["data"] = read_delegation(
+            data = read_delegation(
                 rpc, network=network, node_id=validator_node_id, delegation_addr=delegation_addr
             )
+            # 24h / reward-epoch deltas from the persisted snapshot log.
+            if deleg_history_file and (data.get("validator") or data.get("ftso")):
+                v, f = data.get("validator") or {}, data.get("ftso") or {}
+                epoch = (bud["data"] or {}).get("epoch") or (
+                    factory.now_id() // VRS_PER_REWARD_EPOCH
+                )
+                snap = DelegSnap(
+                    ts=int(now), epoch=int(epoch),
+                    val_delegated=float(v.get("delegated") or 0.0),
+                    val_dels=int(v.get("delegators") or 0),
+                    ftso_vp=float(f.get("vote_power") or 0.0),
+                )
+                hist = load_snaps(Path(deleg_history_file), now=int(now))
+                data["deltas"] = compute_deltas(hist, now=int(now), epoch=int(epoch), current=snap)
+                append_snap(Path(deleg_history_file), snap)
+                prune_snaps(Path(deleg_history_file), now=int(now))
+            deleg["data"] = data
             deleg["checked"] = now
         except Exception:  # noqa: BLE001
             pass
