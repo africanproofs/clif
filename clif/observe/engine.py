@@ -174,17 +174,28 @@ def run_engine(
         try:  # best-effort — an overlay read must NEVER crash the streaming engine
             bud["data"] = read_ftso_budget(archive_rpc, submit_addr=our_submit, factory=factory)
             bud["checked"] = now
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            _overlay_backoff(bud, "budget", exc, now)
+
+    def _overlay_backoff(state: dict, name: str, exc: Exception, now: float) -> None:
+        """An overlay read failed: log it (≤ once/5min — never silently swallow) and back off so a
+        persistent failure retries every ~5 min, not every poll (the checked-not-advanced trap)."""
+        if log and now - state.get("err_logged", 0.0) > 300:
+            state["err_logged"] = now
+            log.warning("\033[38;5;208m OBS\033[0m %s refresh failed: %s", name, exc)
+        state["checked"] = now - registration_refresh_sec + 300  # retry in ~5min
 
     def _refresh_delegation(now: float) -> None:
         if not (validator_node_id or delegation_addr):
             return
         if deleg["checked"] and now - deleg["checked"] < registration_refresh_sec:
             return
+        # Use the reliable independent VERIFY node (public Foundation RPC serves the P-chain +
+        # WNat) when available — the pruned/flaky observe node's P-chain intermittently fails.
+        drpc = verifier.rpc if verifier else rpc
         try:  # best-effort — never crash the engine
             data = read_delegation(
-                rpc, network=network, node_id=validator_node_id, delegation_addr=delegation_addr
+                drpc, network=network, node_id=validator_node_id, delegation_addr=delegation_addr
             )
             # 24h / reward-epoch deltas from the persisted snapshot log.
             if deleg_history_file and (data.get("validator") or data.get("ftso")):
@@ -204,8 +215,8 @@ def run_engine(
                 prune_snaps(Path(deleg_history_file), now=int(now))
             deleg["data"] = data
             deleg["checked"] = now
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            _overlay_backoff(deleg, "delegation", exc, now)
 
     def _refresh_uptime(now: float) -> None:
         if not validator_node_id:
@@ -222,8 +233,8 @@ def run_engine(
                     up["verify"] = verifier.rpc.validator_uptime(validator_node_id)
                 except RpcError:
                     up["verify"] = None
-        except RpcError:
-            pass  # keep the last known value
+        except RpcError as exc:
+            _overlay_backoff(up, "uptime", exc, now)
 
     # IQR reward-band scoring overlay — per reward epoch (offer band params + voter→weight map,
     # both disk-cached), then AP's inner/outer band hit rates are scored natively at finalize
