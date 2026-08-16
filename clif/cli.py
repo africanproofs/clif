@@ -62,7 +62,7 @@ from clif.funding import (
     run_funding,
     validate_plan,
 )
-from clif.alert import alert_level, decide, format_alert, post_webhook
+from clif.alert import alert_level, decide, format_alert, heartbeat, post_webhook
 from clif.registration import read_readiness, render_readiness
 from clif.observe import (
     read_observe_status,
@@ -2924,10 +2924,13 @@ def alert_check(
     else:
         console.print(msg)
     if send:
-        if not s.alert_webhook_url:
-            err.print("[bold red]alert check --send: ALERT_WEBHOOK_URL not set[/]")
+        if not (s.alert_webhook_url or s.alert_heartbeat_url):
+            err.print("[bold red]alert check --send: neither ALERT_WEBHOOK_URL nor ALERT_HEARTBEAT_URL set[/]")
             raise typer.Exit(2)
-        console.print(f"[dim]webhook: {'sent' if post_webhook(s.alert_webhook_url, msg) else 'FAILED'}[/]")
+        if s.alert_webhook_url:
+            console.print(f"[dim]webhook: {'sent' if post_webhook(s.alert_webhook_url, msg) else 'FAILED'}[/]")
+        if s.alert_heartbeat_url:
+            console.print(f"[dim]heartbeat ({level}): {'sent' if heartbeat(s.alert_heartbeat_url, level) else 'FAILED'}[/]")
     raise typer.Exit(0 if level == "OK" else (1 if level == "WARN" else 2))
 
 
@@ -2952,13 +2955,19 @@ def alert_run() -> None:
 
     if not s.alert_enabled:
         return _idle("ALERT_ENABLED is not true")
-    if not s.alert_webhook_url:
-        return _idle("ALERT_WEBHOOK_URL is not set")
+    if not (s.alert_webhook_url or s.alert_heartbeat_url):
+        return _idle("neither ALERT_WEBHOOK_URL nor ALERT_HEARTBEAT_URL is set")
+
+    def _beat(level: str) -> None:
+        if s.alert_heartbeat_url:
+            heartbeat(s.alert_heartbeat_url, level)
 
     far = s.registration_poll_interval_sec
     log.info(
-        "alert start network=%s cadence=%ss (tight %ss near boundary) webhook=%s repeat=%ss confirm=%s",
-        s.network, far, s.registration_tight_interval_sec, _redact_url(s.alert_webhook_url),
+        "alert start network=%s cadence=%ss (tight %ss near boundary) webhook=%s heartbeat=%s repeat=%ss confirm=%s",
+        s.network, far, s.registration_tight_interval_sec,
+        _redact_url(s.alert_webhook_url) if s.alert_webhook_url else "off",
+        _redact_url(s.alert_heartbeat_url) if s.alert_heartbeat_url else "off",
         s.alert_repeat_sec, s.alert_confirm_cycles,
     )
     state = _load_json(s.alert_status_file)
@@ -2980,13 +2989,17 @@ def alert_run() -> None:
                 )
                 lvl_log = log.info if level == "OK" else (log.warning if level == "WARN" else log.error)
                 lvl_log("\033[38;5;198m ALRT\033[0m %s — %s", level, f"paged ({kind})" if send else "no page")
-                if send and not post_webhook(s.alert_webhook_url, format_alert(s.network, epoch, state["level"], reasons, kind)):
+                if send and s.alert_webhook_url and not post_webhook(
+                    s.alert_webhook_url, format_alert(s.network, epoch, state["level"], reasons, kind)
+                ):
                     log.error("\033[1;31m ALRT webhook POST failed — retrying next cycle\033[0m")
+                _beat(level)  # dead-man's-switch: healthy → base ping, CRIT → /fail
                 ttb = readiness.get("time_to_boundary_sec")
                 if ttb is not None and ttb <= s.registration_tight_window_sec:
                     sleep_for = s.registration_tight_interval_sec
             except RpcError as exc:
                 log.error(" ALRT cycle RPC error: %s (retry next cycle)", exc)
+                _beat("CRIT")  # can't read chain ⇒ blind ⇒ signal /fail (if the ping itself reaches out)
             time.sleep(sleep_for)
     except KeyboardInterrupt:
         log.info("alert stopped")

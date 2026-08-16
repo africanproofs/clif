@@ -98,6 +98,25 @@ def test_resolved_sent_on_recovery():
     assert send is True and kind == "RESOLVED" and st["level"] == "OK"
 
 
+def test_heartbeat_targets_fail_on_crit(monkeypatch):
+    import clif.alert as alert
+
+    calls = {}
+
+    class _Resp:
+        status_code = 200
+
+    def fake_get(url, timeout=8.0):
+        calls["url"] = url
+        return _Resp()
+
+    monkeypatch.setattr(alert.httpx, "get", fake_get)
+    alert.heartbeat("https://hc-ping.com/abc", "OK")
+    assert calls["url"] == "https://hc-ping.com/abc"       # healthy → base
+    alert.heartbeat("https://hc-ping.com/abc/", "CRIT")
+    assert calls["url"] == "https://hc-ping.com/abc/fail"  # CRIT → /fail (trailing slash trimmed)
+
+
 def test_format_alert_shapes():
     msg = format_alert("flare", 424, "CRIT", ["NOT REGISTERED — earns ZERO"], "ALERT")
     assert "clif ALERT — flare RE424: CRIT" in msg and "• NOT REGISTERED" in msg

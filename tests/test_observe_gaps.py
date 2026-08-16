@@ -70,6 +70,29 @@ def test_report_shows_catching_up_and_outage():
     assert h.open_gaps  # to_block 67,511,000 > last_block 67,502,000 → still open
 
 
+def test_run_engine_startup_writes_status_without_crashing(tmp_path):
+    """Regression: `_status()` reads `gap_list`, which must be bound BEFORE the startup status
+    write (a v0.5.69 NameError crash-looped the observer). Exercises run_engine's startup path."""
+    from clif.observe.engine import run_engine
+
+    class _FakeRpc:
+        def block_number(self):
+            return 2000
+
+        def get_block(self, num, full_transactions=False):
+            return {"timestamp": hex(1_700_000_000 + int(num)), "transactions": []}
+
+    statuses: list = []
+    run_engine(
+        rpc=_FakeRpc(), network="flare", submission_address="0x" + "1" * 40,
+        our_submit="0x" + "a" * 40, our_sig="0x" + "b" * 40,
+        status_writer=statuses.append, lookback_blocks=5, poll_sec=0.01,
+        gaps_file=str(tmp_path / "g.jsonl"), live_lag_blocks=8, iqr_enabled=False,
+        _max_blocks=3, log=None,
+    )
+    assert statuses and "gaps" in statuses[-1] and "head" in statuses[-1]
+
+
 def test_report_outage_marked_backfilled_once_past():
     gap = {"start": 1_000_000, "end": 1_001_000, "dur": 1000, "fails": 500,
            "from_block": 100, "to_block": 200}

@@ -290,6 +290,11 @@ def run_engine(
                 "\033[38;5;208m OBS\033[0m IQR history seeded: %d rounds from %s",
                 len(state.iqr_history), iqr_history_file,
             )
+    # Outage/backfill ledger — records each outage so the surface can say LIVE vs CATCHING UP
+    # unambiguously and tabulate what was replayed. `catching_up` gates the backfill-progress logs.
+    # MUST be bound before the first `_status()` call below (the closure reads gap_list).
+    gap_list = load_gaps(Path(gaps_file), now=int(time.time())) if gaps_file else []
+    catching_up = False
     status_writer(_status())
     processed = 0
     since_status = 0
@@ -299,10 +304,6 @@ def run_engine(
     # Temperance on a sustained RPC outage: log the FIRST head-read failure, then at most once a
     # minute (with a running count), and a single recovery line — not every poll (~2s).
     hf = {"since": 0.0, "count": 0, "last_log": 0.0}
-    # Outage/backfill ledger — records each outage so the surface can say LIVE vs CATCHING UP
-    # unambiguously and tabulate what was replayed. `catching_up` gates the backfill-progress logs.
-    gap_list = load_gaps(Path(gaps_file), now=int(time.time())) if gaps_file else []
-    catching_up = False
     while True:
         try:
             head = rpc.block_number()

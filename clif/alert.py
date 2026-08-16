@@ -87,3 +87,15 @@ def post_webhook(url: str, text: str, timeout: float = 10.0) -> bool:
         return r.status_code < 300
     except httpx.HTTPError:
         return False
+
+
+def heartbeat(url: str, level: str, timeout: float = 8.0) -> bool:
+    """Dead-man's-switch ping to an EXTERNAL check (healthchecks.io / Better Uptime). GET the base
+    URL when healthy (OK/WARN) or `<url>/fail` on CRIT — so the external service alarms on CRIT
+    (it got a /fail) AND on silence (the daemon is dead / l-desktop is offline — no ping at all,
+    which nothing on-box could ever report). Best-effort: a failed ping never breaks the daemon."""
+    target = url.rstrip("/") + "/fail" if level == "CRIT" else url
+    try:
+        return httpx.get(target, timeout=timeout).status_code < 400
+    except httpx.HTTPError:
+        return False

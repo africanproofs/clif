@@ -264,6 +264,11 @@ class Settings(BaseSettings):
     alert_webhook_url: str | None = None  # Slack/Discord/generic JSON webhook ({"text","content"})
     alert_repeat_sec: int = 3600  # re-page interval while a bad state persists
     alert_confirm_cycles: int = 2  # consecutive same-level reads before (de)escalating — debounce
+    # Dead-man's-switch heartbeat — an EXTERNAL, independent check URL (healthchecks.io / Better
+    # Uptime / a cron ping). The daemon GETs it every cycle when healthy and GETs `<url>/fail` on
+    # CRIT; the external service alarms on CRIT *and* on silence (daemon dead / l-desktop offline) —
+    # the one failure class nothing on-box can report. Off unless set.
+    alert_heartbeat_url: str | None = None
     registration_gas_floor: float = 10.0  # Submit below this ⇒ can't afford registerVoter
     registration_sender_account: str = "Submit"  # the registerVoter gas payer
 
