@@ -3021,7 +3021,9 @@ def budget_cmd(
     if network:
         s.network = network  # type: ignore[assignment]
     submit = {a.name: a.address for a in FUNDING_ACCOUNTS.get(s.network, [])}.get("Submit")
-    with RpcClient(s.observe_rpc_url) as rpc:
+    # Needs archive state (a historical epoch-start nonce) → the verify/public RPC, not the
+    # pruned observe node.
+    with RpcClient(s.verify_rpc_url) as rpc:
         b = read_ftso_budget(rpc, submit_addr=submit, factory=voting_factory(s.network))
     if json_out:
         print(json.dumps(b, indent=2))

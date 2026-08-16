@@ -165,8 +165,12 @@ def run_engine(
     def _refresh_budget(now: float) -> None:
         if bud["checked"] and now - bud["checked"] < registration_refresh_sec:
             return
+        # The nonce backfill reads a historical (epoch-start) block's account state, which the
+        # pruned observe node (ap-ftso-01) can't serve ("missing trie node"). Use the independent
+        # VERIFY node (public Foundation RPC = archive) when available; else the main rpc.
+        archive_rpc = verifier.rpc if verifier else rpc
         try:  # best-effort — an overlay read must NEVER crash the streaming engine
-            bud["data"] = read_ftso_budget(rpc, submit_addr=our_submit, factory=factory)
+            bud["data"] = read_ftso_budget(archive_rpc, submit_addr=our_submit, factory=factory)
             bud["checked"] = now
         except Exception:  # noqa: BLE001
             pass
