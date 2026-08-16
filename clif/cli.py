@@ -2807,6 +2807,8 @@ def observe_run() -> None:
             window_rounds=s.observe_window_rounds,
             poll_sec=s.observe_poll_sec,
             confirmations=s.observe_confirmations,
+            live_lag_blocks=s.observe_live_lag_blocks,
+            gaps_file=str(s.observe_gaps_file),
             voter_registry=s.net.voter_registry,
             flare_systems_manager=s.net.flare_systems_manager,
             identity=identity,

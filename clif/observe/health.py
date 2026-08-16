@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from clif.funding import _BADGE_OBS, _GREEN, _RED, _RESET, _YELLOW
+from clif.observe.gaps import hms
 
 _STALE_AFTER_SEC = 300  # no fresh status write in 5 min ⇒ the engine is dead → CRIT
 _PARTICIPATION_CRIT_PCT = 90.0  # sustained on-time completeness below this ⇒ CRIT
@@ -27,6 +28,7 @@ def build_status(
     validator_node: str | None = None,
     quorum: dict | None = None, verify_host: str | None = None,
     uptime_verify: tuple | None = None, quorum_crit: bool = False,
+    gaps: list | None = None, live_lag_blocks: int = 8,
 ) -> dict:
     """The JSON the engine writes each cycle. `registered` = is AP in the registered voter
     set for the current reward epoch (None = not probed); when False, all the clean
@@ -38,6 +40,10 @@ def build_status(
         "written_at": int(time.time()),
         "last_block": state.last_block,
         "last_ts": state.last_ts,
+        "head": state.head,
+        "lag_sec": (int(time.time() - state.last_ts) if state.last_ts else None),
+        "gaps": gaps or [],
+        "live_lag_blocks": live_lag_blocks,
         "last_round_finalized": state.last_round_finalized,
         "registered": registered,
         "reward_epoch": reward_epoch,
@@ -69,6 +75,10 @@ class ObserveHealth:
     written_at: int | None = None
     last_block: int | None = None
     last_ts: int | None = None
+    head: int | None = None  # latest chain head — for the lag / LIVE-vs-CATCHING-UP signal
+    lag_sec: int | None = None  # how far behind chain time the last-processed block is
+    gaps: list | None = None  # recorded RPC outages [{start,end,dur,fails,from_block,to_block}]
+    live_lag_blocks: int = 8  # ≤ this behind head ⇒ LIVE; more ⇒ CATCHING UP
     last_round_finalized: int | None = None
     window_rounds: int = 0
     complete: int = 0
@@ -137,6 +147,26 @@ class ObserveHealth:
         return round(100.0 * self.iqr_pct_hit / self.iqr_feed_rounds, 1)
 
     @property
+    def lag_blocks(self) -> int | None:
+        if self.head is None or self.last_block is None:
+            return None
+        return max(0, self.head - self.last_block)
+
+    @property
+    def stream_state(self) -> str:
+        """`live` = at head (real-time); `catching_up` = replaying an outage backfill; `unknown`
+        until the first head is seen. The load-bearing signal: is the report LIVE or REPLAYED?"""
+        lb = self.lag_blocks
+        if lb is None:
+            return "unknown"
+        return "live" if lb <= self.live_lag_blocks else "catching_up"
+
+    @property
+    def open_gaps(self) -> list:
+        """Recorded outages not yet fully backfilled (last_block < to_block)."""
+        return [g for g in (self.gaps or []) if (self.last_block or 0) < g.get("to_block", 0)]
+
+    @property
     def quorum_status(self) -> str:
         """Overall independent-RPC verdict: agree / dispute / unavailable / off."""
         from clif.observe.verify import quorum_overall
@@ -185,6 +215,12 @@ class ObserveHealth:
             "age_sec": (int(self.age_sec) if self.age_sec is not None else None),
             "stale": self.stale,
             "last_block": self.last_block,
+            "head": self.head,
+            "stream_state": self.stream_state,
+            "lag_blocks": self.lag_blocks,
+            "lag_sec": self.lag_sec,
+            "gaps": self.gaps or [],
+            "open_gaps": len(self.open_gaps),
             "last_round_finalized": self.last_round_finalized,
             "window_rounds": self.window_rounds,
             "complete": self.complete,
@@ -229,6 +265,10 @@ def observe_health_from_dict(d: dict, *, enabled_default: bool = True) -> Observ
         written_at=d.get("written_at"),
         last_block=d.get("last_block"),
         last_ts=d.get("last_ts"),
+        head=d.get("head"),
+        lag_sec=d.get("lag_sec"),
+        gaps=d.get("gaps", []),
+        live_lag_blocks=d.get("live_lag_blocks", 8),
         last_round_finalized=d.get("last_round_finalized"),
         window_rounds=d.get("window_rounds", 0),
         complete=d.get("complete", 0),
@@ -320,6 +360,17 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
     head_c = _RED if h.severity == "CRIT" else (_YELLOW if h.severity == "WARN" else _GREEN)
     lines = [f"{_BADGE_OBS} {head_c}══ FSP protocol health — {h.network} {ep} (rolling {w} rounds ≈1h) ══{_RESET}"]
 
+    # STREAM state — the load-bearing qualifier: is this report LIVE, or REPLAYING an outage?
+    st = h.stream_state
+    if st == "catching_up":
+        behind = f" / ~{hms(h.lag_sec)} behind" if h.lag_sec else ""
+        opn = f" — replaying {len(h.open_gaps)} outage(s)" if h.open_gaps else ""
+        lines.append(f"  stream       : {_YELLOW}⏳ CATCHING UP — {h.lag_blocks} blk{behind}{opn} (data is REPLAYED, not live){_RESET}")
+    elif st == "live":
+        lines.append(f"  stream       : {_GREEN}✓ LIVE{_RESET} (at head, lag {h.lag_blocks} blk)")
+    else:
+        lines.append("  stream       : · (starting)")
+
     # registration
     if h.registered is False:
         reg = f"{_RED}✗ NOT REGISTERED — submissions earn ZERO{_RESET}"
@@ -397,6 +448,19 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
         lines.append(f"  quorum       : {_RED}⚠ DISPUTED — {det}{_RESET} (verify: {h.verify_host})")
     elif qs == "unavailable":
         lines.append(f"  quorum       : {_YELLOW}· verify node unavailable{_RESET} ({h.verify_host})")
+
+    # Outage/backfill ledger — every recorded RPC outage + whether it's been backfilled, so a gap
+    # in coverage is never silent. `backfilled ✓` = the observer replayed those blocks from chain.
+    gaps = h.gaps or []
+    if gaps:
+        parts = []
+        for g in gaps[-3:]:
+            rng = f"{time.strftime('%m-%d %H:%M', time.gmtime(g['start']))}–{time.strftime('%H:%M', time.gmtime(g['end']))}"
+            done = (h.last_block or 0) >= g.get("to_block", 0)
+            parts.append(f"{rng} UTC ({hms(g['dur'])}) {'✓' if done else '⏳'}")
+        tail = "" if len(gaps) <= 3 else f" (+{len(gaps) - 3} older)"
+        c = _GREEN if not h.open_gaps else _YELLOW
+        lines.append(f"  outages (7d) : {c}{len(gaps)} — {'; '.join(parts)}{tail}{_RESET}")
 
     # Resource gauge — bounded-collection sizes + RSS; a leak shows as a trend here first.
     r = h.resources or {}

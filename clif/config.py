@@ -281,6 +281,7 @@ class Settings(BaseSettings):
     # deterministic finality (`latest` = last ACCEPTED = final), so this is defense-in-depth so the
     # per-block event scans never attribute a block that isn't yet accepted. 0 = read the tip.
     observe_confirmations: int = 2
+    observe_live_lag_blocks: int = 8  # ≤ this many blocks behind head ⇒ stream is LIVE; more ⇒ CATCHING UP
 
     @property
     def net(self) -> NetworkConfig:
@@ -347,6 +348,10 @@ class Settings(BaseSettings):
     @property
     def observe_iqr_history_file(self) -> Path:
         return Path(self.clif_state_dir) / f"observe-iqr-history-{self.network}.jsonl"
+
+    @property
+    def observe_gaps_file(self) -> Path:
+        return Path(self.clif_state_dir) / f"observe-gaps-{self.network}.jsonl"
 
     @property
     def observe_rpc_url(self) -> str:

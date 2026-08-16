@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -24,6 +25,7 @@ from clif.observe.health import (
     observe_health_from_dict,
     render_protocol_report,
 )
+from clif.observe.gaps import Gap, append_gap, hms, load_gaps, prune_gaps
 from clif.observe.iqr import build_voter_weight_map
 from clif.observe.iqr_history import append_tally, load_history, prune_history
 from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH, get_offer_params, prune_offer_cache
@@ -66,6 +68,8 @@ def run_engine(
     identity: str | None = None,
     registration_refresh_sec: float = 3600.0,  # registration changes per reward epoch (~3.5d)
     confirmations: int = 0,  # stay this many blocks behind the tip (finality defense-in-depth)
+    live_lag_blocks: int = 8,  # ≤ this behind head ⇒ LIVE; more ⇒ CATCHING UP (backfilling an outage)
+    gaps_file: str | None = None,  # persist the outage/backfill ledger (survives restart)
     status_log_sec: float = 3600.0,  # emit a rendered OBS status line to the log this often (+once seeded)
     fdc_hub: str | None = None,  # FdcHub address — enables FDC participation tracking when set
     ap_signing_policy: str | None = None,  # AP's signingPolicyAddress — enables fast-update (255) tracking
@@ -236,6 +240,7 @@ def run_engine(
             uptime_pct=up["pct"], uptime_connected=up["connected"], validator_node=validator_node_id,
             quorum=quorum or None, verify_host=(verifier.host if verifier else None),
             uptime_verify=up.get("verify"), quorum_crit=quorum_crit,
+            gaps=[asdict(g) for g in gap_list[-8:]], live_lag_blocks=live_lag_blocks,
         )
 
     # Periodic self-report: the observer otherwise only logs issues, so its participation +
@@ -262,6 +267,8 @@ def run_engine(
             )
         if iqr_cache_dir and ep_hist is not None:  # bound the offer-params cache file count
             prune_offer_cache(iqr_cache_dir, network, ep_hist)
+        if gaps_file:  # bound the outage ledger to ~7 days
+            prune_gaps(Path(gaps_file), now=int(now))
 
     # Write a status immediately so `observe status` shows "warming up", not a missing-file CRIT.
     state.last_block = cursor
@@ -292,6 +299,10 @@ def run_engine(
     # Temperance on a sustained RPC outage: log the FIRST head-read failure, then at most once a
     # minute (with a running count), and a single recovery line — not every poll (~2s).
     hf = {"since": 0.0, "count": 0, "last_log": 0.0}
+    # Outage/backfill ledger — records each outage so the surface can say LIVE vs CATCHING UP
+    # unambiguously and tabulate what was replayed. `catching_up` gates the backfill-progress logs.
+    gap_list = load_gaps(Path(gaps_file), now=int(time.time())) if gaps_file else []
+    catching_up = False
     while True:
         try:
             head = rpc.block_number()
@@ -308,13 +319,25 @@ def run_engine(
                 )
             time.sleep(poll_sec)
             continue
-        if hf["since"]:  # recovered from an outage streak
+        if hf["since"]:  # recovered from an outage streak → record the gap + open a backfill
+            rec_now = int(time.time())
+            g = Gap(
+                start=int(hf["since"]), end=rec_now, dur=rec_now - int(hf["since"]),
+                fails=int(hf["count"]), from_block=(state.last_block or cursor), to_block=head,
+            )
+            gap_list.append(g)
+            if gaps_file:
+                append_gap(Path(gaps_file), g)
+            catching_up = head - (state.last_block or cursor) > live_lag_blocks
             if log:
                 log.info(
-                    "\033[32m✓ observe RPC recovered after %ds (%d fail(s))\033[0m",
-                    int(time.time() - hf["since"]), hf["count"],
+                    "\033[32m✓ observe RPC recovered after %s (%d fail(s)) — backfilling blocks "
+                    "%d→%d (%d blocks, ~%d rounds)\033[0m",
+                    hms(g.dur), g.fails, g.from_block + 1, g.to_block,
+                    g.to_block - g.from_block, g.dur // 90 or 1,
                 )
             hf = {"since": 0.0, "count": 0, "last_log": 0.0}
+        state.head = head
         # Confirmation lag — on Avalanche `latest` is already the accepted (final) block, so this
         # is belt-and-suspenders: never observe/attribute a block newer than head-confirmations.
         safe_head = head - confirmations
@@ -375,6 +398,13 @@ def run_engine(
             if since_status >= status_every_blocks:
                 status_writer(_status())
                 since_status = 0
+                if catching_up and log:  # unambiguous: we're REPLAYING, not live
+                    lag_b = (state.head or cursor) - cursor
+                    behind = int(time.time() - (state.last_ts or time.time()))
+                    log.info(
+                        "\033[38;5;208m OBS\033[0m ⏳ backfill: %d blocks behind (~%s), replaying to head",
+                        lag_b, hms(behind),
+                    )
             if _max_blocks is not None and processed >= _max_blocks:
                 _flush_events(scan_lo, cursor - 1, ts_map)
                 status_writer(_status())
@@ -387,6 +417,12 @@ def run_engine(
             _flush_events(scan_lo, cursor - 1, ts_map)
             scan_lo = cursor
             ts_map = {}
+        # Backfill complete → LIVE. Log the transition ONCE so the reader knows the window is
+        # real-time again, not still replaying an outage.
+        if catching_up and state.last_block is not None and head - state.last_block <= live_lag_blocks:
+            catching_up = False
+            if log:
+                log.info("\033[32m✓ observe caught up — LIVE at head (backfill complete)\033[0m")
         _refresh_registration(time.time())
         _refresh_iqr(time.time())
         _refresh_uptime(time.time())

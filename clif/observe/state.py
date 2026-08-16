@@ -90,6 +90,7 @@ class ObserverState:
         self.finalized: deque[RoundState] = deque(maxlen=window_rounds)
         self.last_block: int | None = None
         self.last_ts: int | None = None
+        self.head: int | None = None  # latest chain head seen — for the lag / LIVE-vs-CATCHING-UP signal
         self.last_round_finalized: int | None = None
         # IQR context (set per reward epoch by the engine; None ⇒ IQR scoring off this session).
         self.iqr_offer = None  # reward_rule.OfferParams | None
