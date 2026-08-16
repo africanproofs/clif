@@ -287,6 +287,10 @@ class Settings(BaseSettings):
     # per-block event scans never attribute a block that isn't yet accepted. 0 = read the tip.
     observe_confirmations: int = 2
     observe_live_lag_blocks: int = 8  # ≤ this many blocks behind head ⇒ stream is LIVE; more ⇒ CATCHING UP
+    # After an outage longer than this many blocks, SKIP the backfill and re-seed near head instead
+    # of replaying hours of old rounds (they'd scroll out of the ~1h window anyway; participation is
+    # still covered by the nonce-based budget, and the gap ledger records the skip). ~1h of blocks.
+    observe_max_backfill_blocks: int = 2000
 
     @property
     def net(self) -> NetworkConfig:

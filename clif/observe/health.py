@@ -168,8 +168,12 @@ class ObserveHealth:
 
     @property
     def open_gaps(self) -> list:
-        """Recorded outages not yet fully backfilled (last_block < to_block)."""
-        return [g for g in (self.gaps or []) if (self.last_block or 0) < g.get("to_block", 0)]
+        """Recorded outages not yet fully backfilled (last_block < to_block). A `skipped` gap is
+        resolved-by-skip (deliberately not replayed), so it's not 'open'."""
+        return [
+            g for g in (self.gaps or [])
+            if not g.get("skipped") and (self.last_block or 0) < g.get("to_block", 0)
+        ]
 
     @property
     def quorum_status(self) -> str:
@@ -524,8 +528,13 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
         parts = []
         for g in gaps[-3:]:
             rng = f"{time.strftime('%m-%d %H:%M', time.gmtime(g['start']))}–{time.strftime('%H:%M', time.gmtime(g['end']))}"
-            done = (h.last_block or 0) >= g.get("to_block", 0)
-            parts.append(f"{rng} UTC ({hms(g['dur'])}) {'✓' if done else '⏳'}")
+            if g.get("skipped"):
+                mk = "⏭ skipped"
+            elif (h.last_block or 0) >= g.get("to_block", 0):
+                mk = "✓"
+            else:
+                mk = "⏳"
+            parts.append(f"{rng} UTC ({hms(g['dur'])}) {mk}")
         tail = "" if len(gaps) <= 3 else f" (+{len(gaps) - 3} older)"
         c = _GREEN if not h.open_gaps else _YELLOW
         lines.append(f"  outages (7d) : {c}{len(gaps)} — {'; '.join(parts)}{tail}{_RESET}")

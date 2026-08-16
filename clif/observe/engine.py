@@ -72,6 +72,7 @@ def run_engine(
     registration_refresh_sec: float = 3600.0,  # registration changes per reward epoch (~3.5d)
     confirmations: int = 0,  # stay this many blocks behind the tip (finality defense-in-depth)
     live_lag_blocks: int = 8,  # ≤ this behind head ⇒ LIVE; more ⇒ CATCHING UP (backfilling an outage)
+    max_backfill_blocks: int = 0,  # outage longer than this ⇒ SKIP the backfill, re-seed near head (0 = unbounded)
     gaps_file: str | None = None,  # persist the outage/backfill ledger (survives restart)
     status_log_sec: float = 3600.0,  # emit a rendered OBS status line to the log this often (+once seeded)
     fdc_hub: str | None = None,  # FdcHub address — enables FDC participation tracking when set
@@ -387,23 +388,39 @@ def run_engine(
                 )
             time.sleep(poll_sec)
             continue
-        if hf["since"]:  # recovered from an outage streak → record the gap + open a backfill
+        if hf["since"]:  # recovered from an outage streak → record the gap; backfill or skip-forward
             rec_now = int(time.time())
+            from_block = state.last_block or cursor
+            lag = head - from_block
+            # Cap the backfill: replaying hours of old rounds is slow AND pointless (they scroll out
+            # of the ~1h window; participation is still covered by the nonce budget). Beyond the cap,
+            # SKIP forward and re-seed near head, recording the skip in the gap ledger.
+            skipped = bool(max_backfill_blocks and lag > max_backfill_blocks)
             g = Gap(
                 start=int(hf["since"]), end=rec_now, dur=rec_now - int(hf["since"]),
-                fails=int(hf["count"]), from_block=(state.last_block or cursor), to_block=head,
+                fails=int(hf["count"]), from_block=from_block, to_block=head, skipped=skipped,
             )
             gap_list.append(g)
             if gaps_file:
                 append_gap(Path(gaps_file), g)
-            catching_up = head - (state.last_block or cursor) > live_lag_blocks
-            if log:
+            if skipped:
+                new_cursor = head - lookback_blocks
+                _fb = rpc.get_block(new_cursor, full_transactions=False)
+                state.observe_start_ts = _blk_int(_fb.get("timestamp", "0x0")) if _fb else start_ts
+                cursor, scan_lo, ts_map = new_cursor, new_cursor, {}
+                if log:
+                    log.warning(
+                        "\033[38;5;208m OBS\033[0m ⏭ outage %s too long — SKIPPING backfill of %d blocks "
+                        "(%d→%d); re-seeding near head. FTSO participation still tracked via the budget.",
+                        hms(g.dur), lag, from_block + 1, head,
+                    )
+            elif log:
                 log.info(
                     "\033[32m✓ observe RPC recovered after %s (%d fail(s)) — backfilling blocks "
                     "%d→%d (%d blocks, ~%d rounds)\033[0m",
-                    hms(g.dur), g.fails, g.from_block + 1, g.to_block,
-                    g.to_block - g.from_block, g.dur // 90 or 1,
+                    hms(g.dur), g.fails, from_block + 1, head, lag, g.dur // 90 or 1,
                 )
+            catching_up = head - cursor > live_lag_blocks
             hf = {"since": 0.0, "count": 0, "last_log": 0.0}
         state.head = head
         # Confirmation lag — on Avalanche `latest` is already the accepted (final) block, so this
@@ -431,9 +448,12 @@ def run_engine(
                     if d is not None:
                         state.record(d, frm, ts, factory)
                 # IQR: fold AP's + every registered voter's submit2 reveal into the round's
-                # weighted median inputs (scored at finalize). Best-effort per-tx parse.
+                # weighted median inputs (scored at finalize). Best-effort per-tx parse. SKIPPED
+                # during a backfill (catching_up) — parsing ~100 voters/round is the catch-up
+                # bottleneck, and those old rounds scroll out of the window anyway.
                 if (
-                    state.iqr_offer is not None and inp[2:10] == _SUBMIT2_SELECTOR
+                    not catching_up and state.iqr_offer is not None
+                    and inp[2:10] == _SUBMIT2_SELECTOR
                     and (frm == our_submit_lc or frm in state.iqr_weight_map)
                 ):
                     try:

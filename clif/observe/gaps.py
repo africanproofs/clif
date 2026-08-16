@@ -25,10 +25,12 @@ class Gap:
     fails: int          # consecutive failed polls during the outage
     from_block: int     # last block processed BEFORE the outage (backfill replays from here+1)
     to_block: int       # chain head at recovery (backfill target)
+    skipped: bool = False  # outage too long ⇒ backfill SKIPPED, re-seeded near head (not replayed)
 
     def backfilled(self, last_block: int | None) -> bool:
-        """True once the stream has replayed past this gap (last_block ≥ to_block)."""
-        return last_block is not None and last_block >= self.to_block
+        """True once the stream has replayed past this gap (last_block ≥ to_block). A `skipped`
+        gap is never 'backfilled' — its blocks were deliberately not replayed."""
+        return not self.skipped and last_block is not None and last_block >= self.to_block
 
 
 def load_gaps(path: Path, *, now: int) -> list[Gap]:

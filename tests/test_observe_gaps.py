@@ -93,6 +93,20 @@ def test_run_engine_startup_writes_status_without_crashing(tmp_path):
     assert statuses and "gaps" in statuses[-1] and "head" in statuses[-1]
 
 
+def test_skipped_gap_not_open_and_rendered_as_skipped():
+    from clif.observe.gaps import Gap
+
+    g = Gap(start=0, end=100, dur=100, fails=50, from_block=1000, to_block=99_000, skipped=True)
+    assert g.backfilled(99_000) is False  # a skipped gap is never 'backfilled'
+    gap = {"start": 1_000_000, "end": 1_020_000, "dur": 20_000, "fails": 9000,
+           "from_block": 1000, "to_block": 99_000, "skipped": True}
+    h = _h(last_block=1500, head=1502, gaps=[gap])  # last_block < to_block, but skipped
+    assert not h.open_gaps  # skipped ⇒ resolved-by-skip, not open
+    assert h.severity != "CRIT"  # a skipped (resolved) gap doesn't hold the stream in CATCHING UP
+    out = _plain(render_protocol_report(h))
+    assert "⏭ skipped" in out
+
+
 def test_report_outage_marked_backfilled_once_past():
     gap = {"start": 1_000_000, "end": 1_001_000, "dur": 1000, "fails": 500,
            "from_block": 100, "to_block": 200}
