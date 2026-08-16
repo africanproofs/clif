@@ -29,6 +29,7 @@ def build_status(
     quorum: dict | None = None, verify_host: str | None = None,
     uptime_verify: tuple | None = None, quorum_crit: bool = False,
     gaps: list | None = None, live_lag_blocks: int = 8,
+    budget: dict | None = None, delegation: dict | None = None,
 ) -> dict:
     """The JSON the engine writes each cycle. `registered` = is AP in the registered voter
     set for the current reward epoch (None = not probed); when False, all the clean
@@ -44,6 +45,8 @@ def build_status(
         "lag_sec": (int(time.time() - state.last_ts) if state.last_ts else None),
         "gaps": gaps or [],
         "live_lag_blocks": live_lag_blocks,
+        "budget": budget,
+        "delegation": delegation,
         "last_round_finalized": state.last_round_finalized,
         "registered": registered,
         "reward_epoch": reward_epoch,
@@ -79,6 +82,8 @@ class ObserveHealth:
     lag_sec: int | None = None  # how far behind chain time the last-processed block is
     gaps: list | None = None  # recorded RPC outages [{start,end,dur,fails,from_block,to_block}]
     live_lag_blocks: int = 8  # ≤ this behind head ⇒ LIVE; more ⇒ CATCHING UP
+    budget: dict | None = None  # per-epoch FTSO miss-budget vs the 80% floor (read_ftso_budget)
+    delegation: dict | None = None  # live validator + FTSO delegation snapshot
     last_round_finalized: int | None = None
     window_rounds: int = 0
     complete: int = 0
@@ -190,6 +195,8 @@ class ObserveHealth:
             return "CRIT"  # engine stopped writing → not observing
         if self.registered is False:
             return "CRIT"  # submitting but NOT in the registered set ⇒ these rounds earn ZERO
+        if (self.budget or {}).get("severity") == "CRIT":
+            return "CRIT"  # minimal-conditions budget breached or on track to breach (the 20% floor)
         if self.window_rounds == 0:
             return "WARN"  # warming up / no finalized round yet
         if self.reveal_offences > 0:
@@ -221,6 +228,8 @@ class ObserveHealth:
             "lag_sec": self.lag_sec,
             "gaps": self.gaps or [],
             "open_gaps": len(self.open_gaps),
+            "budget": self.budget,
+            "delegation": self.delegation,
             "last_round_finalized": self.last_round_finalized,
             "window_rounds": self.window_rounds,
             "complete": self.complete,
@@ -269,6 +278,8 @@ def observe_health_from_dict(d: dict, *, enabled_default: bool = True) -> Observ
         lag_sec=d.get("lag_sec"),
         gaps=d.get("gaps", []),
         live_lag_blocks=d.get("live_lag_blocks", 8),
+        budget=d.get("budget"),
+        delegation=d.get("delegation"),
         last_round_finalized=d.get("last_round_finalized"),
         window_rounds=d.get("window_rounds", 0),
         complete=d.get("complete", 0),
@@ -315,6 +326,17 @@ def read_observe_status(path: Path, *, enabled: bool) -> ObserveHealth:
 
 
 _IQR_HORIZONS = (("1h", "1h"), ("6h", "6h"), ("24h", "24h"), ("epoch", "ep"))
+
+
+def _flr(x: float | None) -> str:
+    """Compact token amount: 140.2M, 3.4K, 812."""
+    if x is None:
+        return "?"
+    if x >= 1e6:
+        return f"{x / 1e6:.1f}M"
+    if x >= 1e3:
+        return f"{x / 1e3:.1f}K"
+    return f"{x:.0f}"
 
 
 def _win_pair(w: dict | None) -> str:
@@ -448,6 +470,34 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
         lines.append(f"  quorum       : {_RED}⚠ DISPUTED — {det}{_RESET} (verify: {h.verify_host})")
     elif qs == "unavailable":
         lines.append(f"  quorum       : {_YELLOW}· verify node unavailable{_RESET} ({h.verify_host})")
+
+    # Minimal-conditions budget — the "cannot breach 20%" tracker (FTSO submission, full-epoch).
+    b = h.budget or {}
+    if b.get("rate_pct") is not None:
+        bc = _RED if b["severity"] == "CRIT" else (_YELLOW if b["severity"] == "WARN" else _GREEN)
+        eta = f" · breach ETA ~{b['eta_rounds_to_breach']} rounds" if b.get("eta_rounds_to_breach") else ""
+        lines.append(
+            f"  budget       : {bc}FTSO {b['rate_pct']}% (≥{b['threshold_pct']}) · "
+            f"{b['budget_left']}/{b['miss_budget']} miss-budget left ({b['budget_left_pct']}%) · "
+            f"projected {b['projected_final_pct']}%{eta}{_RESET} "
+            f"[{b['rounds_elapsed']}/{b['rounds_total']} rounds]"
+        )
+
+    # Live delegation — validator (P-chain) + FTSO (WNat vote power).
+    d = h.delegation or {}
+    if d:
+        segs = []
+        v = d.get("validator")
+        if v:
+            segs.append(
+                f"validator {_flr(v['total'])} ({_flr(v['self_bond'])} self + {_flr(v['delegated'])} "
+                f"by {v['delegators']} dels, {v['fee_pct']:g}% fee)"
+            )
+        f = d.get("ftso")
+        if f:
+            segs.append(f"FTSO {_flr(f['vote_power'])} vote power")
+        if segs:
+            lines.append(f"  delegation   : {' · '.join(segs)}")
 
     # Outage/backfill ledger — every recorded RPC outage + whether it's been backfilled, so a gap
     # in coverage is never silent. `backfilled ✓` = the observer replayed those blocks from chain.

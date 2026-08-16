@@ -485,12 +485,11 @@ class RpcClient:
             raise RpcError(f"block {block_number} not found")
         return int(str(cast(dict, result)["timestamp"]), 16)
 
-    def validator_uptime(self, node_id: str) -> tuple[float | None, bool] | None:
-        """P-chain `platform.getCurrentValidators` for one NodeID → (uptime_percent, connected).
-
-        The P-chain lives at `/ext/bc/P` on the SAME host as the C-chain RPC (which uses
-        `/ext/bc/C/rpc`); it takes an OBJECT param, not the EVM list form. Returns None if the
-        node isn't in the current validator set. Keyless read."""
+    def validator_record(self, node_id: str) -> dict | None:
+        """P-chain `platform.getCurrentValidators` for one NodeID → the raw validator dict (weight,
+        delegators, delegationFee, uptime, connected, startTime, endTime, …) or None if not in the
+        current set. The P-chain lives at `/ext/bc/P` on the SAME host as the C-chain RPC; it takes
+        an OBJECT param, not the EVM list form. Keyless read."""
         p_url = self._url.split("/ext/", 1)[0] + "/ext/bc/P"
         self._id += 1
         try:
@@ -508,11 +507,45 @@ class RpcClient:
         if "error" in body:
             raise RpcError(f"platform.getCurrentValidators rpc error: {body['error']}")
         vals = (body.get("result") or {}).get("validators") or []
-        if not vals:
+        return vals[0] if vals else None
+
+    def validator_uptime(self, node_id: str) -> tuple[float | None, bool] | None:
+        """(uptime_percent, connected) for one NodeID, or None if not validating."""
+        v = self.validator_record(node_id)
+        if v is None:
             return None
-        v = vals[0]
         up = v.get("uptime")
         return (float(up) if up is not None else None, bool(v.get("connected", False)))
+
+    def validator_delegation(self, node_id: str) -> dict | None:
+        """Self-bond + delegation snapshot for one NodeID (FLR), from `getCurrentValidators`. The
+        `weight` field is the validator's OWN stake (self-bond); each entry in `delegators` is a
+        separate delegation. Returns None if not validating. Keyless read."""
+        v = self.validator_record(node_id)
+        if v is None:
+            return None
+        dels = v.get("delegators") or []
+        self_bond = int(v.get("weight", 0))
+        delegated = sum(int(d.get("weight", 0)) for d in dels)
+        fee = v.get("delegationFee")
+        return {
+            "self_bond": self_bond / 1e9,          # nFLR → FLR
+            "delegated": delegated / 1e9,
+            "total": (self_bond + delegated) / 1e9,
+            "delegators": len(dels),
+            "fee_pct": float(fee) if fee is not None else None,
+            "uptime": float(v["uptime"]) if v.get("uptime") is not None else None,
+            "connected": bool(v.get("connected", False)),
+            "start_time": int(v["startTime"]) if v.get("startTime") else None,
+            "end_time": int(v["endTime"]) if v.get("endTime") else None,
+        }
+
+    def wnat_vote_power(self, wnat: str, address: str) -> int:
+        """WNat.votePowerOf(address) → vote power (wei) delegated to / held by `address` — AP's FTSO
+        delegation address's vote power = its delegated WSGB/WFLR. Keyless read."""
+        data = "0x" + selector("votePowerOf(address)").hex() + abi_encode(["address"], [address]).hex()
+        (out,) = self._abi_decode(["uint256"], self.eth_call(wnat, data))
+        return int(out)
 
     def signed_logs(
         self,

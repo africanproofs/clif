@@ -2815,6 +2815,7 @@ def observe_run() -> None:
             fdc_hub=fdc_hub,
             ap_signing_policy=ap_signing_policy,
             validator_node_id=s.net.validator_node_id or None,
+            delegation_addr=accts.get("Delegation"),
             entity_manager=s.net.entity_manager,
             verify_rpc_url=(s.verify_rpc_url if s.quorum_enabled else None),
             quorum_crit=s.observe_quorum_crit,
@@ -3003,6 +3004,67 @@ def alert_run() -> None:
             time.sleep(sleep_for)
     except KeyboardInterrupt:
         log.info("alert stopped")
+
+
+@app.command(name="budget")
+def budget_cmd(
+    network: Annotated[Optional[str], typer.Option("--network", envvar="NETWORK")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Per-epoch minimal-conditions budget — the 'cannot breach 20%' tracker. FTSO submission rate
+    for the CURRENT reward epoch (reconstructed for the whole epoch via the Submit nonce delta) vs
+    the 80% floor, as a depleting miss-budget + at-current-pace projection. Exit 0/1/2 = OK/WARN/CRIT."""
+    from clif.observe.budget import read_ftso_budget
+    from clif.observe.timing import voting_factory
+
+    s = _settings()
+    if network:
+        s.network = network  # type: ignore[assignment]
+    submit = {a.name: a.address for a in FUNDING_ACCOUNTS.get(s.network, [])}.get("Submit")
+    with RpcClient(s.observe_rpc_url) as rpc:
+        b = read_ftso_budget(rpc, submit_addr=submit, factory=voting_factory(s.network))
+    if json_out:
+        print(json.dumps(b, indent=2))
+    else:
+        console.print(f"[bold]minimal-conditions budget — {s.network} RE{b['epoch']}[/] "
+                      f"({b['rounds_elapsed']}/{b['rounds_total']} rounds elapsed)")
+        console.print(f"  FTSO submission : [bold]{b['rate_pct']}%[/] (floor {b['threshold_pct']}%)")
+        console.print(f"  miss-budget     : {b['budget_left']}/{b['miss_budget']} rounds left "
+                      f"({b['budget_left_pct']}%) · missed {b['missed']}")
+        console.print(f"  at current pace : projected {b['projected_final_pct']}% at epoch end "
+                      f"→ [bold]{b['severity']}[/]")
+    raise typer.Exit(0 if b["severity"] == "OK" else (1 if b["severity"] == "WARN" else 2))
+
+
+@app.command(name="delegation")
+def delegation_cmd(
+    network: Annotated[Optional[str], typer.Option("--network", envvar="NETWORK")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Live delegation snapshot — validator (P-chain self-bond + delegated) + FTSO (WNat vote power)."""
+    from clif.observe.delegation import read_delegation
+
+    s = _settings()
+    if network:
+        s.network = network  # type: ignore[assignment]
+    deleg_addr = {a.name: a.address for a in FUNDING_ACCOUNTS.get(s.network, [])}.get("Delegation")
+    with RpcClient(s.observe_rpc_url) as rpc:
+        d = read_delegation(rpc, network=s.network, node_id=s.net.validator_node_id or None,
+                            delegation_addr=deleg_addr)
+    if json_out:
+        print(json.dumps(d, indent=2))
+    else:
+        console.print(f"[bold]delegation — {s.network}[/]")
+        v = d.get("validator")
+        if v:
+            console.print(f"  validator : {v['total']:,.0f} FLR total = {v['self_bond']:,.0f} self-bond "
+                          f"+ {v['delegated']:,.0f} delegated by {v['delegators']} · {v['fee_pct']:g}% fee "
+                          f"· uptime {v['uptime']}%")
+        else:
+            console.print("  validator : · (none on this net)")
+        f = d.get("ftso")
+        console.print(f"  FTSO      : {f['vote_power']:,.0f} WFLR vote power" if f else "  FTSO      : · (unavailable)")
+    raise typer.Exit(0)
 
 
 if __name__ == "__main__":

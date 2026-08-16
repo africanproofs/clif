@@ -25,6 +25,8 @@ from clif.observe.health import (
     observe_health_from_dict,
     render_protocol_report,
 )
+from clif.observe.budget import read_ftso_budget
+from clif.observe.delegation import read_delegation
 from clif.observe.gaps import Gap, append_gap, hms, load_gaps, prune_gaps
 from clif.observe.iqr import build_voter_weight_map
 from clif.observe.iqr_history import append_tally, load_history, prune_history
@@ -74,6 +76,7 @@ def run_engine(
     fdc_hub: str | None = None,  # FdcHub address — enables FDC participation tracking when set
     ap_signing_policy: str | None = None,  # AP's signingPolicyAddress — enables fast-update (255) tracking
     validator_node_id: str | None = None,  # AP's P-chain NodeID — enables the validator uptime check
+    delegation_addr: str | None = None,  # AP's FTSO delegation address — enables the FTSO delegation read
     entity_manager: str | None = None,  # with voter_registry + FSM ⇒ enables IQR reward-band scoring
     verify_rpc_url: str | None = None,  # independent RPC for cross-verifying gating reads (quorum)
     quorum_crit: bool = False,  # a DISPUTED gating fact ⇒ CRIT severity (else WARN)
@@ -153,6 +156,33 @@ def run_engine(
     # Validator uptime (P-chain) — hourly poll of platform.getCurrentValidators (Flare-only; AP
     # runs no Songbird validator). Best-effort: a probe failure keeps the last value.
     up = {"pct": None, "connected": None, "checked": 0.0}
+
+    # Per-epoch minimal-conditions budget (FTSO 80% via Submit nonce-delta) + live delegation
+    # (validator + FTSO) — both slow-changing, refreshed hourly. Best-effort; a failure keeps last.
+    bud: dict = {"data": None, "checked": 0.0}
+    deleg: dict = {"data": None, "checked": 0.0}
+
+    def _refresh_budget(now: float) -> None:
+        if bud["checked"] and now - bud["checked"] < registration_refresh_sec:
+            return
+        try:  # best-effort — an overlay read must NEVER crash the streaming engine
+            bud["data"] = read_ftso_budget(rpc, submit_addr=our_submit, factory=factory)
+            bud["checked"] = now
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _refresh_delegation(now: float) -> None:
+        if not (validator_node_id or delegation_addr):
+            return
+        if deleg["checked"] and now - deleg["checked"] < registration_refresh_sec:
+            return
+        try:  # best-effort — never crash the engine
+            deleg["data"] = read_delegation(
+                rpc, network=network, node_id=validator_node_id, delegation_addr=delegation_addr
+            )
+            deleg["checked"] = now
+        except Exception:  # noqa: BLE001
+            pass
 
     def _refresh_uptime(now: float) -> None:
         if not validator_node_id:
@@ -241,6 +271,7 @@ def run_engine(
             quorum=quorum or None, verify_host=(verifier.host if verifier else None),
             uptime_verify=up.get("verify"), quorum_crit=quorum_crit,
             gaps=[asdict(g) for g in gap_list[-8:]], live_lag_blocks=live_lag_blocks,
+            budget=bud["data"], delegation=deleg["data"],
         )
 
     # Periodic self-report: the observer otherwise only logs issues, so its participation +
@@ -275,6 +306,8 @@ def run_engine(
     _refresh_registration(time.time())
     _refresh_iqr(time.time())
     _refresh_uptime(time.time())
+    _refresh_budget(time.time())
+    _refresh_delegation(time.time())
     # Seed the multi-horizon IQR history from the persisted log (so 24h / since-epoch survive a
     # restart). Scope to the now-known reward epoch; deduped on load + against re-finalized rounds.
     if iqr_history_file:
@@ -427,6 +460,8 @@ def run_engine(
         _refresh_registration(time.time())
         _refresh_iqr(time.time())
         _refresh_uptime(time.time())
+        _refresh_budget(time.time())
+        _refresh_delegation(time.time())
         status_writer(_status())
         since_status = 0
         # First time we're fully caught up, the lookback window is seeded (rounds finalized +
