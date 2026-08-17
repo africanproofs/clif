@@ -92,3 +92,16 @@ def test_one_shot_always_logs(monkeypatch, caplog):
     cli._fund_pass(dry_run=False, s=_s())  # ok_hb=None (fund once) → always logs
     cli._fund_pass(dry_run=False, s=_s())
     assert _count(caplog, "in band") == 2
+
+
+# ---- startup version banner (every daemon logs its clif version on start) --------
+
+
+def test_daemon_start_banner_logs_version_and_network(caplog):
+    import logging
+    from clif import __version__
+
+    caplog.set_level(logging.INFO, logger="clif")
+    cli._log_daemon_start("observe", "songbird")
+    msg = caplog.records[-1].getMessage()
+    assert f"clif v{__version__}" in msg and "observe daemon" in msg and "network=songbird" in msg

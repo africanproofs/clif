@@ -1856,6 +1856,7 @@ def epoch_run(
         raise typer.Exit(2)
 
     s = _settings()
+    _log_daemon_start("epoch", s.network)
     # Hard-off gate (D15): the state machine SIGNS. A valid signature over wrong
     # data is irreversible on-chain, so signing is opt-in.
     if not s.fsp_auto_enabled:
@@ -2372,6 +2373,13 @@ def nonce(
         )
 
 
+def _log_daemon_start(name: str, network: str) -> None:
+    """One clear startup line — clif VERSION · daemon · network — logged the instant a daemon
+    boots (enabled OR idling), so a redeploy/restart is obvious in `clifctl logs` and the
+    running version is easy to track."""
+    log.info("clif v%s · %s daemon starting · network=%s", __version__, name, network)
+
+
 def _fund_log(sev: str, msg: str, *args: object) -> None:
     (log.info if sev == "OK" else log.warning if sev == "WARN" else log.error)(msg, *args)
 
@@ -2615,6 +2623,7 @@ def fund_run(
         err.print("[bold red]fund run refuses to start without an explicit NETWORK[/]")
         raise typer.Exit(2)
     s = _settings()
+    _log_daemon_start("fund", s.network)
     if not s.funding_enabled:
         log.warning(
             "funding daemon DISABLED — FUNDING_ENABLED is not true; idling (NOT funding). "
@@ -2701,6 +2710,7 @@ def registration_run(
         err.print("[bold red]registration run refuses to start without an explicit NETWORK[/]")
         raise typer.Exit(2)
     s = _settings()
+    _log_daemon_start("registration", s.network)
     if not s.registration_enabled:
         log.warning(
             "registration daemon DISABLED — REGISTRATION_ENABLED is not true; idling. "
@@ -2794,6 +2804,7 @@ def observe_run() -> None:
         err.print("[bold red]observe run refuses to start without an explicit NETWORK[/]")
         raise typer.Exit(2)
     s = _settings()
+    _log_daemon_start("observe", s.network)
     if not s.observe_enabled:
         log.warning(
             "observer DISABLED — OBSERVE_ENABLED is not true; idling. "
@@ -2984,6 +2995,7 @@ def alert_run() -> None:
         err.print("[bold red]alert run refuses to start without an explicit NETWORK[/]")
         raise typer.Exit(2)
     s = _settings()
+    _log_daemon_start("alert", s.network)
 
     def _idle(reason: str) -> None:
         log.warning("alert daemon idling — %s. Set ALERT_ENABLED=true + ALERT_WEBHOOK_URL and restart.", reason)
