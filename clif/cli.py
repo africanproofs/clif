@@ -2376,13 +2376,28 @@ def _fund_log(sev: str, msg: str, *args: object) -> None:
     (log.info if sev == "OK" else log.warning if sev == "WARN" else log.error)(msg, *args)
 
 
-def _fund_pass(*, dry_run: bool, s: Settings) -> None:
+# A steady HEALTHY fund line re-logs at most this often (a heartbeat) when run as the
+# daemon — the poll + any top-up still happen every cycle; only the OK line is tempered.
+_FUND_OK_HEARTBEAT_SEC = 6 * 3600
+
+
+def _fund_pass(*, dry_run: bool, s: Settings, ok_hb: dict | None = None) -> None:
     """One funding pass for s.network: surface health, then top up any account
     below its band's lower bound to its upper bound. Health is ALWAYS surfaced
-    (color-coded) even when nothing needs funding."""
+    (color-coded) even when nothing needs funding — except that a daemon caller
+    (passing `ok_hb`) tempers the steady OK line to a heartbeat: it re-logs only on
+    a change or every `_FUND_OK_HEARTBEAT_SEC`. WARN/CRIT/error are never tempered;
+    one-shot callers (`ok_hb=None`) always log."""
     with RpcClient(s.rpc_url) as rpc:
         fh = read_health(rpc, s.network)
-        _fund_log(fh.severity, "%s", render_health(fh, active=False))
+        line = render_health(fh, active=False)
+        if ok_hb is not None and fh.severity == "OK":
+            now = time.monotonic()
+            if line != ok_hb.get("line") or (now - ok_hb.get("ts", 0.0)) >= _FUND_OK_HEARTBEAT_SEC:
+                _fund_log("OK", "%s", line)
+                ok_hb["line"], ok_hb["ts"] = line, now
+        else:
+            _fund_log(fh.severity, "%s", line)
         if not fh.below and not fh.funder_crit and fh.error is None:
             return
         if dry_run:
@@ -2617,10 +2632,11 @@ def fund_run(
         "fund start network=%s interval=%ss wallet=%s bands: gas 250→400 · id 150→200",
         s.network, iv, s.funding_wallet_name,
     )
+    ok_hb: dict = {}  # heartbeat state: temper the steady OK line to _FUND_OK_HEARTBEAT_SEC
     try:
         while True:
             try:
-                _fund_pass(dry_run=False, s=s)
+                _fund_pass(dry_run=False, s=s, ok_hb=ok_hb)
             except Exception as exc:  # noqa: BLE001 — a bad cycle must not kill the daemon
                 log.error("\033[1;31m🔴 fund cycle error: %s\033[0m", exc)
             time.sleep(iv)
