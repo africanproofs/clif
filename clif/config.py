@@ -281,6 +281,8 @@ class Settings(BaseSettings):
     observe_lookback_blocks: int = 900  # seed depth (~15min/~10 rounds; window fills forward to 40)
     observe_window_rounds: int = 40  # rolling health window (~1h of rounds)
     observe_poll_sec: int = 2  # new-block poll cadence
+    observe_status_log_sec: int = 3600  # emit the full protocol report this often WHEN HEALTHY
+    observe_degraded_log_sec: int = 300  # …but TIGHTEN to this (5min) while severity != OK, until it clears
     observe_iqr: bool = True  # score AP's inner/outer reward-band hit rates (needs the all-voter reveal decode)
     # Confirmation lag: stay this many blocks behind the tip. Flare's Avalanche consensus has
     # deterministic finality (`latest` = last ACCEPTED = final), so this is defense-in-depth so the

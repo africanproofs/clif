@@ -114,3 +114,16 @@ def test_report_outage_marked_backfilled_once_past():
     out = _plain(render_protocol_report(h))
     assert "✓ LIVE" in out and not h.open_gaps
     assert "outages (7d) : 1 —" in out and "✓" in out
+
+
+# ---- adaptive report cadence: tighten to 5 min while degraded --------------------
+
+
+def test_report_interval_tightens_on_degradation():
+    from clif.observe.engine import report_interval
+
+    # Healthy → the relaxed hourly cadence; any non-OK severity → the tight (5 min) cadence,
+    # so a degradation is re-reported every few minutes until it clears back to OK.
+    assert report_interval("OK", healthy_sec=3600, degraded_sec=300) == 3600
+    assert report_interval("WARN", healthy_sec=3600, degraded_sec=300) == 300
+    assert report_interval("CRIT", healthy_sec=3600, degraded_sec=300) == 300

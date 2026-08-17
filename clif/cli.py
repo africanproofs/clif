@@ -2842,6 +2842,8 @@ def observe_run() -> None:
             lookback_blocks=s.observe_lookback_blocks,
             window_rounds=s.observe_window_rounds,
             poll_sec=s.observe_poll_sec,
+            status_log_sec=s.observe_status_log_sec,
+            degraded_log_sec=s.observe_degraded_log_sec,
             confirmations=s.observe_confirmations,
             live_lag_blocks=s.observe_live_lag_blocks,
             max_backfill_blocks=s.observe_max_backfill_blocks,

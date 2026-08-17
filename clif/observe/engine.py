@@ -42,6 +42,12 @@ def _blk_int(v) -> int:
     return int(str(v), 16)
 
 
+def report_interval(severity: str, *, healthy_sec: float, degraded_sec: float) -> float:
+    """The periodic-report cadence: `healthy_sec` when OK, else the tighter `degraded_sec` —
+    so a degradation (WARN/CRIT) is re-reported every few minutes until it clears back to OK."""
+    return healthy_sec if severity == "OK" else degraded_sec
+
+
 # keccak256("AttestationRequest(bytes,uint256)") — FdcHub's per-request event topic0.
 _ATTESTATION_REQUEST_TOPIC = "0x251377668af6553101c9bb094ba89c0c536783e005e203625e6cd57345918cc9"
 _SUBMIT2_SELECTOR = "9d00c9fd"
@@ -75,6 +81,7 @@ def run_engine(
     max_backfill_blocks: int = 0,  # outage longer than this ⇒ SKIP the backfill, re-seed near head (0 = unbounded)
     gaps_file: str | None = None,  # persist the outage/backfill ledger (survives restart)
     status_log_sec: float = 3600.0,  # emit a rendered OBS status line to the log this often (+once seeded)
+    degraded_log_sec: float = 300.0,  # …but tighten to this while severity != OK, until it clears back to OK
     fdc_hub: str | None = None,  # FdcHub address — enables FDC participation tracking when set
     ap_signing_policy: str | None = None,  # AP's signingPolicyAddress — enables fast-update (255) tracking
     validator_node_id: str | None = None,  # AP's P-chain NodeID — enables the validator uptime check
@@ -316,10 +323,16 @@ def run_engine(
     slog = {"last": 0.0}
 
     def _maybe_log_status(now: float, *, force: bool = False) -> None:
-        if not log or (not force and now - slog["last"] < status_log_sec):
+        if not log:
+            return
+        h = observe_health_from_dict(_status())  # cheap in-memory build — safe to check each loop
+        # Adaptive cadence: hourly WHEN HEALTHY, but TIGHTEN to degraded_log_sec (5 min) while
+        # severity != OK, so a degradation is re-reported every few minutes until it clears — then
+        # it relaxes back to hourly. force=the startup seed always emits.
+        interval = report_interval(h.severity, healthy_sec=status_log_sec, degraded_sec=degraded_log_sec)
+        if not force and now - slog["last"] < interval:
             return
         slog["last"] = now
-        h = observe_health_from_dict(_status())
         # The explicit, per-protocol FSP health report (registration, FTSO commit/reveal/sigs,
         # FDC, fast-updates, uptime, IQR) — logged at the overall-severity level.
         lvl = log.error if h.severity == "CRIT" else (log.warning if h.severity == "WARN" else log.info)
