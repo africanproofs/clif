@@ -70,3 +70,25 @@ def test_render_delta_lines():
     )))
     assert "Δ 24h      : validator +500.0K (+2 dels) · FTSO -300.0K" in out
     assert "Δ epoch    : validator +2.1M (+5 dels) · FTSO +1.8M" in out
+
+
+def test_delta_lines_are_colour_coded_by_direction():
+    from clif.funding import _GREEN, _RED
+
+    deleg = {
+        "validator": {"total": 140.0, "self_bond": 10.0, "delegated": 130.0,
+                      "delegators": 60, "fee_pct": 20.0, "uptime": 100.0},
+        "ftso": {"vote_power": 132.0},
+        "deltas": {
+            "val_delegated": {"h24": 500_000.0, "epoch": None},  # inflow → green
+            "val_dels": {"h24": -1, "epoch": None},              # loss → red
+            "ftso_vp": {"h24": -300_000.0, "epoch": None},       # outflow → red
+        },
+    }
+    raw = "\n".join(render_protocol_report(ObserveHealth(
+        network="flare", enabled=True, window_rounds=40, complete=40, signatures_seen=40,
+        registered=True, last_block=100, head=101, delegation=deleg,
+    )))
+    assert f"{_GREEN}+500.0K" in raw  # positive validator delegation → green
+    assert f"{_RED}-300.0K" in raw    # negative FTSO vote power → red
+    assert f"{_RED}-1" in raw         # delegator loss → red

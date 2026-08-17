@@ -502,14 +502,26 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
             segs.append(f"FTSO {_flr(f['vote_power'])} vote power")
         if segs:
             lines.append(f"  delegation   : {' · '.join(segs)}")
-        # 24h / reward-epoch deltas — is stake flowing in or out?
+        # 24h / reward-epoch deltas — is stake flowing IN (green) or OUT (red)?
+        # Colour-coded by direction so an outflow is impossible to skim past; flat
+        # or no-baseline-yet reads are dimmed (not an event).
         dl = d.get("deltas") or {}
         if dl:
+            _DIM = "\033[2m"
+
+            def _col(x) -> str:
+                if x is None:
+                    return _DIM
+                return _GREEN if x > 0 else (_RED if x < 0 else _DIM)
+
             def _amt(x):
-                return "n/a" if x is None else (f"+{_flr(x)}" if x >= 0 else f"-{_flr(-x)}")
+                if x is None:
+                    return f"{_DIM}n/a{_RESET}"
+                s = f"+{_flr(x)}" if x >= 0 else f"-{_flr(-x)}"
+                return f"{_col(x)}{s}{_RESET}"
 
             def _cnt(x):
-                return "n/a" if x is None else f"{x:+d}"
+                return f"{_DIM}n/a{_RESET}" if x is None else f"{_col(x)}{x:+d}{_RESET}"
 
             for horizon, lbl in (("h24", "24h"), ("epoch", "epoch")):
                 vd = (dl.get("val_delegated") or {}).get(horizon)

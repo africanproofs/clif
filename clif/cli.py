@@ -2663,6 +2663,11 @@ def registration_status(
     raise typer.Exit(0 if r.severity == "OK" else (1 if r.severity == "WARN" else 2))
 
 
+# An unchanged healthy registration line re-logs at most this often (a heartbeat,
+# so `clifctl logs` still proves the daemon is alive without the per-cycle spam).
+_REG_HEARTBEAT_SEC = 3600
+
+
 @registration_app.command(name="run")
 def registration_run(
     interval: Annotated[
@@ -2698,6 +2703,8 @@ def registration_run(
         s.network, far, s.registration_tight_interval_sec, s.registration_tight_window_sec,
         s.registration_gas_floor,
     )
+    last_key: tuple | None = None
+    last_log = 0.0
     try:
         while True:
             sleep_for = far
@@ -2706,17 +2713,30 @@ def registration_run(
                 write_status_atomic(s.registration_status_file, r.to_dict())
                 line = render_readiness(r, active=False)
                 sev = r.severity
-                (log.info if sev == "OK" else log.warning if sev == "WARN" else log.error)(line)
-                # Tighten the cadence when it matters: the registration window is
-                # actually OPEN (poll fast to catch WARN→OK or a will-FAIL the moment
-                # it resolves), OR we're within the boundary window (belt-and-suspenders
-                # in case the on-chain window opens earlier than the time heuristic
-                # guesses). NOT on a persistent current-epoch exclusion — that is a
-                # known, unfixable state (the window for it has closed); polling it
-                # every 2 min for days would just spam. The 10-min line still shows it.
+                # Temperance — a steady green line every 2–10 min is metronome noise.
+                # Log on a STATE change (the volatile T-countdown is excluded from the
+                # key), on ANY non-OK severity (alarms are never tempered), else a bare
+                # heartbeat at most hourly. So the log shows registration transitions,
+                # not the unchanged success repeated.
+                key = (
+                    sev, r.current_registered, r.next_registered,
+                    r.next_window_enabled, r.gas_ok, r.entity_ok, r.votepower_ok,
+                )
+                now = time.monotonic()
+                if sev != "OK" or key != last_key or (now - last_log) >= _REG_HEARTBEAT_SEC:
+                    (log.info if sev == "OK" else log.warning if sev == "WARN" else log.error)(line)
+                    last_key, last_log = key, now
+                # Tighten the cadence only when there is an OPEN, UNRESOLVED registration
+                # to catch: the window is actually enabled (poll fast to catch WARN→OK or
+                # a will-FAIL the moment it resolves), or we're within the boundary window
+                # (belt-and-suspenders if the on-chain window opens before the heuristic
+                # guesses) — AND we are not yet registered for the next epoch. Once
+                # RE(N+1) is ✓ the catch is done, so we fall back to the far cadence
+                # instead of re-polling the success every 2 min. NOT on a persistent
+                # current-epoch exclusion either (known, unfixable — the far line shows it).
                 ttb = r.time_to_boundary_sec
                 near_boundary = ttb is not None and ttb <= s.registration_tight_window_sec
-                if r.next_window_enabled or near_boundary:
+                if (r.next_window_enabled or near_boundary) and not r.next_registered:
                     sleep_for = s.registration_tight_interval_sec
             except Exception as exc:  # noqa: BLE001 — a bad cycle must not kill the daemon
                 log.error("\033[1;31m🔴 registration cycle error: %s\033[0m", exc)
