@@ -234,3 +234,40 @@ def test_prune_offer_cache_keeps_current_and_prev(tmp_path):
     remaining = sorted(p.name for p in tmp_path.glob("offer-params-flare-*.json"))
     assert remaining == ["offer-params-flare-422.json", "offer-params-flare-423.json"]
     assert (tmp_path / "offer-params-songbird-100.json").exists()
+
+
+# ---- the bottom-line verdict (proclamation + call to action) --------------------
+
+
+def test_verdict_healthy_proclaims_no_action():
+    h = _health(off_window=0)  # base has an off-window miss; clear it for the clean case
+    level, headline, actions = h.verdict()
+    assert level == "OK"
+    assert "HEALTHY" in headline and actions == []
+    out = _plain(render_protocol_report(h))
+    assert "VERDICT      : ✅ SYSTEM HEALTHY" in out
+    assert "→ ACTION" not in out  # nothing to do
+
+
+def test_verdict_not_registered_is_critical_with_action():
+    h = _health(registered=False)
+    level, headline, actions = h.verdict()
+    assert level == "CRIT"
+    assert "CRITICAL" in headline and "NOT REGISTERED" in headline
+    assert any("registerVoter" in a for a in actions)
+    out = _plain(render_protocol_report(h))
+    assert "VERDICT      : 🔴 SYSTEM CRITICAL" in out
+    assert "→ ACTION" in out
+
+
+def test_verdict_warn_isolated_miss_watches():
+    h = _health(off_window=1)  # base default: one off-window round → WARN
+    level, headline, actions = h.verdict()
+    assert level == "WARN"
+    assert "DEGRADED" in headline and "off-window" in headline
+    assert any("watch" in a.lower() for a in actions)
+
+
+def test_verdict_in_json_surface():
+    v = _health(off_window=0).to_dict()["verdict"]
+    assert v["level"] == "OK" and "HEALTHY" in v["headline"] and v["actions"] == []

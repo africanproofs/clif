@@ -217,11 +217,84 @@ class ObserveHealth:
             return "WARN"  # independent node disagrees — surface it (CRIT only if quorum_crit)
         return "OK"
 
+    def verdict(self) -> tuple[str, str, list[str]]:
+        """The bottom line — overall health as ONE proclamation plus a concrete call to action
+        when something needs attention. Returns `(level, headline, actions)`: `level` mirrors
+        `severity` (OK/WARN/CRIT); `actions` is empty when healthy. This is the single line an
+        operator (or agent) can read and act on without parsing the per-protocol block above;
+        each reason is paired with the specific fix, most-severe first."""
+        if not self.enabled:
+            return ("OK", f"observer disabled on {self.network} — nothing asserted", [])
+
+        net = self.network
+        sev = self.severity
+        reasons: list[str] = []
+        actions: list[str] = []
+
+        # CRIT causes — each plain reason paired with the fix. (When sev is OK/WARN these are all
+        # false by construction of `severity`, so nothing is added.)
+        if self.error is not None:
+            reasons.append(f"observer read error ({self.error})")
+            actions.append(f"check the observe RPC, then restart clif-observe-{net} — monitoring is BLIND")
+        if self.stale:
+            reasons.append(f"observer STALE — no status write for {int(self.age_sec or 0)}s")
+            actions.append(f"restart clif-observe-{net}; the engine stopped writing (flying blind)")
+        if self.disputed_facts:
+            reasons.append("independent node DISPUTES: " + ", ".join(self.disputed_facts))
+            if self.quorum_crit:
+                actions.append("reconcile against a third source before trusting these numbers")
+        if self.registered is False:
+            reasons.append(f"NOT REGISTERED for RE{self.reward_epoch} — every submission earns ZERO")
+            actions.append(f"check Submit gas + registerVoter NOW (REG line / clif-registration-{net})")
+        b = self.budget or {}
+        if b.get("severity") == "CRIT":
+            eta = f", ~{b['eta_rounds_to_breach']} rounds to breach" if b.get("eta_rounds_to_breach") else ""
+            reasons.append(f"minimal-conditions budget at risk — FTSO {b.get('rate_pct')}%{eta}")
+            actions.append("investigate missed rounds immediately — the 20% floor is in play")
+        if self.reveal_offences > 0:
+            reasons.append(f"REVEAL OFFENCE ×{self.reveal_offences} — lost reward + strike risk")
+            actions.append("investigate the value-provider / submit pipeline")
+        pct = self.participation_pct
+        if pct is not None and pct < _PARTICIPATION_CRIT_PCT:
+            reasons.append(f"FTSO participation {pct}% (< {_PARTICIPATION_CRIT_PCT:g}%)")
+            actions.append(f"confirm the voter is submitting on {net}")
+        fpct = self.fdc_participation_pct
+        if self.fdc_request_rounds >= 10 and fpct is not None and fpct < _FDC_CRIT_PCT:
+            reasons.append(f"FDC participation {fpct}% (< {_FDC_CRIT_PCT:g}%)")
+            actions.append("check the FDC bitvote path")
+
+        # WARN causes — only when nothing above already fired.
+        if sev == "WARN":
+            if self.window_rounds == 0:
+                reasons.append("warming up — no finalized round yet")
+            misses = []
+            if self.missing_submit1:
+                misses.append(f"submit1×{self.missing_submit1}")
+            if self.missing_submit2:
+                misses.append(f"submit2×{self.missing_submit2}")
+            if self.off_window:
+                misses.append(f"off-window×{self.off_window}")
+            if self.fdc_missing:
+                misses.append(f"FDC×{self.fdc_missing}")
+            if misses:
+                reasons.append("isolated miss — " + " ".join(misses))
+                actions.append("watch the next few rounds — not yet systemic")
+
+        if sev == "OK":
+            if self.stream_state == "catching_up":
+                return ("OK", f"⏳ CATCHING UP on {net} — verdict pending (data is REPLAYED, not live)", [])
+            return ("OK", f"✅ SYSTEM HEALTHY — all FSP protocols nominal on {net}, no action needed", [])
+        label, mark = ("CRITICAL", "🔴") if sev == "CRIT" else ("DEGRADED", "⚠")
+        joined = "; ".join(reasons) if reasons else "see the report above"
+        return (sev, f"{mark} SYSTEM {label} on {net} — {joined}", actions)
+
     def to_dict(self) -> dict:
+        _level, _headline, _actions = self.verdict()
         return {
             "network": self.network,
             "enabled": self.enabled,
             "severity": self.severity,
+            "verdict": {"level": _level, "headline": _headline, "actions": _actions},
             "written_at": self.written_at,
             "age_sec": (int(self.age_sec) if self.age_sec is not None else None),
             "stale": self.stale,
@@ -559,6 +632,14 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
             f"iqr-hist {r.get('iqr_hist', '?')} · fu-events {r.get('fu_events', '?')} · "
             f"rss {r.get('rss_mib', '?')} MiB"
         )
+
+    # ── Bottom line — the proclamation, and a call to action when needed. The one line to read.
+    level, headline, actions = h.verdict()
+    vc = _RED if level == "CRIT" else (_YELLOW if level == "WARN" else _GREEN)
+    lines.append(f"  {'─' * 64}")
+    lines.append(f"  VERDICT      : {vc}{headline}{_RESET}")
+    for a in actions:
+        lines.append(f"  → ACTION     : {vc}{a}{_RESET}")
     return lines
 
 
