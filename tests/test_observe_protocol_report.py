@@ -271,3 +271,29 @@ def test_verdict_warn_isolated_miss_watches():
 def test_verdict_in_json_surface():
     v = _health(off_window=0).to_dict()["verdict"]
     assert v["level"] == "OK" and "HEALTHY" in v["headline"] and v["actions"] == []
+
+
+# ---- recovery-aware verdict + cadence (a stale isolated miss self-clears) --------
+
+
+def test_recovering_after_enough_clean_rounds():
+    # Fresh isolated off-window miss, no clean rounds yet → active DEGRADED.
+    fresh = _health(off_window=1, trailing_clean=0)
+    assert fresh.severity == "WARN" and fresh.recovering is False
+    # Same miss still in the window, but the last 3 rounds are clean → RECOVERING.
+    recov = _health(off_window=1, trailing_clean=3)
+    assert recov.severity == "WARN" and recov.recovering is True
+    out = _plain(render_protocol_report(recov))
+    assert "VERDICT      : ✓ RECOVERING" in out and "self-clearing" in out
+    assert "→ ACTION" not in out  # nothing to do — it's aging out on its own
+
+
+def test_reveal_offence_never_recovering():
+    h = _health(off_window=0, reveal_offences=1, trailing_clean=10)
+    assert h.severity == "CRIT" and h.recovering is False
+
+
+def test_recovering_needs_isolated_miss_not_just_clean_rounds():
+    # A clean, fully-OK window is not "recovering" — there is nothing to recover from.
+    h = _health(off_window=0, trailing_clean=40)
+    assert h.severity == "OK" and h.recovering is False

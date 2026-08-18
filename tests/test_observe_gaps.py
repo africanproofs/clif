@@ -127,3 +127,14 @@ def test_report_interval_tightens_on_degradation():
     assert report_interval("OK", healthy_sec=3600, degraded_sec=300) == 3600
     assert report_interval("WARN", healthy_sec=3600, degraded_sec=300) == 300
     assert report_interval("CRIT", healthy_sec=3600, degraded_sec=300) == 300
+
+
+def test_report_interval_relaxes_when_recovering():
+    from clif.observe.engine import report_interval
+
+    # A recovering WARN (stale isolated miss, recent rounds clean) relaxes back to hourly;
+    # a fresh/active WARN or CRIT keeps the tight cadence.
+    assert report_interval("WARN", healthy_sec=3600, degraded_sec=300, recovering=True) == 3600
+    assert report_interval("WARN", healthy_sec=3600, degraded_sec=300, recovering=False) == 300
+    # CRIT stays tight (the `recovering` property is only ever True for a WARN, never a CRIT).
+    assert report_interval("CRIT", healthy_sec=3600, degraded_sec=300, recovering=False) == 300

@@ -42,10 +42,12 @@ def _blk_int(v) -> int:
     return int(str(v), 16)
 
 
-def report_interval(severity: str, *, healthy_sec: float, degraded_sec: float) -> float:
-    """The periodic-report cadence: `healthy_sec` when OK, else the tighter `degraded_sec` —
-    so a degradation (WARN/CRIT) is re-reported every few minutes until it clears back to OK."""
-    return healthy_sec if severity == "OK" else degraded_sec
+def report_interval(severity: str, *, healthy_sec: float, degraded_sec: float, recovering: bool = False) -> float:
+    """The periodic-report cadence: the tight `degraded_sec` only for an ACTIVE degradation, else
+    the relaxed `healthy_sec`. A `recovering` WARN (a stale isolated miss aging out of the window,
+    recent rounds clean) counts as resolved → relaxes back to hourly, so a single past blip does
+    not re-shout every few minutes for the whole ~1h window lifetime."""
+    return degraded_sec if (severity != "OK" and not recovering) else healthy_sec
 
 
 # keccak256("AttestationRequest(bytes,uint256)") — FdcHub's per-request event topic0.
@@ -329,13 +331,21 @@ def run_engine(
         # Adaptive cadence: hourly WHEN HEALTHY, but TIGHTEN to degraded_log_sec (5 min) while
         # severity != OK, so a degradation is re-reported every few minutes until it clears — then
         # it relaxes back to hourly. force=the startup seed always emits.
-        interval = report_interval(h.severity, healthy_sec=status_log_sec, degraded_sec=degraded_log_sec)
+        interval = report_interval(
+            h.severity, healthy_sec=status_log_sec, degraded_sec=degraded_log_sec, recovering=h.recovering,
+        )
         if not force and now - slog["last"] < interval:
             return
         slog["last"] = now
         # The explicit, per-protocol FSP health report (registration, FTSO commit/reveal/sigs,
-        # FDC, fast-updates, uptime, IQR) — logged at the overall-severity level.
-        lvl = log.error if h.severity == "CRIT" else (log.warning if h.severity == "WARN" else log.info)
+        # FDC, fast-updates, uptime, IQR) — logged at the overall-severity level, except a
+        # RECOVERING WARN (a stale isolated miss self-clearing) drops to INFO, not WARNING.
+        if h.severity == "CRIT":
+            lvl = log.error
+        elif h.severity == "WARN" and not h.recovering:
+            lvl = log.warning
+        else:
+            lvl = log.info
         for ln in render_protocol_report(h):
             lvl(ln)
         ep_hist = iqr["epoch"] if iqr["epoch"] is not None else reg["epoch"]

@@ -326,6 +326,14 @@ class ObserverState:
     def aggregates(self) -> dict:
         w = list(self.finalized)
         n = len(w)
+        # Consecutive clean rounds at the NEWEST end of the window — the recovery signal: a stale
+        # isolated miss still counted in the window, but the recent rounds are all clean again.
+        trailing_clean = 0
+        for r in reversed(w):
+            if r.clean:
+                trailing_clean += 1
+            else:
+                break
         # IQR rollup over the window (feed-rounds): inner = inside + ½·boundary (expected primary
         # rate under the boundary coin-flip); outer = pct-band hits. `capped` = Q3−Q1 ≤ 1 tick.
         iqr_fr = iqr_inside = iqr_boundary = iqr_pct = iqr_capped = 0
@@ -345,6 +353,7 @@ class ObserverState:
                     iqr_capped += 1
         return {
             "window_rounds": n,
+            "trailing_clean": trailing_clean,
             "complete": sum(1 for r in w if r.clean),
             "missing_submit1": sum(1 for r in w if not r.submit1_seen),
             "missing_submit2": sum(1 for r in w if r.submit1_seen and not r.submit2_seen),

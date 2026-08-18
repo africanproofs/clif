@@ -19,6 +19,7 @@ from clif.observe.gaps import hms
 _STALE_AFTER_SEC = 300  # no fresh status write in 5 min ⇒ the engine is dead → CRIT
 _PARTICIPATION_CRIT_PCT = 90.0  # sustained on-time completeness below this ⇒ CRIT
 _FDC_CRIT_PCT = 80.0  # the FDC minimal condition; sustained below this ⇒ CRIT
+_RECOVERED_CLEAN_ROUNDS = 3  # this many consecutive clean rounds ⇒ an isolated-miss WARN is recovering
 
 
 def build_status(
@@ -86,6 +87,7 @@ class ObserveHealth:
     delegation: dict | None = None  # live validator + FTSO delegation snapshot
     last_round_finalized: int | None = None
     window_rounds: int = 0
+    trailing_clean: int = 0  # consecutive clean rounds at the newest end of the window (recovery signal)
     complete: int = 0
     missing_submit1: int = 0
     missing_submit2: int = 0
@@ -217,6 +219,20 @@ class ObserveHealth:
             return "WARN"  # independent node disagrees — surface it (CRIT only if quorum_crit)
         return "OK"
 
+    @property
+    def recovering(self) -> bool:
+        """A WARN that is a STALE isolated miss aging out of the rolling window — the miss is still
+        counted, but the most recent rounds are all clean, so the problem is effectively resolved
+        (the window just hasn't slid past it). Lets the report relax its cadence back to hourly
+        instead of re-shouting a degradation every few minutes for the ~1h window lifetime. NEVER
+        for CRIT (a real, current problem), a still-warming window, or a disputed-quorum WARN."""
+        if self.severity != "WARN" or self.window_rounds == 0:
+            return False
+        isolated_miss = bool(
+            self.missing_submit1 or self.missing_submit2 or self.off_window or self.fdc_missing
+        )
+        return isolated_miss and self.trailing_clean >= _RECOVERED_CLEAN_ROUNDS
+
     def verdict(self) -> tuple[str, str, list[str]]:
         """The bottom line — overall health as ONE proclamation plus a concrete call to action
         when something needs attention. Returns `(level, headline, actions)`: `level` mirrors
@@ -284,6 +300,15 @@ class ObserveHealth:
             if self.stream_state == "catching_up":
                 return ("OK", f"⏳ CATCHING UP on {net} — verdict pending (data is REPLAYED, not live)", [])
             return ("OK", f"✅ SYSTEM HEALTHY — all FSP protocols nominal on {net}, no action needed", [])
+        if self.recovering:
+            # A stale isolated miss aging out of the window; recent rounds are clean → no action.
+            joined = "; ".join(reasons) if reasons else "isolated miss"
+            return (
+                sev,
+                f"✓ RECOVERING on {net} — {joined}; last {self.trailing_clean} rounds clean, "
+                f"aging out of the ~1h window (self-clearing)",
+                [],
+            )
         label, mark = ("CRITICAL", "🔴") if sev == "CRIT" else ("DEGRADED", "⚠")
         joined = "; ".join(reasons) if reasons else "see the report above"
         return (sev, f"{mark} SYSTEM {label} on {net} — {joined}", actions)
@@ -359,6 +384,7 @@ def observe_health_from_dict(d: dict, *, enabled_default: bool = True) -> Observ
         delegation=d.get("delegation"),
         last_round_finalized=d.get("last_round_finalized"),
         window_rounds=d.get("window_rounds", 0),
+        trailing_clean=d.get("trailing_clean", 0),
         complete=d.get("complete", 0),
         missing_submit1=d.get("missing_submit1", 0),
         missing_submit2=d.get("missing_submit2", 0),
