@@ -35,6 +35,7 @@ def build_status(
     uptime_verify: tuple | None = None, quorum_crit: bool = False,
     gaps: list | None = None, live_lag_blocks: int = 8,
     budget: dict | None = None, delegation: dict | None = None,
+    mincond: dict | None = None,
 ) -> dict:
     """The JSON the engine writes each cycle. `registered` = is AP in the registered voter
     set for the current reward epoch (None = not probed); when False, all the clean
@@ -52,6 +53,7 @@ def build_status(
         "live_lag_blocks": live_lag_blocks,
         "budget": budget,
         "delegation": delegation,
+        "mincond": mincond,  # per-epoch exact FDC + fast-updates (gap-free ledger)
         "last_round_finalized": state.last_round_finalized,
         "registered": registered,
         "reward_epoch": reward_epoch,
@@ -89,6 +91,7 @@ class ObserveHealth:
     live_lag_blocks: int = 8  # ≤ this behind head ⇒ LIVE; more ⇒ CATCHING UP
     budget: dict | None = None  # per-epoch FTSO miss-budget vs the 80% floor (read_ftso_budget)
     delegation: dict | None = None  # live validator + FTSO delegation snapshot
+    mincond: dict | None = None  # per-epoch exact FDC + fast-updates (gap-free ledger)
     last_round_finalized: int | None = None
     window_rounds: int = 0
     trailing_clean: int = 0  # consecutive clean rounds at the newest end of the window (recovery signal)
@@ -216,7 +219,10 @@ class ObserveHealth:
             return "CRIT"  # sustained non-participation — the RE423-family "not on-chain" signal
         fpct = self.fdc_participation_pct
         if self.fdc_request_rounds >= 10 and fpct is not None and fpct < _FDC_CRIT_PCT:
-            return "CRIT"  # sustained FDC non-participation — the FDC minimal condition (80%) at risk
+            return "CRIT"  # sustained FDC non-participation (rolling window) — early warning at 80%
+        mc = self.mincond or {}
+        if (mc.get("fdc_expected") or 0) >= 10 and mc.get("fdc_pct") is not None and mc["fdc_pct"] < _FDC_MIN_PCT:
+            return "CRIT"  # EXACT full-epoch FDC has breached the 60% minimal-condition floor
         if self.validator_node and self.uptime_pct is not None and self.uptime_pct < _UPTIME_MIN_PCT:
             return "CRIT"  # validator uptime below the 80% minimal-condition floor — staking reward risk
         if self.missing_submit1 or self.missing_submit2 or self.off_window or self.fdc_missing:
@@ -338,6 +344,7 @@ class ObserveHealth:
             "open_gaps": len(self.open_gaps),
             "budget": self.budget,
             "delegation": self.delegation,
+            "mincond": self.mincond,
             "last_round_finalized": self.last_round_finalized,
             "window_rounds": self.window_rounds,
             "complete": self.complete,
@@ -388,6 +395,7 @@ def observe_health_from_dict(d: dict, *, enabled_default: bool = True) -> Observ
         live_lag_blocks=d.get("live_lag_blocks", 8),
         budget=d.get("budget"),
         delegation=d.get("delegation"),
+        mincond=d.get("mincond"),
         last_round_finalized=d.get("last_round_finalized"),
         window_rounds=d.get("window_rounds", 0),
         trailing_clean=d.get("trailing_clean", 0),
@@ -594,13 +602,20 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
             f"{bc}FTSO {b['rate_pct']}% (≥{b['threshold_pct']} · {b['budget_left']}/{b['miss_budget']} budget"
             f" · proj {b['projected_final_pct']}%{eta}){_RESET}"
         )
-    if h.fdc_request_rounds:
+    mc = h.mincond or {}
+    fdc_ep = mc.get("fdc_pct")
+    if fdc_ep is not None:  # EXACT full-epoch, gap-free (the per-epoch ledger)
+        fc = _GREEN if fdc_ep >= _FDC_CRIT_PCT else (_YELLOW if fdc_ep >= _FDC_MIN_PCT else _RED)
+        conds.append(f"{fc}FDC {fdc_ep}% (≥{_FDC_MIN_PCT:g} · {mc.get('fdc_participated')}/{mc.get('fdc_expected')} epoch){_RESET}")
+    elif h.fdc_request_rounds:  # fall back to the rolling window until the ledger has data
         fp = h.fdc_participation_pct or 0.0
         fc = _GREEN if fp >= _FDC_CRIT_PCT else (_YELLOW if fp >= _FDC_MIN_PCT else _RED)
-        conds.append(f"{fc}FDC {h.fdc_participation_pct}% (≥{_FDC_MIN_PCT:g} · obs){_RESET}")
+        conds.append(f"{fc}FDC {h.fdc_participation_pct}% (≥{_FDC_MIN_PCT:g} · 1h obs){_RESET}")
     if h.validator_node and h.uptime_pct is not None:
         uc = _GREEN if h.uptime_pct >= _UPTIME_MIN_PCT else _RED
         conds.append(f"{uc}uptime {h.uptime_pct:g}% (≥{_UPTIME_MIN_PCT:g}){_RESET}")
+    if mc.get("fu_updates") is not None:  # cumulative epoch fast-updates (volume, not a hard floor)
+        conds.append(f"\033[2mFU {mc['fu_updates']} (epoch){_RESET}")
     if conds:
         prog = f"  [ep {b['rounds_elapsed']}/{b['rounds_total']}]" if b.get("rounds_total") else ""
         lines.append(f"  min-cond     : {' · '.join(conds)}{prog}")

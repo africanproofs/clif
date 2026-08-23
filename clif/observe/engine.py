@@ -31,6 +31,14 @@ from clif.observe.delegation import read_delegation
 from clif.observe.gaps import Gap, append_gap, hms, load_gaps, prune_gaps
 from clif.observe.iqr import build_voter_weight_map
 from clif.observe.iqr_history import append_tally, load_history, prune_history
+from clif.observe.mincond import (
+    append_record as mincond_append,
+    epoch_of,
+    epoch_tally,
+    from_round as mincond_from_round,
+    load_history as mincond_load,
+    prune_history as mincond_prune,
+)
 from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH, get_offer_params, prune_offer_cache
 from clif.observe.state import ObserverState
 from clif.observe.timing import voting_factory
@@ -80,8 +88,9 @@ def run_engine(
     registration_refresh_sec: float = 3600.0,  # registration changes per reward epoch (~3.5d)
     confirmations: int = 0,  # stay this many blocks behind the tip (finality defense-in-depth)
     live_lag_blocks: int = 8,  # ≤ this behind head ⇒ LIVE; more ⇒ CATCHING UP (backfilling an outage)
-    max_backfill_blocks: int = 0,  # outage longer than this ⇒ SKIP the backfill, re-seed near head (0 = unbounded)
+    max_backfill_blocks: int = 0,  # RETIRED (v0.5.84): the backfill never skips now — kept for compat
     gaps_file: str | None = None,  # persist the outage/backfill ledger (survives restart)
+    mincond_history_file: str | None = None,  # per-epoch minimal-conditions ledger (exact FDC + FU)
     status_log_sec: float = 3600.0,  # emit a rendered OBS status line to the log this often (+once seeded)
     degraded_log_sec: float = 300.0,  # …but tighten to this while severity != OK, until it clears back to OK
     fdc_hub: str | None = None,  # FdcHub address — enables FDC participation tracking when set
@@ -173,6 +182,10 @@ def run_engine(
     # (validator + FTSO) — both slow-changing, refreshed hourly. Best-effort; a failure keeps last.
     bud: dict = {"data": None, "checked": 0.0}
     deleg: dict = {"data": None, "checked": 0.0}
+    # Per-epoch minimal-conditions ledger (exact FDC + fast-updates, gap-free). In-memory {rid:
+    # RoundRecord}, seeded from disk on start; `mincond_epoch` tracks the epoch we've announced.
+    mincond_recs: dict = {}
+    mincond_epoch: dict = {"e": None}
 
     def _refresh_budget(now: float) -> None:
         if bud["checked"] and now - bud["checked"] < registration_refresh_sec:
@@ -304,6 +317,7 @@ def run_engine(
                     bts = ts_map.get(_blk_int(lv.get("blockNumber", "0x0")))
                     if bts is not None:
                         state.record_fast_update(bts)
+                        state.record_round_fu(factory.from_timestamp(bts).id)  # per-epoch FU tracker
             except RpcError:
                 pass
 
@@ -316,6 +330,7 @@ def run_engine(
             uptime_verify=up.get("verify"), quorum_crit=quorum_crit,
             gaps=[asdict(g) for g in gap_list[-8:]], live_lag_blocks=live_lag_blocks,
             budget=bud["data"], delegation=deleg["data"],
+            mincond=(epoch_tally(mincond_recs, epoch=reg["epoch"]) if reg["epoch"] is not None else None),
         )
 
     # Periodic self-report: the observer otherwise only logs issues, so its participation +
@@ -358,6 +373,11 @@ def run_engine(
             prune_offer_cache(iqr_cache_dir, network, ep_hist)
         if gaps_file:  # bound the outage ledger to ~7 days
             prune_gaps(Path(gaps_file), now=int(now))
+        if mincond_history_file and reg["epoch"] is not None:  # keep current + prior epoch only
+            prune_mincond_recs = {k: v for k, v in mincond_recs.items() if epoch_of(k) >= reg["epoch"] - 1}
+            mincond_recs.clear()
+            mincond_recs.update(prune_mincond_recs)
+            mincond_prune(Path(mincond_history_file), reward_epoch=reg["epoch"])
 
     # Write a status immediately so `observe status` shows "warming up", not a missing-file CRIT.
     state.last_block = cursor
@@ -380,6 +400,16 @@ def run_engine(
             log.info(
                 "\033[38;5;208m OBS\033[0m IQR history seeded: %d rounds from %s",
                 len(state.iqr_history), iqr_history_file,
+            )
+    # Seed the per-epoch minimal-conditions ledger (exact FDC + fast-updates) from disk so the
+    # epoch totals survive a restart; scope to the current + prior reward epoch.
+    if mincond_history_file:
+        mincond_recs.update(mincond_load(Path(mincond_history_file), reward_epoch=reg["epoch"]))
+        mincond_epoch["e"] = reg["epoch"]
+        if log and mincond_recs:
+            log.info(
+                "\033[38;5;208m OBS\033[0m min-conditions ledger seeded: %d rounds (reward epoch %s) from %s",
+                len(mincond_recs), reg["epoch"], mincond_history_file,
             )
     # Outage/backfill ledger — records each outage so the surface can say LIVE vs CATCHING UP
     # unambiguously and tabulate what was replayed. `catching_up` gates the backfill-progress logs.
@@ -415,33 +445,23 @@ def run_engine(
             rec_now = int(time.time())
             from_block = state.last_block or cursor
             lag = head - from_block
-            # Cap the backfill: replaying hours of old rounds is slow AND pointless (they scroll out
-            # of the ~1h window; participation is still covered by the nonce budget). Beyond the cap,
-            # SKIP forward and re-seed near head, recording the skip in the gap ledger.
-            skipped = bool(max_backfill_blocks and lag > max_backfill_blocks)
+            # NEVER skip — the per-epoch minimal-conditions ledger requires EXACT, gap-free
+            # coverage, so we replay every block of the outage no matter how long (the expensive
+            # all-voter IQR decode is already skipped while `catching_up`, so the replay is cheap:
+            # block fetch + AP's own txs + chunked FDC/FU get_logs). The live window catches up
+            # honestly as CATCHING UP; the money-path voter is unaffected regardless.
             g = Gap(
                 start=int(hf["since"]), end=rec_now, dur=rec_now - int(hf["since"]),
-                fails=int(hf["count"]), from_block=from_block, to_block=head, skipped=skipped,
+                fails=int(hf["count"]), from_block=from_block, to_block=head, skipped=False,
             )
             gap_list.append(g)
             if gaps_file:
                 append_gap(Path(gaps_file), g)
-            if skipped:
-                new_cursor = head - lookback_blocks
-                _fb = rpc.get_block(new_cursor, full_transactions=False)
-                state.observe_start_ts = _blk_int(_fb.get("timestamp", "0x0")) if _fb else start_ts
-                cursor, scan_lo, ts_map = new_cursor, new_cursor, {}
-                if log:
-                    log.warning(
-                        "\033[38;5;208m OBS\033[0m ⏭ outage %s too long — SKIPPING backfill of %d blocks "
-                        "(%d→%d); re-seeding near head. FTSO participation still tracked via the budget.",
-                        hms(g.dur), lag, from_block + 1, head,
-                    )
-            elif log:
+            if log:
                 log.info(
-                    "\033[32m✓ observe RPC recovered after %s (%d fail(s)) — backfilling blocks "
-                    "%d→%d (%d blocks, ~%d rounds)\033[0m",
-                    hms(g.dur), g.fails, from_block + 1, head, lag, g.dur // 90 or 1,
+                    "\033[32m✓ observe RPC recovered after %s (%d fail(s)) — backfilling ALL "
+                    "%d blocks %d→%d (~%d rounds; exact FDC/FU coverage)\033[0m",
+                    hms(g.dur), g.fails, lag, from_block + 1, head, lag // 90 or 1,
                 )
             catching_up = head - cursor > live_lag_blocks
             hf = {"since": 0.0, "count": 0, "last_log": 0.0}
@@ -502,6 +522,20 @@ def run_engine(
                     lvl("\033[38;5;208m OBS\033[0m round %s: %s", rs.round_id, "; ".join(rs.issues))
                 if iqr_history_file and rs.iqr_tally is not None and rs.iqr_tally_new:
                     append_tally(Path(iqr_history_file), rs.iqr_tally)
+                # Per-epoch minimal-conditions ledger: record every finalized round (deduped by
+                # rid), so FDC + fast-updates are EXACT full-epoch and gap-free — even a round
+                # replayed after a long outage lands here (the backfill no longer skips).
+                if mincond_history_file and rs.round_id not in mincond_recs:
+                    re = epoch_of(rs.round_id)
+                    if mincond_epoch["e"] is None or re > mincond_epoch["e"]:
+                        mincond_epoch["e"] = re
+                        if log:
+                            log.info(
+                                "\033[38;5;208m OBS\033[0m min-conditions: reward epoch %d tracker started", re,
+                            )
+                    rec = mincond_from_round(rs)
+                    mincond_recs[rs.round_id] = rec
+                    mincond_append(Path(mincond_history_file), rec)
             cursor += 1
             processed += 1
             since_status += 1

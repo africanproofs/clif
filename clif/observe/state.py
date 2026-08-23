@@ -43,6 +43,7 @@ class RoundState:
     fdc_num_requests_claimed: int | None = None
     fdc_sig_seen: bool = False  # AP submitted an FDC signature (submitSignatures.fdc)
     fdc_gap: bool = False  # set at finalize: requests existed but we didn't bitvote
+    fu_count: int = 0  # fast-update (255) submissions attributed to this round (per-epoch tracker)
     # IQR reward-band scoring (Phase 2 — quality, not liveness). Transient per-round: all
     # registered voters' reveals accumulate here, AP's own values kept aside, both consumed at
     # finalize into `iqr_results` (then the raw votes are dropped to bound memory).
@@ -218,6 +219,11 @@ class ObserverState:
     def record_fast_update(self, ts: int) -> None:
         """One AP FastUpdateFeedsSubmitted event observed at block time `ts` (protocol 255)."""
         self.fu_events.append(ts)
+
+    def record_round_fu(self, round_id: int) -> None:
+        """Attribute one fast-update submission to `round_id` (its block's voting round) — the
+        per-round, per-epoch fast-update count that survives restarts via the mincond ledger."""
+        self._round(round_id).fu_count += 1
 
     def windowed_fastupdates(self, now_ts: int) -> dict:
         """AP fast-update counts over 1h / 6h / 24h from the rolling event log."""

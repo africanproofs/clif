@@ -313,11 +313,31 @@ def _mc_line(h):
 
 
 def test_min_conditions_panel_shows_all_three_gates():
+    # No per-epoch ledger yet ⇒ FDC falls back to the rolling window (`1h obs`), no FU epoch line.
     line = _mc_line(_health(budget=_MC_BUDGET, off_window=0))
     assert "FTSO 99.8% (≥80" in line and "667/672 budget" in line
-    assert "FDC" in line and "(≥60 · obs)" in line
+    assert "FDC" in line and "(≥60 · 1h obs)" in line
     assert "uptime" in line and "(≥80)" in line
     assert "[ep 2992/3360]" in line
+
+
+_MC_EPOCH = {"epoch": 426, "rounds_recorded": 900, "fdc_expected": 225,
+             "fdc_participated": 224, "fdc_pct": 99.6, "fu_updates": 1200}
+
+
+def test_min_conditions_uses_exact_epoch_ledger_for_fdc_and_fu():
+    line = _mc_line(_health(budget=_MC_BUDGET, off_window=0, mincond=_MC_EPOCH))
+    assert "FDC 99.6% (≥60 · 224/225 epoch)" in line  # EXACT full-epoch, not the 1h window
+    assert "FU 1200 (epoch)" in line                   # cumulative epoch fast-updates
+    assert "1h obs" not in line                         # the window fallback is not used
+
+
+def test_exact_epoch_fdc_breach_is_critical():
+    breach = {**_MC_EPOCH, "fdc_expected": 100, "fdc_participated": 55, "fdc_pct": 55.0}  # < 60 floor
+    assert _health(off_window=0, mincond=breach).severity == "CRIT"
+    # …but a small sample (<10 expected) does not trip it (noise guard).
+    tiny = {**_MC_EPOCH, "fdc_expected": 3, "fdc_participated": 0, "fdc_pct": 0.0}
+    assert _health(off_window=0, mincond=tiny).severity == "OK"
 
 
 def test_uptime_breach_below_floor_is_critical():
@@ -331,7 +351,7 @@ def test_min_conditions_omits_uptime_gate_without_a_validator():
     assert "FTSO" in line and "FDC" in line and "uptime" not in line  # songbird: no validator gate
 
 
-def test_fast_updates_not_in_min_conditions_panel():
-    # Fast-updates is a separate reward stream, not a minimal-condition gate.
-    line = _mc_line(_health(budget=_MC_BUDGET, off_window=0))
-    assert "FastUpd" not in line and "255" not in line
+def test_fast_updates_shown_as_volume_not_a_pass_fail_floor():
+    # Fast-updates is tracked per-epoch (cumulative count) but has no ≥floor — a volume metric.
+    line = _mc_line(_health(budget=_MC_BUDGET, off_window=0, mincond=_MC_EPOCH))
+    assert "FU 1200 (epoch)" in line and "FU 1200 (epoch) (≥" not in line

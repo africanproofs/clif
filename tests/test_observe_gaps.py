@@ -87,10 +87,12 @@ def test_run_engine_startup_writes_status_without_crashing(tmp_path):
         rpc=_FakeRpc(), network="flare", submission_address="0x" + "1" * 40,
         our_submit="0x" + "a" * 40, our_sig="0x" + "b" * 40,
         status_writer=statuses.append, lookback_blocks=5, poll_sec=0.01,
-        gaps_file=str(tmp_path / "g.jsonl"), live_lag_blocks=8, iqr_enabled=False,
-        _max_blocks=3, log=None,
+        gaps_file=str(tmp_path / "g.jsonl"),
+        mincond_history_file=str(tmp_path / "mc.jsonl"),  # exercise the ledger seed + _status path
+        live_lag_blocks=8, iqr_enabled=False, _max_blocks=3, log=None,
     )
     assert statuses and "gaps" in statuses[-1] and "head" in statuses[-1]
+    assert "mincond" in statuses[-1]  # the per-epoch tracker field is wired into the status
 
 
 def test_skipped_gap_not_open_and_rendered_as_skipped():

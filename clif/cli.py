@@ -2867,6 +2867,7 @@ def observe_run() -> None:
             validator_node_id=s.net.validator_node_id or None,
             delegation_addr=accts.get("Delegation"),
             deleg_history_file=str(s.observe_deleg_history_file),
+            mincond_history_file=str(s.observe_mincond_history_file),
             entity_manager=s.net.entity_manager,
             verify_rpc_url=(s.verify_rpc_url if s.quorum_enabled else None),
             quorum_crit=s.observe_quorum_crit,
