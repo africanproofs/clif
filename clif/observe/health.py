@@ -18,8 +18,12 @@ from clif.observe.gaps import hms
 
 _STALE_AFTER_SEC = 300  # no fresh status write in 5 min ⇒ the engine is dead → CRIT
 _PARTICIPATION_CRIT_PCT = 90.0  # sustained on-time completeness below this ⇒ CRIT
-_FDC_CRIT_PCT = 80.0  # the FDC minimal condition; sustained below this ⇒ CRIT
+_FDC_CRIT_PCT = 80.0  # sustained FDC participation below this ⇒ CRIT (a margin over the 60% floor)
 _RECOVERED_CLEAN_ROUNDS = 3  # this many consecutive clean rounds ⇒ an isolated-miss WARN is recovering
+# Reward-eligibility floors for the minimal-conditions panel (the published minimal-conditions.json).
+_FTSO_MIN_PCT = 80.0
+_FDC_MIN_PCT = 60.0
+_UPTIME_MIN_PCT = 80.0
 
 
 def build_status(
@@ -213,6 +217,8 @@ class ObserveHealth:
         fpct = self.fdc_participation_pct
         if self.fdc_request_rounds >= 10 and fpct is not None and fpct < _FDC_CRIT_PCT:
             return "CRIT"  # sustained FDC non-participation — the FDC minimal condition (80%) at risk
+        if self.validator_node and self.uptime_pct is not None and self.uptime_pct < _UPTIME_MIN_PCT:
+            return "CRIT"  # validator uptime below the 80% minimal-condition floor — staking reward risk
         if self.missing_submit1 or self.missing_submit2 or self.off_window or self.fdc_missing:
             return "WARN"  # isolated miss / off-window / FDC gap — worth a look, not yet systemic
         if self.disputed_facts:
@@ -574,17 +580,30 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
     elif qs == "unavailable":
         lines.append(f"  quorum       : {_YELLOW}· verify node unavailable{_RESET} ({h.verify_host})")
 
-    # Minimal-conditions budget — the "cannot breach 20%" tracker (FTSO submission, full-epoch).
+    # Minimal-conditions panel — the reward-eligibility floors this epoch, one line: FTSO ≥80 (the
+    # "cannot breach 20%" tracker, full-epoch via the Submit nonce delta — restart-proof), FDC ≥60
+    # (observed window — bitvotes ride inside submit2, not nonce-countable, so it is NOT full-epoch),
+    # uptime ≥80 (P-chain point-in-time). Each metric coloured by its own standing. Fast-updates is
+    # NOT a minimal condition (a separate reward stream) — it keeps its own line above.
     b = h.budget or {}
+    conds = []
     if b.get("rate_pct") is not None:
         bc = _RED if b["severity"] == "CRIT" else (_YELLOW if b["severity"] == "WARN" else _GREEN)
-        eta = f" · breach ETA ~{b['eta_rounds_to_breach']} rounds" if b.get("eta_rounds_to_breach") else ""
-        lines.append(
-            f"  budget       : {bc}FTSO {b['rate_pct']}% (≥{b['threshold_pct']}) · "
-            f"{b['budget_left']}/{b['miss_budget']} miss-budget left ({b['budget_left_pct']}%) · "
-            f"projected {b['projected_final_pct']}%{eta}{_RESET} "
-            f"[{b['rounds_elapsed']}/{b['rounds_total']} rounds]"
+        eta = f" · ETA ~{b['eta_rounds_to_breach']}r" if b.get("eta_rounds_to_breach") else ""
+        conds.append(
+            f"{bc}FTSO {b['rate_pct']}% (≥{b['threshold_pct']} · {b['budget_left']}/{b['miss_budget']} budget"
+            f" · proj {b['projected_final_pct']}%{eta}){_RESET}"
         )
+    if h.fdc_request_rounds:
+        fp = h.fdc_participation_pct or 0.0
+        fc = _GREEN if fp >= _FDC_CRIT_PCT else (_YELLOW if fp >= _FDC_MIN_PCT else _RED)
+        conds.append(f"{fc}FDC {h.fdc_participation_pct}% (≥{_FDC_MIN_PCT:g} · obs){_RESET}")
+    if h.validator_node and h.uptime_pct is not None:
+        uc = _GREEN if h.uptime_pct >= _UPTIME_MIN_PCT else _RED
+        conds.append(f"{uc}uptime {h.uptime_pct:g}% (≥{_UPTIME_MIN_PCT:g}){_RESET}")
+    if conds:
+        prog = f"  [ep {b['rounds_elapsed']}/{b['rounds_total']}]" if b.get("rounds_total") else ""
+        lines.append(f"  min-cond     : {' · '.join(conds)}{prog}")
 
     # Live delegation — validator (P-chain) + FTSO (WNat vote power).
     d = h.delegation or {}

@@ -59,13 +59,13 @@ def test_budget_line_and_severity():
     healthy = {"epoch": 424, "rounds_elapsed": 2348, "rounds_total": 3360, "ftso_submitted": 2348,
                **budget_status(1.0, 2348, 3360, FTSO_MIN)}
     out = _plain(render_protocol_report(_h(budget=healthy)))
-    assert "budget       : FTSO 100.0% (≥80) · 672/672 miss-budget left (100.0%)" in out
+    assert "min-cond     : FTSO 100.0% (≥80 · 672/672 budget · proj 100.0%)" in out
 
     breaching = {"epoch": 424, "rounds_elapsed": 1000, "rounds_total": 3360, "ftso_submitted": 750,
                  **budget_status(0.75, 1000, 3360, FTSO_MIN)}
     h = _h(budget=breaching)
     assert h.severity == "CRIT"  # budget CRIT drives the report CRIT
-    assert "projected 75.0%" in _plain(render_protocol_report(h))
+    assert "proj 75.0%" in _plain(render_protocol_report(h))
 
 
 def test_delegation_line():

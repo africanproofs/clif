@@ -297,3 +297,41 @@ def test_recovering_needs_isolated_miss_not_just_clean_rounds():
     # A clean, fully-OK window is not "recovering" — there is nothing to recover from.
     h = _health(off_window=0, trailing_clean=40)
     assert h.severity == "OK" and h.recovering is False
+
+
+# ---- minimal-conditions panel (FTSO / FDC / uptime gates in one line) -----------
+
+_MC_BUDGET = {
+    "rate_pct": 99.8, "threshold_pct": 80, "budget_left": 667, "miss_budget": 672,
+    "budget_left_pct": 99.3, "projected_final_pct": 99.8, "eta_rounds_to_breach": None,
+    "rounds_elapsed": 2992, "rounds_total": 3360, "severity": "OK",
+}
+
+
+def _mc_line(h):
+    return next((ln for ln in _plain(render_protocol_report(h)).splitlines() if "min-cond" in ln), "")
+
+
+def test_min_conditions_panel_shows_all_three_gates():
+    line = _mc_line(_health(budget=_MC_BUDGET, off_window=0))
+    assert "FTSO 99.8% (≥80" in line and "667/672 budget" in line
+    assert "FDC" in line and "(≥60 · obs)" in line
+    assert "uptime" in line and "(≥80)" in line
+    assert "[ep 2992/3360]" in line
+
+
+def test_uptime_breach_below_floor_is_critical():
+    h = _health(off_window=0, uptime_pct=70.0)  # < 80 minimal-condition floor
+    assert h.severity == "CRIT"
+    assert _health(off_window=0, uptime_pct=99.99).severity == "OK"  # healthy uptime does not
+
+
+def test_min_conditions_omits_uptime_gate_without_a_validator():
+    line = _mc_line(_health(budget=_MC_BUDGET, off_window=0, validator_node=None))
+    assert "FTSO" in line and "FDC" in line and "uptime" not in line  # songbird: no validator gate
+
+
+def test_fast_updates_not_in_min_conditions_panel():
+    # Fast-updates is a separate reward stream, not a minimal-condition gate.
+    line = _mc_line(_health(budget=_MC_BUDGET, off_window=0))
+    assert "FastUpd" not in line and "255" not in line
