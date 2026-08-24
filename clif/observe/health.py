@@ -15,6 +15,7 @@ from pathlib import Path
 
 from clif.funding import _BADGE_OBS, _GREEN, _RED, _RESET, _YELLOW
 from clif.observe.gaps import hms
+from clif.observe.mincond import format_penalty as _penalty_str
 from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH
 
 _DIM = "\033[2m"
@@ -628,15 +629,6 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
     if conds:
         prog = f"  [ep {b['rounds_elapsed']}/{b['rounds_total']}]" if b.get("rounds_total") else ""
         lines.append(f"  min-cond     : {' · '.join(conds)}{prog}")
-    # Reveal-offence penalty — persists the WHOLE epoch (from the ledger, not the 1h window), because
-    # the 30-round burn is locked in the moment a commit goes unrevealed. 30 reward-rounds each.
-    ro = mc.get("reveal_offences") or 0
-    if ro:
-        lines.append(
-            f"  penalty      : {_RED}‼ {ro} REVEAL OFFENCE{'S' if ro > 1 else ''} this epoch — "
-            f"est. −{mc.get('penalty_reward_rounds')} reward-rounds burned "
-            f"(~{mc.get('penalty_pct_of_epoch')}% of the epoch's FTSO reward){_RESET}"
-        )
 
     # Live delegation — validator (P-chain) + FTSO (WNat vote power).
     d = h.delegation or {}
@@ -763,6 +755,7 @@ def _fmt_ranges(ranges: list, total: int) -> str:
 def render_epoch_closeout(
     tally: dict, *, uptime_pct: float | None, network: str, blocks_scanned: int | None = None,
     gap_ranges: list | None = None, gap_total: int = 0, ftso: dict | None = None,
+    ftso_round_reward_flr: float = 0.0,
 ) -> list[str]:
     """The epoch-CLOSE-OUT ceremony — the final minimal-conditions report card for the epoch that
     just ended, with a PASS/BREACH verdict per gate. Driven by the exact per-epoch ledger."""
@@ -802,9 +795,8 @@ def render_epoch_closeout(
         f"{_BADGE_OBS}   {dc}FDC     {fdc_pct}% (≥{_FDC_MIN_PCT:g})  {ds}{_RESET}   [{tally.get('fdc_participated')}/{tally.get('fdc_expected')} request-rounds]",
         f"{_BADGE_OBS}   {uc}uptime  {up_s}% (≥{_UPTIME_MIN_PCT:g})  {us}{_RESET}",
         f"{_BADGE_OBS}   {_DIM}FastUpd {tally.get('fu_updates')} updates (epoch total){_RESET}",
-        *([f"{_BADGE_OBS}   {_RED}‼ reveal offences {tally.get('reveal_offences')} — "
-           f"est. penalty −{tally.get('penalty_reward_rounds')} reward-rounds burned "
-           f"(~{tally.get('penalty_pct_of_epoch')}% of epoch FTSO reward){_RESET}"]
+        *([f"{_BADGE_OBS}   {_RED}‼ reveal-offence penalty — "
+           f"{_penalty_str(tally.get('reveal_offences') or 0, per_round_reward_flr=ftso_round_reward_flr)}{_RESET}"]
           if tally.get("reveal_offences") else []),
         f"{_BADGE_OBS}   {_DIM}processed {tally.get('rounds_recorded')} voting rounds"
         + (f" · {blocks_scanned} blocks scanned" if blocks_scanned is not None else "")

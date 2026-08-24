@@ -2855,6 +2855,7 @@ def observe_run() -> None:
             status_writer=lambda d: write_status_atomic(s.observe_status_file, d),
             prior_last_block=prior_last_block,
             resume_max_blocks=s.observe_resume_max_blocks,
+            ftso_round_reward_flr=s.observe_ftso_round_reward_flr,
             lookback_blocks=s.observe_lookback_blocks,
             window_rounds=s.observe_window_rounds,
             poll_sec=s.observe_poll_sec,

@@ -35,10 +35,12 @@ from clif.observe.gaps import Gap, append_gap, hms, load_gaps, prune_gaps
 from clif.observe.iqr import build_voter_weight_map
 from clif.observe.iqr_history import append_tally, load_history, prune_history
 from clif.observe.mincond import (
+    REVEAL_OFFENCE_PENALTY_ROUNDS,
     append_record as mincond_append,
     epoch_gap_ranges,
     epoch_of,
     epoch_tally,
+    format_penalty,
     from_round as mincond_from_round,
     load_history as mincond_load,
     prune_history as mincond_prune,
@@ -115,6 +117,7 @@ def run_engine(
     mincond_history_file: str | None = None,  # per-epoch minimal-conditions ledger (exact FDC + FU)
     prior_last_block: int | None = None,  # last block the previous run processed → resume gap-free
     resume_max_blocks: int = 200_000,  # cap how far back a restart resumes (0 = uncapped); ~4 days
+    ftso_round_reward_flr: float = 0.0,  # AP's per-round FTSO reward (FLR) → reveal-offence cost log in FLR
     status_log_sec: float = 3600.0,  # emit a rendered OBS status line to the log this often (+once seeded)
     degraded_log_sec: float = 300.0,  # …but tighten to this while severity != OK, until it clears back to OK
     fdc_hub: str | None = None,  # FdcHub address — enables FDC participation tracking when set
@@ -589,6 +592,7 @@ def run_engine(
                                     epoch_tally(mincond_recs, epoch=old), uptime_pct=up["pct"],
                                     network=network, blocks_scanned=mincond_blocks["n"],
                                     gap_ranges=_gr, gap_total=_gt, ftso=bud["data"],
+                                    ftso_round_reward_flr=ftso_round_reward_flr,
                                 ):
                                     log.info(_ln)
                             for _ln in render_epoch_open(re, network=network):
@@ -599,6 +603,16 @@ def run_engine(
                         rec.ro = 0  # reveal-offence detection is unreliable on backfilled (pruned) blocks
                     mincond_recs[rs.round_id] = rec
                     mincond_append(Path(mincond_history_file), rec)
+                    if rec.ro and log:  # a confirmed (live) reveal offence — LOG its accumulated cost
+                        ep_off = sum(r.ro for r in mincond_recs.values() if epoch_of(r.rid) == re)
+                        one = (f" ≈ {REVEAL_OFFENCE_PENALTY_ROUNDS * ftso_round_reward_flr:,.1f} FLR"
+                               if ftso_round_reward_flr > 0 else "")
+                        log.error(
+                            "\033[1;31m OBS ‼ REVEAL OFFENCE round %d · %s — burns %d reward-rounds%s · "
+                            "epoch %d penalty to date: %s\033[0m",
+                            rs.round_id, network, REVEAL_OFFENCE_PENALTY_ROUNDS, one, re,
+                            format_penalty(ep_off, per_round_reward_flr=ftso_round_reward_flr),
+                        )
             cursor += 1
             processed += 1
             since_status += 1

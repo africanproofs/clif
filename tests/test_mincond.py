@@ -228,16 +228,16 @@ def test_reveal_offence_penalty_estimate():
     assert t["reveal_offences"] == 2
     assert t["penalty_reward_rounds"] == 60                      # 2 × 30 rounds
     assert t["penalty_pct_of_epoch"] == round(100*60/VRS, 2)     # ~1.79% of the epoch
-    # persists in the live panel + close-out
-    from clif.observe.health import ObserveHealth, render_protocol_report, render_epoch_closeout
-    h = ObserveHealth(network="flare", enabled=True, window_rounds=40, complete=40, registered=True,
-                      last_block=1, head=2, reward_epoch=e, mincond=t)
-    panel = _plain(render_protocol_report(h))
-    assert "penalty" in panel and "2 REVEAL OFFENCES" in panel and "60 reward-rounds" in panel
-    assert "reveal offences 2" in _plain(render_epoch_closeout(t, uptime_pct=99.99, network="flare"))
-    # a clean epoch shows no penalty line
+
+    from clif.observe.mincond import format_penalty
+    # accumulated-cost string: reward-rounds + %, and FLR only when the per-round reward is set
+    assert format_penalty(2) == "2 offence(s) · −60 reward-rounds burned (~1.79% of epoch FTSO reward)"
+    assert "≈ 6,000.0 FLR" in format_penalty(2, per_round_reward_flr=100.0)
+
+    # the close-out reports the accumulated cost; a clean epoch reports nothing
+    from clif.observe.health import render_epoch_closeout
+    out = _plain(render_epoch_closeout(t, uptime_pct=99.99, network="flare", ftso_round_reward_flr=100.0))
+    assert "reveal-offence penalty — 2 offence(s) · −60 reward-rounds ≈ 6,000.0 FLR" in out
     clean = epoch_tally({rid: RoundRecord(rid, s2=1) for rid in range(e*VRS, e*VRS+10)}, epoch=e)
-    assert clean["reveal_offences"] == 0 and clean["penalty_reward_rounds"] == 0
-    assert "penalty" not in _plain(render_protocol_report(
-        ObserveHealth(network="flare", enabled=True, window_rounds=40, complete=40, registered=True,
-                      last_block=1, head=2, reward_epoch=e, mincond=clean)))
+    assert clean["reveal_offences"] == 0
+    assert "reveal-offence penalty" not in _plain(render_epoch_closeout(clean, uptime_pct=99.99, network="flare"))

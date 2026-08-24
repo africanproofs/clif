@@ -158,6 +158,16 @@ def epoch_tally(records: dict[int, RoundRecord] | list[RoundRecord], *, epoch: i
     }
 
 
+def format_penalty(offences: int, *, per_round_reward_flr: float = 0.0) -> str:
+    """The accumulated reveal-offence cost as a string: reward-rounds burned + % of the epoch's
+    reward, and (if the operator has set a per-round reward) the estimated FLR figure. Each offence
+    burns 30 reward-rounds, capped at the whole-epoch reward."""
+    rounds = min(VRS_PER_REWARD_EPOCH, offences * REVEAL_OFFENCE_PENALTY_ROUNDS)
+    pct = round(min(100.0, 100.0 * rounds / VRS_PER_REWARD_EPOCH), 2)
+    flr = f" ≈ {rounds * per_round_reward_flr:,.1f} FLR" if per_round_reward_flr > 0 else ""
+    return f"{offences} offence(s) · −{rounds} reward-rounds{flr} burned (~{pct}% of epoch FTSO reward)"
+
+
 def epoch_gap_ranges(
     records: dict[int, RoundRecord] | list[RoundRecord], *, epoch: int, limit: int = 6
 ) -> tuple[list[tuple[int, int]], int]:
