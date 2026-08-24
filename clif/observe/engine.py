@@ -367,6 +367,7 @@ def run_engine(
             gaps=[asdict(g) for g in gap_list[-8:]], live_lag_blocks=live_lag_blocks,
             budget=bud["data"], delegation=deleg["data"],
             mincond=(epoch_tally(mincond_recs, epoch=reg["epoch"]) if reg["epoch"] is not None else None),
+            ftso_round_reward_flr=ftso_round_reward_flr,
         )
 
     # Periodic self-report: the observer otherwise only logs issues, so its participation +

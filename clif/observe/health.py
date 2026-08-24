@@ -39,7 +39,7 @@ def build_status(
     uptime_verify: tuple | None = None, quorum_crit: bool = False,
     gaps: list | None = None, live_lag_blocks: int = 8,
     budget: dict | None = None, delegation: dict | None = None,
-    mincond: dict | None = None,
+    mincond: dict | None = None, ftso_round_reward_flr: float = 0.0,
 ) -> dict:
     """The JSON the engine writes each cycle. `registered` = is AP in the registered voter
     set for the current reward epoch (None = not probed); when False, all the clean
@@ -58,6 +58,7 @@ def build_status(
         "budget": budget,
         "delegation": delegation,
         "mincond": mincond,  # per-epoch exact FDC + fast-updates (gap-free ledger)
+        "ftso_round_reward_flr": ftso_round_reward_flr,
         "last_round_finalized": state.last_round_finalized,
         "registered": registered,
         "reward_epoch": reward_epoch,
@@ -96,6 +97,7 @@ class ObserveHealth:
     budget: dict | None = None  # per-epoch FTSO miss-budget vs the 80% floor (read_ftso_budget)
     delegation: dict | None = None  # live validator + FTSO delegation snapshot
     mincond: dict | None = None  # per-epoch exact FDC + fast-updates (gap-free ledger)
+    ftso_round_reward_flr: float = 0.0  # AP per-round FTSO reward (FLR) — for the reveal-offence cost
     last_round_finalized: int | None = None
     window_rounds: int = 0
     trailing_clean: int = 0  # consecutive clean rounds at the newest end of the window (recovery signal)
@@ -404,6 +406,7 @@ def observe_health_from_dict(d: dict, *, enabled_default: bool = True) -> Observ
         budget=d.get("budget"),
         delegation=d.get("delegation"),
         mincond=d.get("mincond"),
+        ftso_round_reward_flr=d.get("ftso_round_reward_flr", 0.0),
         last_round_finalized=d.get("last_round_finalized"),
         window_rounds=d.get("window_rounds", 0),
         trailing_clean=d.get("trailing_clean", 0),
@@ -629,6 +632,14 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
     if conds:
         prog = f"  [ep {b['rounds_elapsed']}/{b['rounds_total']}]" if b.get("rounds_total") else ""
         lines.append(f"  min-cond     : {' · '.join(conds)}{prog}")
+    # Reveal-offence penalty — the ACCUMULATED epoch cost (from the ledger). Each offence burns
+    # 30 reward-rounds, so it stands with the epoch data whether or not one has occurred.
+    if mc:
+        ro = mc.get("reveal_offences") or 0
+        if ro:
+            lines.append(f"  penalty      : {_RED}‼ {_penalty_str(ro, per_round_reward_flr=h.ftso_round_reward_flr)}{_RESET}")
+        else:
+            lines.append(f"  penalty      : {_GREEN}✓ 0 reveal offences this epoch{_RESET} \033[2m— no penalty{_RESET}")
 
     # Live delegation — validator (P-chain) + FTSO (WNat vote power).
     d = h.delegation or {}
