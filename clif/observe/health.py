@@ -636,8 +636,18 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
     # 30 reward-rounds, so it stands with the epoch data whether or not one has occurred.
     if mc:
         ro = mc.get("reveal_offences") or 0
+        hole = (mc.get("missing_in_span") or 0) > 0  # a ledger hole could hide a further offence ⇒ lower bound
         if ro:
-            lines.append(f"  penalty      : {_RED}‼ {_penalty_str(ro, per_round_reward_flr=h.ftso_round_reward_flr)}{_RESET}")
+            lines.append(
+                f"  penalty      : {_RED}‼ "
+                f"{_penalty_str(ro, per_round_reward_flr=h.ftso_round_reward_flr, lower_bound=hole)}{_RESET}"
+            )
+        elif hole:
+            # No CONFIRMED offence, but a ledger hole means we can't assert a confident 0.
+            lines.append(
+                f"  penalty      : \033[2m○ 0 confirmed reveal offences "
+                f"({mc['missing_in_span']} round(s) unaccounted — chain-audit to be sure){_RESET}"
+            )
         else:
             lines.append(f"  penalty      : {_GREEN}✓ 0 reveal offences this epoch{_RESET} \033[2m— no penalty{_RESET}")
 
@@ -807,7 +817,7 @@ def render_epoch_closeout(
         f"{_BADGE_OBS}   {uc}uptime  {up_s}% (≥{_UPTIME_MIN_PCT:g})  {us}{_RESET}",
         f"{_BADGE_OBS}   {_DIM}FastUpd {tally.get('fu_updates')} updates (epoch total){_RESET}",
         *([f"{_BADGE_OBS}   {_RED}‼ reveal-offence penalty — "
-           f"{_penalty_str(tally.get('reveal_offences') or 0, per_round_reward_flr=ftso_round_reward_flr)}{_RESET}"]
+           f"{_penalty_str(tally.get('reveal_offences') or 0, per_round_reward_flr=ftso_round_reward_flr, lower_bound=(tally.get('unconfirmed_commit_rounds') or 0) > 0)}{_RESET}"]
           if tally.get("reveal_offences") else []),
         f"{_BADGE_OBS}   {_DIM}processed {tally.get('rounds_recorded')} voting rounds"
         + (f" · {blocks_scanned} blocks scanned" if blocks_scanned is not None else "")

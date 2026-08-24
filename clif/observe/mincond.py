@@ -111,7 +111,17 @@ def prune_history(path: Path, *, reward_epoch: int | None) -> None:
 
 def epoch_tally(records: dict[int, RoundRecord] | list[RoundRecord], *, epoch: int) -> dict:
     """Exact full-epoch FDC + fast-update totals for `epoch`, from the persisted records.
-    `fdc_pct` is None until the epoch has had at least one FDC-request round."""
+    `fdc_pct` is None until the epoch has had at least one FDC-request round.
+
+    Reveal offences are counted from the durable `s1=1 ∧ s2=0` signal (commit seen, reveal not
+    seen) — NOT the `ro` flag. `ro` derives from the byte-level reveal-offence detection which the
+    engine zeroes for any round finalized while `catching_up` (pruned-node tx bodies are unreliable
+    on backfill), so an offence around an outage lost its `ro` and the count silently read 0. The
+    `s1=1 ∧ s2=0` signal is intrinsically pruned-immune: a backfilled round can never decode the
+    commit tx body, so it always records `s1=0` — `s1=1` therefore proves the commit was observed
+    LIVE, and a live commit with no reveal is a genuine reveal offence. The residual blind spot is
+    rounds ENTIRELY absent from the ledger (`missing_in_span`) — a commit-without-reveal there is
+    invisible — so the count is reported as a LOWER BOUND whenever the span has such a hole."""
     vals = records.values() if isinstance(records, dict) else records
     ep = [r for r in vals if epoch_of(r.rid) == epoch]
     n = fdc_exp = fdc_ok = ftso_rev = ftso_clean = fu = reveal_offences = 0
@@ -123,7 +133,8 @@ def epoch_tally(records: dict[int, RoundRecord] | list[RoundRecord], *, epoch: i
         ftso_rev += r.s2
         ftso_clean += r.cl
         fu += r.fu
-        reveal_offences += r.ro
+        if r.s1 and not r.s2:  # commit observed live, no reveal — pruned-immune reveal-offence signal
+            reveal_offences += 1
         if first_rid is None or r.rid < first_rid:
             first_rid = r.rid
         if last_rid is None or r.rid > last_rid:
@@ -149,6 +160,8 @@ def epoch_tally(records: dict[int, RoundRecord] | list[RoundRecord], *, epoch: i
         "fdc_participated": fdc_ok,
         "fdc_pct": (round(100.0 * fdc_ok / fdc_exp, 1) if fdc_exp else None),
         "fu_updates": fu,
+        # Reveal offences from the pruned-immune `s1=1 ∧ s2=0` signal. A LOWER BOUND when
+        # `missing_in_span > 0` (a ledger hole could hide a further commit-without-reveal).
         "reveal_offences": reveal_offences,
         # Estimated reveal-offence penalty (30 reward-rounds each, burned; capped at the whole epoch).
         "penalty_reward_rounds": min(VRS_PER_REWARD_EPOCH, reveal_offences * REVEAL_OFFENCE_PENALTY_ROUNDS),
@@ -158,14 +171,17 @@ def epoch_tally(records: dict[int, RoundRecord] | list[RoundRecord], *, epoch: i
     }
 
 
-def format_penalty(offences: int, *, per_round_reward_flr: float = 0.0) -> str:
+def format_penalty(offences: int, *, per_round_reward_flr: float = 0.0, lower_bound: bool = False) -> str:
     """The accumulated reveal-offence cost as a string: reward-rounds burned + % of the epoch's
     reward, and (if the operator has set a per-round reward) the estimated FLR figure. Each offence
-    burns 30 reward-rounds, capped at the whole-epoch reward."""
+    burns 30 reward-rounds, capped at the whole-epoch reward. `lower_bound` prefixes `≥` and appends
+    a note when the ledger has undecoded-commit rounds that could hide a further offence."""
     rounds = min(VRS_PER_REWARD_EPOCH, offences * REVEAL_OFFENCE_PENALTY_ROUNDS)
     pct = round(min(100.0, 100.0 * rounds / VRS_PER_REWARD_EPOCH), 2)
     flr = f" ≈ {rounds * per_round_reward_flr:,.1f} FLR" if per_round_reward_flr > 0 else ""
-    return f"{offences} offence(s) · −{rounds} reward-rounds{flr} burned (~{pct}% of epoch FTSO reward)"
+    ge = "≥" if lower_bound else ""
+    tail = " — lower bound, chain-audit to confirm" if lower_bound else ""
+    return f"{ge}{offences} offence(s) · −{ge}{rounds} reward-rounds{flr} burned (~{ge}{pct}% of epoch FTSO reward){tail}"
 
 
 def epoch_gap_ranges(

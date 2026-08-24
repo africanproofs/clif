@@ -605,7 +605,10 @@ def run_engine(
                     mincond_recs[rs.round_id] = rec
                     mincond_append(Path(mincond_history_file), rec)
                     if rec.ro and log:  # a confirmed (live) reveal offence — LOG its accumulated cost
-                        ep_off = sum(r.ro for r in mincond_recs.values() if epoch_of(r.rid) == re)
+                        # Accumulated count uses the pruned-immune s1∧¬s2 signal (matches the report/close-out),
+                        # not sum(ro): ro is zeroed during catch-up, so it undercounts around outages.
+                        ep_off = sum(1 for r in mincond_recs.values()
+                                     if epoch_of(r.rid) == re and r.s1 and not r.s2)
                         one = (f" ≈ {REVEAL_OFFENCE_PENALTY_ROUNDS * ftso_round_reward_flr:,.1f} FLR"
                                if ftso_round_reward_flr > 0 else "")
                         log.error(

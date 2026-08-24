@@ -222,10 +222,13 @@ def test_closeout_ftso_from_nonce_budget_not_the_unreliable_ledger():
 def test_reveal_offence_penalty_estimate():
     e = 427
     recs = {rid: RoundRecord(rid, s1=1, s2=1, cl=1, fexp=1, fok=1, fu=1) for rid in range(e*VRS, e*VRS+400)}
-    recs[e*VRS+50]  = RoundRecord(e*VRS+50,  s1=1, s2=0, cl=0, fexp=1, fok=1, ro=1)  # offence 1
-    recs[e*VRS+120] = RoundRecord(e*VRS+120, s1=1, s2=0, cl=0, fexp=1, fok=1, ro=1)  # offence 2
+    # The count comes from the pruned-immune `s1=1 ∧ s2=0` signal, NOT the `ro` flag: offence 2 has
+    # ro=0 (the exact production case — the engine zeroed ro during a catch-up window), and must
+    # STILL be counted. This is the regression guard for the "penalty: ✓ 0" false-clean bug.
+    recs[e*VRS+50]  = RoundRecord(e*VRS+50,  s1=1, s2=0, cl=0, fexp=1, fok=1, ro=1)  # offence 1 (ro set)
+    recs[e*VRS+120] = RoundRecord(e*VRS+120, s1=1, s2=0, cl=0, fexp=1, fok=1, ro=0)  # offence 2 (ro ZEROED)
     t = epoch_tally(recs, epoch=e)
-    assert t["reveal_offences"] == 2
+    assert t["reveal_offences"] == 2                             # both counted despite offence 2's ro=0
     assert t["penalty_reward_rounds"] == 60                      # 2 × 30 rounds
     assert t["penalty_pct_of_epoch"] == round(100*60/VRS, 2)     # ~1.79% of the epoch
 
@@ -233,11 +236,14 @@ def test_reveal_offence_penalty_estimate():
     # accumulated-cost string: reward-rounds + %, and FLR only when the per-round reward is set
     assert format_penalty(2) == "2 offence(s) · −60 reward-rounds burned (~1.79% of epoch FTSO reward)"
     assert "≈ 6,000.0 FLR" in format_penalty(2, per_round_reward_flr=100.0)
+    # lower_bound prefixes ≥ and appends the audit note (a genuine ledger hole hides potential offences)
+    lb = format_penalty(2, lower_bound=True)
+    assert lb.startswith("≥2 offence(s) · −≥60 reward-rounds") and "lower bound, chain-audit to confirm" in lb
 
     # the close-out reports the accumulated cost; a clean epoch reports nothing
     from clif.observe.health import render_epoch_closeout
     out = _plain(render_epoch_closeout(t, uptime_pct=99.99, network="flare", ftso_round_reward_flr=100.0))
     assert "reveal-offence penalty — 2 offence(s) · −60 reward-rounds ≈ 6,000.0 FLR" in out
-    clean = epoch_tally({rid: RoundRecord(rid, s2=1) for rid in range(e*VRS, e*VRS+10)}, epoch=e)
+    clean = epoch_tally({rid: RoundRecord(rid, s1=1, s2=1) for rid in range(e*VRS, e*VRS+10)}, epoch=e)
     assert clean["reveal_offences"] == 0
     assert "reveal-offence penalty" not in _plain(render_epoch_closeout(clean, uptime_pct=99.99, network="flare"))

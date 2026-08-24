@@ -332,6 +332,31 @@ def test_min_conditions_uses_exact_epoch_ledger_for_fdc_and_fu():
     assert "1h obs" not in line                         # the window fallback is not used
 
 
+def _penalty_line(h):
+    return next((ln for ln in _plain(render_protocol_report(h)).splitlines() if "penalty" in ln), "")
+
+
+def test_penalty_line_shows_accumulated_offences_from_the_ledger():
+    # The standing report line reports the ledger's accumulated reveal-offence cost (the RE427 bug:
+    # it must NOT show "✓ 0" when the ledger holds offences). Hole-free span ⇒ no lower-bound mark.
+    mc = {**_MC_EPOCH, "reveal_offences": 2, "missing_in_span": 0}
+    line = _penalty_line(_health(budget=_MC_BUDGET, off_window=0, mincond=mc, ftso_round_reward_flr=100.0))
+    assert "‼ 2 offence(s)" in line and "−60 reward-rounds" in line and "6,000.0 FLR" in line
+    assert "≥" not in line and "lower bound" not in line
+
+
+def test_penalty_line_is_a_lower_bound_when_the_span_has_a_hole():
+    mc = {**_MC_EPOCH, "reveal_offences": 2, "missing_in_span": 5}  # a genuine ledger hole hides potential offences
+    line = _penalty_line(_health(budget=_MC_BUDGET, off_window=0, mincond=mc))
+    assert "≥2 offence(s)" in line and "lower bound, chain-audit to confirm" in line
+
+
+def test_penalty_line_clean_epoch_says_no_penalty():
+    mc = {**_MC_EPOCH, "reveal_offences": 0, "missing_in_span": 0}
+    line = _penalty_line(_health(budget=_MC_BUDGET, off_window=0, mincond=mc))
+    assert "0 reveal offences this epoch" in line and "no penalty" in line
+
+
 def test_exact_epoch_fdc_breach_is_critical():
     breach = {**_MC_EPOCH, "fdc_expected": 100, "fdc_participated": 55, "fdc_pct": 55.0}  # < 60 floor
     assert _health(off_window=0, mincond=breach).severity == "CRIT"
