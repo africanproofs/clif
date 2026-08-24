@@ -753,12 +753,25 @@ def _fmt_ranges(ranges: list, total: int) -> str:
 
 def render_epoch_closeout(
     tally: dict, *, uptime_pct: float | None, network: str, blocks_scanned: int | None = None,
-    gap_ranges: list | None = None, gap_total: int = 0,
+    gap_ranges: list | None = None, gap_total: int = 0, ftso: dict | None = None,
 ) -> list[str]:
     """The epoch-CLOSE-OUT ceremony — the final minimal-conditions report card for the epoch that
     just ended, with a PASS/BREACH verdict per gate. Driven by the exact per-epoch ledger."""
     e = tally.get("epoch")
-    ftso_pct, fdc_pct = tally.get("ftso_pct"), tally.get("fdc_pct")
+    # FTSO comes from the nonce-delta budget (reads chain STATE — reliable, full-epoch, restart-proof
+    # and IMMUNE to a pruned node not serving old tx bodies during a backfill), NOT the per-round
+    # tx-scan `s2` count (which under-reads reveals on backfilled blocks → a false breach). FDC/FU
+    # come from the ledger (event-based via get_logs — reliable over any range).
+    if ftso and ftso.get("rate_pct") is not None:
+        ftso_pct = ftso["rate_pct"]
+        ftso_detail = (
+            f"[{ftso.get('rate_pct')}% submitted, {ftso.get('rounds_elapsed')}/{ftso.get('rounds_total')} "
+            f"rounds · nonce, full-epoch]"
+        )
+    else:
+        ftso_pct = tally.get("ftso_pct")
+        ftso_detail = f"[{tally.get('ftso_revealed')}/{tally.get('rounds_recorded')} revealed · observed]"
+    fdc_pct = tally.get("fdc_pct")
 
     def gate(pct, floor):
         if pct is None:
@@ -776,7 +789,7 @@ def render_epoch_closeout(
     lines = [
         f"{_BADGE_OBS} {head_c}{_CEREMONY_BAR}{_RESET}",
         f"{_BADGE_OBS} {head_c}🏁 REWARD EPOCH {e} CLOSED · {network} — final minimal-conditions report{_RESET}",
-        f"{_BADGE_OBS}   {fc}FTSO    {ftso_pct}% (≥{_FTSO_MIN_PCT:g})  {fs}{_RESET}   [{tally.get('ftso_revealed')}/{tally.get('rounds_recorded')} revealed]",
+        f"{_BADGE_OBS}   {fc}FTSO    {ftso_pct}% (≥{_FTSO_MIN_PCT:g})  {fs}{_RESET}   {ftso_detail}",
         f"{_BADGE_OBS}   {dc}FDC     {fdc_pct}% (≥{_FDC_MIN_PCT:g})  {ds}{_RESET}   [{tally.get('fdc_participated')}/{tally.get('fdc_expected')} request-rounds]",
         f"{_BADGE_OBS}   {uc}uptime  {up_s}% (≥{_UPTIME_MIN_PCT:g})  {us}{_RESET}",
         f"{_BADGE_OBS}   {_DIM}FastUpd {tally.get('fu_updates')} updates (epoch total){_RESET}",
@@ -789,7 +802,7 @@ def render_epoch_closeout(
     if partial:
         lines.append(
             f"{_BADGE_OBS}   {_YELLOW}⚠ coverage {cov}% of the epoch observed — tracker started mid-epoch; "
-            f"figures cover observed rounds only{_RESET}"
+            f"FDC/FastUpd cover observed rounds only (FTSO is full-epoch via nonce; uptime is cumulative){_RESET}"
         )
     # Humility: any hole WITHIN the observed span is unaccounted — the %s above are computed over
     # recorded rounds only, so they can't certify eligibility for the missing ones.

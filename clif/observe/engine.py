@@ -556,8 +556,10 @@ def run_engine(
                 # when the round had a problem worth surfacing (a missed submit/reveal, an off-window
                 # submission, a reveal offence, or an FDC gap). Anti-duplication: a round already in
                 # the ledger (a re-finalized round during a restart resume) is NOT re-logged.
+                # ...and NOT while catching_up: a pruned node can withhold old tx bodies during a
+                # backfill, so submit1/submit2 detection is unreliable then (a false "missed submit").
                 already_seen = bool(mincond_history_file) and rs.round_id in mincond_recs
-                if rs.issues and log and not already_seen:
+                if rs.issues and log and not already_seen and not catching_up:
                     (log.error if rs.reveal_offence else log.warning)(
                         render_round_report(
                             rid=rs.round_id, network=network,
@@ -586,7 +588,7 @@ def run_engine(
                                 for _ln in render_epoch_closeout(
                                     epoch_tally(mincond_recs, epoch=old), uptime_pct=up["pct"],
                                     network=network, blocks_scanned=mincond_blocks["n"],
-                                    gap_ranges=_gr, gap_total=_gt,
+                                    gap_ranges=_gr, gap_total=_gt, ftso=bud["data"],
                                 ):
                                     log.info(_ln)
                             for _ln in render_epoch_open(re, network=network):

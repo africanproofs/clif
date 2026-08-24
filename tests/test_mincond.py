@@ -202,3 +202,18 @@ def test_resume_reprocessing_never_duplicates(tmp_path):
     t = epoch_tally(recs, epoch=e)
     assert t["rounds_recorded"] == 70 and t["fdc_expected"] == 70 and t["fu_updates"] == 70
     assert t["missing_in_span"] == 0  # contiguous 0..69
+
+
+def test_closeout_ftso_from_nonce_budget_not_the_unreliable_ledger():
+    from clif.observe.health import render_epoch_closeout
+
+    # The per-round s2 count is unreliable on a pruned node during backfill (a false low reveal
+    # count). The FTSO gate MUST use the nonce-delta budget instead — no false breach.
+    recs = {rid: RoundRecord(rid, s1=0, s2=0, cl=0, fexp=1, fok=1, fu=1)  # ledger says 0% revealed!
+            for rid in range(426 * VRS, 426 * VRS + 300)}
+    t = epoch_tally(recs, epoch=426)
+    assert t["ftso_pct"] == 0.0  # the unreliable ledger figure
+    budget = {"rate_pct": 99.85, "rounds_elapsed": 3360, "rounds_total": 3360, "threshold_pct": 80}
+    out = _plain(render_epoch_closeout(t, uptime_pct=99.99, network="flare", ftso=budget))
+    assert "FTSO    99.85% (≥80)  ✓ PASS" in out and "nonce, full-epoch" in out
+    assert "BREACHED: FTSO" not in out  # no false FTSO breach
