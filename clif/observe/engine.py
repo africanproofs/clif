@@ -54,6 +54,24 @@ def _blk_int(v) -> int:
     return int(str(v), 16)
 
 
+def resume_cursor(
+    head: int, *, lookback_blocks: int, prior_last_block: int | None, max_blocks: int = 0
+) -> int:
+    """The startup scan cursor. A FRESH start seeds near head (`head - lookback_blocks`). With a
+    prior `last_block` (a restart), resume from `lookback_blocks` BEFORE it — re-covering the round
+    that straddled the restart, all deduped by round id — so a restart leaves NO coverage gap, no
+    matter how long the downtime. `max_blocks` (0 = uncapped) bounds how far back the resume reaches;
+    beyond it the missing-in-span accounting flags the remainder honestly rather than backfilling
+    an unbounded history."""
+    base = max(1, head - lookback_blocks)
+    if not prior_last_block or prior_last_block <= 0:
+        return base
+    cur = min(base, max(1, prior_last_block - lookback_blocks))
+    if max_blocks and max_blocks > 0:
+        cur = max(cur, max(1, head - max_blocks))
+    return cur
+
+
 def report_interval(severity: str, *, healthy_sec: float, degraded_sec: float, recovering: bool = False) -> float:
     """The periodic-report cadence: the tight `degraded_sec` only for an ACTIVE degradation, else
     the relaxed `healthy_sec`. A `recovering` WARN (a stale isolated miss aging out of the window,
@@ -95,6 +113,8 @@ def run_engine(
     max_backfill_blocks: int = 0,  # RETIRED (v0.5.84): the backfill never skips now — kept for compat
     gaps_file: str | None = None,  # persist the outage/backfill ledger (survives restart)
     mincond_history_file: str | None = None,  # per-epoch minimal-conditions ledger (exact FDC + FU)
+    prior_last_block: int | None = None,  # last block the previous run processed → resume gap-free
+    resume_max_blocks: int = 200_000,  # cap how far back a restart resumes (0 = uncapped); ~4 days
     status_log_sec: float = 3600.0,  # emit a rendered OBS status line to the log this often (+once seeded)
     degraded_log_sec: float = 300.0,  # …but tighten to this while severity != OK, until it clears back to OK
     fdc_hub: str | None = None,  # FdcHub address — enables FDC participation tracking when set
@@ -118,7 +138,15 @@ def run_engine(
     our_submit_lc = our_submit.lower()
     our_sig_lc = our_sig.lower()
     head = rpc.block_number()
-    cursor = max(1, head - lookback_blocks)
+    # Resume from where the previous run left off (gap-free across restarts), else seed near head.
+    cursor = resume_cursor(
+        head, lookback_blocks=lookback_blocks, prior_last_block=prior_last_block, max_blocks=resume_max_blocks,
+    )
+    if log and prior_last_block and cursor < max(1, head - lookback_blocks):
+        log.info(
+            "\033[38;5;208m OBS\033[0m resuming from block %s (prior last %s) — backfilling %s blocks "
+            "of restart gap so coverage stays gap-free", cursor, prior_last_block, head - cursor,
+        )
     # Anchor the boundary-round guard to the first block's timestamp (rounds that opened
     # before this are incomplete-by-construction and won't be counted).
     _first = rpc.get_block(cursor, full_transactions=False)
@@ -526,8 +554,10 @@ def run_engine(
             for rs in state.finalize_due(ts, factory):
                 # Per-voting-round report card — SILENT on a clean round; logged (highlighted) only
                 # when the round had a problem worth surfacing (a missed submit/reveal, an off-window
-                # submission, a reveal offence, or an FDC gap).
-                if rs.issues and log:
+                # submission, a reveal offence, or an FDC gap). Anti-duplication: a round already in
+                # the ledger (a re-finalized round during a restart resume) is NOT re-logged.
+                already_seen = bool(mincond_history_file) and rs.round_id in mincond_recs
+                if rs.issues and log and not already_seen:
                     (log.error if rs.reveal_offence else log.warning)(
                         render_round_report(
                             rid=rs.round_id, network=network,

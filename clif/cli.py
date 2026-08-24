@@ -2846,10 +2846,15 @@ def observe_run() -> None:
                 fdc_hub = None
         except RpcError:
             fdc_hub = None
+        # Read the PRIOR run's last processed block (before we overwrite the status file) so the
+        # engine resumes from where it left off — gap-free across restarts, not just quick ones.
+        prior_last_block = read_observe_status(s.observe_status_file, enabled=s.observe_enabled).last_block
         run_engine(
             rpc=rpc, network=s.network, submission_address=submission,
             our_submit=our_submit, our_sig=our_sig,
             status_writer=lambda d: write_status_atomic(s.observe_status_file, d),
+            prior_last_block=prior_last_block,
+            resume_max_blocks=s.observe_resume_max_blocks,
             lookback_blocks=s.observe_lookback_blocks,
             window_rounds=s.observe_window_rounds,
             poll_sec=s.observe_poll_sec,

@@ -180,3 +180,22 @@ def test_missing_rounds_while_live_is_warn():
     catching = ObserveHealth(network="flare", enabled=True, window_rounds=40, complete=40, registered=True,
                              last_block=100, head=500, reward_epoch=426, mincond=mc)  # lag 400 ⇒ catching up
     assert catching.stream_state == "catching_up"
+
+
+def test_resume_reprocessing_never_duplicates(tmp_path):
+    # Simulate a restart resume that re-appends rounds already in the ledger: load must dedup to
+    # unique rids (last-wins), and the tally must never double-count.
+    p = tmp_path / "mc.jsonl"
+    e = 426
+    for rid in range(e * VRS, e * VRS + 50):  # original run
+        append_record(p, RoundRecord(rid, s2=1, cl=1, fexp=1, fok=1, fu=1))
+    # resume re-processes the last 10 rounds (overlap) + 10 new ones — the engine guard would skip
+    # the overlap, but even if the file gets the lines, load + tally must stay exact.
+    for rid in range(e * VRS + 40, e * VRS + 70):
+        append_record(p, RoundRecord(rid, s2=1, cl=1, fexp=1, fok=1, fu=1))
+    recs = load_history(p, reward_epoch=e)
+    rids = [r for r in recs]
+    assert len(rids) == len(set(rids)) == 70  # 0..69 unique, no duplicates
+    t = epoch_tally(recs, epoch=e)
+    assert t["rounds_recorded"] == 70 and t["fdc_expected"] == 70 and t["fu_updates"] == 70
+    assert t["missing_in_span"] == 0  # contiguous 0..69

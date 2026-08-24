@@ -140,3 +140,16 @@ def test_report_interval_relaxes_when_recovering():
     assert report_interval("WARN", healthy_sec=3600, degraded_sec=300, recovering=False) == 300
     # CRIT stays tight (the `recovering` property is only ever True for a WARN, never a CRIT).
     assert report_interval("CRIT", healthy_sec=3600, degraded_sec=300, recovering=False) == 300
+
+
+def test_resume_cursor_gap_free_across_restarts():
+    from clif.observe.engine import resume_cursor
+
+    h, lb = 1_000_000, 900
+    assert resume_cursor(h, lookback_blocks=lb, prior_last_block=None) == h - lb          # fresh start
+    assert resume_cursor(h, lookback_blocks=lb, prior_last_block=h - 50) == h - lb - 50    # quick restart: re-covers
+    assert resume_cursor(h, lookback_blocks=lb, prior_last_block=h - 50_000) == h - 50_000 - lb  # long: fills the gap
+    # capped so a pathological downtime doesn't backfill unbounded history
+    assert resume_cursor(h, lookback_blocks=lb, prior_last_block=h - 500_000, max_blocks=200_000) == h - 200_000
+    assert resume_cursor(h, lookback_blocks=lb, prior_last_block=h - 500_000, max_blocks=0) == h - 500_000 - lb
+    assert resume_cursor(h, lookback_blocks=lb, prior_last_block=0) == h - lb              # bad/zero prior ⇒ fresh
