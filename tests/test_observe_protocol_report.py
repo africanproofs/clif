@@ -357,6 +357,15 @@ def test_penalty_line_clean_epoch_says_no_penalty():
     assert "0 reveal offences this epoch" in line and "no penalty" in line
 
 
+def test_penalty_line_is_orange_not_red():
+    # A standing accumulated cost, not an active alarm — rendered in the orange OBS hue (38;5;208),
+    # never bold-red (1;31), which is reserved for "something is going wrong right now".
+    mc = {**_MC_EPOCH, "reveal_offences": 2, "missing_in_span": 0}
+    raw = next(ln for ln in render_protocol_report(_health(budget=_MC_BUDGET, off_window=0, mincond=mc))
+               if "penalty" in ln)
+    assert "\033[38;5;208m" in raw and "\033[1;31m" not in raw
+
+
 def test_exact_epoch_fdc_breach_is_critical():
     breach = {**_MC_EPOCH, "fdc_expected": 100, "fdc_participated": 55, "fdc_pct": 55.0}  # < 60 floor
     assert _health(off_window=0, mincond=breach).severity == "CRIT"

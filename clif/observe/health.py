@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from clif.funding import _BADGE_OBS, _GREEN, _RED, _RESET, _YELLOW
+from clif.funding import _BADGE_OBS, _GREEN, _ORANGE, _RED, _RESET, _YELLOW
 from clif.observe.gaps import hms
 from clif.observe.mincond import format_penalty as _penalty_str
 from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH
@@ -639,7 +639,7 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
         hole = (mc.get("missing_in_span") or 0) > 0  # a ledger hole could hide a further offence ⇒ lower bound
         if ro:
             lines.append(
-                f"  penalty      : {_RED}‼ "
+                f"  penalty      : {_ORANGE}‼ "
                 f"{_penalty_str(ro, per_round_reward_flr=h.ftso_round_reward_flr, lower_bound=hole)}{_RESET}"
             )
         elif hole:
@@ -816,8 +816,8 @@ def render_epoch_closeout(
         f"{_BADGE_OBS}   {dc}FDC     {fdc_pct}% (≥{_FDC_MIN_PCT:g})  {ds}{_RESET}   [{tally.get('fdc_participated')}/{tally.get('fdc_expected')} request-rounds]",
         f"{_BADGE_OBS}   {uc}uptime  {up_s}% (≥{_UPTIME_MIN_PCT:g})  {us}{_RESET}",
         f"{_BADGE_OBS}   {_DIM}FastUpd {tally.get('fu_updates')} updates (epoch total){_RESET}",
-        *([f"{_BADGE_OBS}   {_RED}‼ reveal-offence penalty — "
-           f"{_penalty_str(tally.get('reveal_offences') or 0, per_round_reward_flr=ftso_round_reward_flr, lower_bound=(tally.get('unconfirmed_commit_rounds') or 0) > 0)}{_RESET}"]
+        *([f"{_BADGE_OBS}   {_ORANGE}‼ reveal-offence penalty — "
+           f"{_penalty_str(tally.get('reveal_offences') or 0, per_round_reward_flr=ftso_round_reward_flr, lower_bound=(tally.get('missing_in_span') or 0) > 0)}{_RESET}"]
           if tally.get("reveal_offences") else []),
         f"{_BADGE_OBS}   {_DIM}processed {tally.get('rounds_recorded')} voting rounds"
         + (f" · {blocks_scanned} blocks scanned" if blocks_scanned is not None else "")

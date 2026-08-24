@@ -32,6 +32,7 @@ _RESET = "\033[0m"
 _GREEN = "\033[32m"
 _YELLOW = "\033[33m"
 _RED = "\033[1;31m"  # bold red — reserved for "something is going wrong"
+_ORANGE = "\033[38;5;208m"  # orange (the OBS badge hue) — a standing cost, not an active alarm
 _DIM = "\033[2m"
 _CYAN = "\033[36m"
 

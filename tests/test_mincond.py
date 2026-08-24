@@ -65,6 +65,40 @@ def test_load_dedups_and_scopes_to_current_and_prior_epoch(tmp_path):
     assert recs[426 * VRS + 5].fu == 9  # dedup kept the latest
 
 
+def test_reveal_offence_count_accumulates_over_the_epoch_and_survives_reload(tmp_path):
+    # The accumulation mechanism: as offence rounds are appended to the ledger the epoch count
+    # GROWS (full-epoch aggregate, not a rolling window), it persists to disk, and a reload
+    # (restart) reconstructs the same count. Offences in another epoch never leak in.
+    e = 427
+    p = tmp_path / "mc.jsonl"
+    recs: dict = {}
+
+    def finalize(rid, *, offence=False):
+        rec = RoundRecord(rid, s1=1, s2=(0 if offence else 1), cl=(0 if offence else 1), fexp=1, fok=1, fu=1)
+        recs[rid] = rec
+        append_record(p, rec)  # persisted the same way the engine does at finalize
+
+    # a clean round in the PRIOR epoch (must never count toward 427) + an offence there
+    finalize(426 * VRS + 100, offence=True)
+    finalize(e * VRS + 1)
+    assert epoch_tally(recs, epoch=e)["reveal_offences"] == 0     # no 427 offence yet
+
+    finalize(e * VRS + 50, offence=True)
+    assert epoch_tally(recs, epoch=e)["reveal_offences"] == 1     # accrues one
+
+    for rid in range(e * VRS + 51, e * VRS + 120):
+        finalize(rid)                                             # clean rounds don't change it
+    assert epoch_tally(recs, epoch=e)["reveal_offences"] == 1
+
+    finalize(e * VRS + 200, offence=True)
+    assert epoch_tally(recs, epoch=e)["reveal_offences"] == 2     # accumulates to two
+
+    # restart: rebuild purely from disk → identical count (and the prior-epoch offence stays out)
+    reloaded = load_history(p, reward_epoch=e)
+    assert epoch_tally(reloaded, epoch=e)["reveal_offences"] == 2
+    assert epoch_tally(reloaded, epoch=426)["reveal_offences"] == 1  # scoped correctly, no leakage
+
+
 def test_prune_rewrites_current_and_prior_only(tmp_path):
     p = tmp_path / "mc.jsonl"
     for rid in (423 * VRS, 425 * VRS, 426 * VRS):
