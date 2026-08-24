@@ -112,3 +112,30 @@ def test_open_ceremony_names_epoch_and_round_range():
     out = _plain(render_epoch_open(427, network="flare"))
     assert "REWARD EPOCH 427 OPEN" in out and "trackers armed" in out
     assert f"{427 * VRS}–{428 * VRS - 1}" in out
+
+
+def test_closeout_logs_throughput():
+    from clif.observe.health import render_epoch_closeout
+
+    t = epoch_tally({rid: RoundRecord(rid, s2=1, cl=1, fexp=0, fok=0, fu=1) for rid in range(426 * VRS, 426 * VRS + 3360)}, epoch=426)
+    out = _plain(render_epoch_closeout(t, uptime_pct=99.99, network="flare", blocks_scanned=302761))
+    assert "processed 3360 voting rounds · 302761 blocks scanned" in out
+    # blocks omitted when not provided
+    assert "blocks scanned" not in _plain(render_epoch_closeout(t, uptime_pct=99.99, network="flare"))
+
+
+def test_round_report_only_shows_full_picture_with_the_problem():
+    from clif.observe.health import render_round_report
+
+    line = render_round_report(
+        rid=1434295, network="flare", s1=True, s2=False, sig=True,
+        fdc_expected=True, fdc_ok=False, fu=0, offence=False, issues=["no submit2 (reveal)"],
+    )
+    import re
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", line)
+    assert "ROUND 1434295" in plain and "reveal" in plain and "FDC ✗ gap" in plain
+    assert "no submit2 (reveal)" in plain
+    # a reveal offence gets the loud marker
+    off = render_round_report(rid=1, network="flare", s1=True, s2=True, sig=True,
+                              fdc_expected=False, fdc_ok=False, fu=0, offence=True, issues=["mismatch"])
+    assert "‼ REVEAL OFFENCE" in re.sub(r"\x1b\[[0-9;]*m", "", off)

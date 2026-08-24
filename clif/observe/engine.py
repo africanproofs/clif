@@ -26,6 +26,7 @@ from clif.observe.health import (
     render_epoch_closeout,
     render_epoch_open,
     render_protocol_report,
+    render_round_report,
 )
 from clif.observe.budget import read_ftso_budget
 from clif.observe.deleg_history import DelegSnap, append_snap, compute_deltas, load_snaps, prune_snaps
@@ -188,6 +189,7 @@ def run_engine(
     # RoundRecord}, seeded from disk on start; `mincond_epoch` tracks the epoch we've announced.
     mincond_recs: dict = {}
     mincond_epoch: dict = {"e": None}
+    mincond_blocks: dict = {"n": 0}  # blocks scanned while in the current tracked epoch (reset on rollover)
 
     def _refresh_budget(now: float) -> None:
         if bud["checked"] and now - bud["checked"] < registration_refresh_sec:
@@ -521,9 +523,18 @@ def run_engine(
             state.last_block = cursor
             state.last_ts = ts
             for rs in state.finalize_due(ts, factory):
+                # Per-voting-round report card — SILENT on a clean round; logged (highlighted) only
+                # when the round had a problem worth surfacing (a missed submit/reveal, an off-window
+                # submission, a reveal offence, or an FDC gap).
                 if rs.issues and log:
-                    lvl = log.error if rs.reveal_offence else log.warning
-                    lvl("\033[38;5;208m OBS\033[0m round %s: %s", rs.round_id, "; ".join(rs.issues))
+                    (log.error if rs.reveal_offence else log.warning)(
+                        render_round_report(
+                            rid=rs.round_id, network=network,
+                            s1=rs.submit1_seen, s2=rs.submit2_seen, sig=rs.sig_seen,
+                            fdc_expected=rs.fdc_expected, fdc_ok=(rs.fdc_bitvote_seen and not rs.fdc_gap),
+                            fu=rs.fu_count, offence=rs.reveal_offence, issues=rs.issues,
+                        )
+                    )
                 if iqr_history_file and rs.iqr_tally is not None and rs.iqr_tally_new:
                     append_tally(Path(iqr_history_file), rs.iqr_tally)
                 # Per-epoch minimal-conditions ledger: record every finalized round (deduped by
@@ -541,17 +552,20 @@ def run_engine(
                             # until the next real boundary.
                             if old is not None:
                                 for _ln in render_epoch_closeout(
-                                    epoch_tally(mincond_recs, epoch=old), uptime_pct=up["pct"], network=network,
+                                    epoch_tally(mincond_recs, epoch=old), uptime_pct=up["pct"],
+                                    network=network, blocks_scanned=mincond_blocks["n"],
                                 ):
                                     log.info(_ln)
                             for _ln in render_epoch_open(re, network=network):
                                 log.info(_ln)
+                        mincond_blocks["n"] = 0  # start the new epoch's block-scan counter
                     rec = mincond_from_round(rs)
                     mincond_recs[rs.round_id] = rec
                     mincond_append(Path(mincond_history_file), rec)
             cursor += 1
             processed += 1
             since_status += 1
+            mincond_blocks["n"] += 1  # per-epoch blocks-scanned counter (for the close-out ceremony)
             # Keep the status fresh DURING a long catch-up so `observe status` isn't stale.
             if since_status >= status_every_blocks:
                 status_writer(_status())

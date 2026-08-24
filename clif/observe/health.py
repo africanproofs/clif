@@ -721,7 +721,28 @@ def render_epoch_open(epoch: int, *, network: str) -> list[str]:
     ]
 
 
-def render_epoch_closeout(tally: dict, *, uptime_pct: float | None, network: str) -> list[str]:
+def render_round_report(
+    *, rid: int, network: str, s1: bool, s2: bool, sig: bool,
+    fdc_expected: bool, fdc_ok: bool, fu: int, offence: bool, issues: list[str],
+) -> str:
+    """The per-voting-round report card — the round-level ceremony. The engine logs it ONLY when
+    the round had a problem (clean rounds stay silent), so a bad round shows its full picture, not
+    just the bare issue string."""
+    def mark(ok: bool) -> str:
+        return f"{_GREEN}✓{_RESET}" if ok else f"{_RED}✗{_RESET}"
+
+    fdc = "n/a" if not fdc_expected else (f"{_GREEN}✓{_RESET}" if fdc_ok else f"{_RED}✗ gap{_RESET}")
+    head = f"{_RED}‼ REVEAL OFFENCE" if offence else f"{_YELLOW}⚠ round problem"
+    return (
+        f"{_BADGE_OBS} {head} · ROUND {rid} · {network}{_RESET} — "
+        f"commit {mark(s1)} · reveal {mark(s2)} · sig {mark(sig)} · FDC {fdc} · FU {fu}"
+        f"  →  {'; '.join(issues)}"
+    )
+
+
+def render_epoch_closeout(
+    tally: dict, *, uptime_pct: float | None, network: str, blocks_scanned: int | None = None
+) -> list[str]:
     """The epoch-CLOSE-OUT ceremony — the final minimal-conditions report card for the epoch that
     just ended, with a PASS/BREACH verdict per gate. Driven by the exact per-epoch ledger."""
     e = tally.get("epoch")
@@ -747,6 +768,9 @@ def render_epoch_closeout(tally: dict, *, uptime_pct: float | None, network: str
         f"{_BADGE_OBS}   {dc}FDC     {fdc_pct}% (≥{_FDC_MIN_PCT:g})  {ds}{_RESET}   [{tally.get('fdc_participated')}/{tally.get('fdc_expected')} request-rounds]",
         f"{_BADGE_OBS}   {uc}uptime  {up_s}% (≥{_UPTIME_MIN_PCT:g})  {us}{_RESET}",
         f"{_BADGE_OBS}   {_DIM}FastUpd {tally.get('fu_updates')} updates (epoch total){_RESET}",
+        f"{_BADGE_OBS}   {_DIM}processed {tally.get('rounds_recorded')} voting rounds"
+        + (f" · {blocks_scanned} blocks scanned" if blocks_scanned is not None else "")
+        + f"{_RESET}",
     ]
     if cov < 99.0:
         lines.append(
