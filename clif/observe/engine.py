@@ -595,6 +595,8 @@ def run_engine(
                                 log.info(_ln)
                         mincond_blocks["n"] = 0  # start the new epoch's block-scan counter
                     rec = mincond_from_round(rs)
+                    if catching_up:
+                        rec.ro = 0  # reveal-offence detection is unreliable on backfilled (pruned) blocks
                     mincond_recs[rs.round_id] = rec
                     mincond_append(Path(mincond_history_file), rec)
             cursor += 1

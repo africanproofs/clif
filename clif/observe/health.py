@@ -628,6 +628,15 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
     if conds:
         prog = f"  [ep {b['rounds_elapsed']}/{b['rounds_total']}]" if b.get("rounds_total") else ""
         lines.append(f"  min-cond     : {' · '.join(conds)}{prog}")
+    # Reveal-offence penalty — persists the WHOLE epoch (from the ledger, not the 1h window), because
+    # the 30-round burn is locked in the moment a commit goes unrevealed. 30 reward-rounds each.
+    ro = mc.get("reveal_offences") or 0
+    if ro:
+        lines.append(
+            f"  penalty      : {_RED}‼ {ro} REVEAL OFFENCE{'S' if ro > 1 else ''} this epoch — "
+            f"est. −{mc.get('penalty_reward_rounds')} reward-rounds burned "
+            f"(~{mc.get('penalty_pct_of_epoch')}% of the epoch's FTSO reward){_RESET}"
+        )
 
     # Live delegation — validator (P-chain) + FTSO (WNat vote power).
     d = h.delegation or {}
@@ -793,6 +802,10 @@ def render_epoch_closeout(
         f"{_BADGE_OBS}   {dc}FDC     {fdc_pct}% (≥{_FDC_MIN_PCT:g})  {ds}{_RESET}   [{tally.get('fdc_participated')}/{tally.get('fdc_expected')} request-rounds]",
         f"{_BADGE_OBS}   {uc}uptime  {up_s}% (≥{_UPTIME_MIN_PCT:g})  {us}{_RESET}",
         f"{_BADGE_OBS}   {_DIM}FastUpd {tally.get('fu_updates')} updates (epoch total){_RESET}",
+        *([f"{_BADGE_OBS}   {_RED}‼ reveal offences {tally.get('reveal_offences')} — "
+           f"est. penalty −{tally.get('penalty_reward_rounds')} reward-rounds burned "
+           f"(~{tally.get('penalty_pct_of_epoch')}% of epoch FTSO reward){_RESET}"]
+          if tally.get("reveal_offences") else []),
         f"{_BADGE_OBS}   {_DIM}processed {tally.get('rounds_recorded')} voting rounds"
         + (f" · {blocks_scanned} blocks scanned" if blocks_scanned is not None else "")
         + (f" · span {tally.get('first_rid')}–{tally.get('last_rid')}" if tally.get("last_rid") is not None else "")

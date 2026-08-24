@@ -26,6 +26,12 @@ from pathlib import Path
 
 from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH
 
+# A reveal offence (commit via submit1, then no reveal) is penalised 30× the provider's expected
+# reward share for that round, deducted from the epoch's total reward and BURNED, capped at the
+# provider's whole-epoch reward (Flare FTSO Scaling; FIP.06). So each offence forfeits ~30 rounds'
+# reward ≈ REVEAL_OFFENCE_PENALTY_ROUNDS / VRS of the epoch's earnings.
+REVEAL_OFFENCE_PENALTY_ROUNDS = 30
+
 
 @dataclass
 class RoundRecord:
@@ -36,6 +42,7 @@ class RoundRecord:
     fexp: int = 0  # FDC expected this round (had attestation requests) — 0/1
     fok: int = 0   # FDC participated (expected & AP bitvoted) — 0/1
     fu: int = 0    # fast-update submissions attributed to this round
+    ro: int = 0    # reveal offence (committed via submit1 but never revealed) — 0/1; penalty-bearing
 
 
 def epoch_of(rid: int) -> int:
@@ -52,6 +59,7 @@ def from_round(rs) -> RoundRecord:
         fexp=1 if rs.fdc_expected else 0,
         fok=1 if (rs.fdc_expected and rs.fdc_bitvote_seen and not rs.fdc_gap) else 0,
         fu=int(getattr(rs, "fu_count", 0) or 0),
+        ro=1 if getattr(rs, "reveal_offence", False) else 0,
     )
 
 
@@ -106,7 +114,7 @@ def epoch_tally(records: dict[int, RoundRecord] | list[RoundRecord], *, epoch: i
     `fdc_pct` is None until the epoch has had at least one FDC-request round."""
     vals = records.values() if isinstance(records, dict) else records
     ep = [r for r in vals if epoch_of(r.rid) == epoch]
-    n = fdc_exp = fdc_ok = ftso_rev = ftso_clean = fu = 0
+    n = fdc_exp = fdc_ok = ftso_rev = ftso_clean = fu = reveal_offences = 0
     first_rid = last_rid = None
     for r in ep:  # single pass — also tracks the observed span for gap accounting
         n += 1
@@ -115,6 +123,7 @@ def epoch_tally(records: dict[int, RoundRecord] | list[RoundRecord], *, epoch: i
         ftso_rev += r.s2
         ftso_clean += r.cl
         fu += r.fu
+        reveal_offences += r.ro
         if first_rid is None or r.rid < first_rid:
             first_rid = r.rid
         if last_rid is None or r.rid > last_rid:
@@ -140,6 +149,12 @@ def epoch_tally(records: dict[int, RoundRecord] | list[RoundRecord], *, epoch: i
         "fdc_participated": fdc_ok,
         "fdc_pct": (round(100.0 * fdc_ok / fdc_exp, 1) if fdc_exp else None),
         "fu_updates": fu,
+        "reveal_offences": reveal_offences,
+        # Estimated reveal-offence penalty (30 reward-rounds each, burned; capped at the whole epoch).
+        "penalty_reward_rounds": min(VRS_PER_REWARD_EPOCH, reveal_offences * REVEAL_OFFENCE_PENALTY_ROUNDS),
+        "penalty_pct_of_epoch": round(
+            min(100.0, 100.0 * reveal_offences * REVEAL_OFFENCE_PENALTY_ROUNDS / VRS_PER_REWARD_EPOCH), 2
+        ),
     }
 
 
