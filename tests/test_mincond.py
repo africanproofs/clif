@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from clif.observe.mincond import (
-    RoundRecord, append_record, epoch_of, epoch_tally, from_round, load_history, prune_history,
+    RoundRecord, append_record, epoch_gap_ranges, epoch_of, epoch_tally, from_round,
+    load_history, prune_history,
 )
 from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH as VRS
 
@@ -139,3 +140,43 @@ def test_round_report_only_shows_full_picture_with_the_problem():
     off = render_round_report(rid=1, network="flare", s1=True, s2=True, sig=True,
                               fdc_expected=False, fdc_ok=False, fu=0, offence=True, issues=["mismatch"])
     assert "‼ REVEAL OFFENCE" in re.sub(r"\x1b\[[0-9;]*m", "", off)
+
+
+def test_epoch_gap_ranges_and_missing_in_span():
+    e = 426
+    recs = {rid: RoundRecord(rid, s2=1, cl=1, fexp=1, fok=1, fu=1)
+            for rid in list(range(e * VRS, e * VRS + 100)) + list(range(e * VRS + 105, e * VRS + 200))}
+    t = epoch_tally(recs, epoch=e)
+    assert t["span"] == 200 and t["rounds_recorded"] == 195 and t["missing_in_span"] == 5
+    ranges, total = epoch_gap_ranges(recs, epoch=e)
+    assert total == 1 and ranges == [(e * VRS + 100, e * VRS + 104)]
+    # contiguous ⇒ no gaps
+    contig = {rid: RoundRecord(rid, s2=1) for rid in range(e * VRS, e * VRS + 50)}
+    assert epoch_tally(contig, epoch=e)["missing_in_span"] == 0
+    assert epoch_gap_ranges(contig, epoch=e) == ([], 0)
+
+
+def test_closeout_provisional_when_rounds_unaccounted():
+    from clif.observe.health import render_epoch_closeout
+
+    recs = {rid: RoundRecord(rid, s2=1, cl=1, fexp=1, fok=1, fu=1)
+            for rid in list(range(426 * VRS, 426 * VRS + 100)) + list(range(426 * VRS + 105, 426 * VRS + 200))}
+    t = epoch_tally(recs, epoch=426)
+    gr, gt = epoch_gap_ranges(recs, epoch=426)
+    out = _plain(render_epoch_closeout(t, uptime_pct=99.99, network="flare", blocks_scanned=40000, gap_ranges=gr, gap_total=gt))
+    assert "5 rounds MISSING within the observed span" in out
+    assert "PROVISIONAL" in out and "cannot be fully certified" in out
+    assert "span" in out  # the observed span is shown
+
+
+def test_missing_rounds_while_live_is_warn():
+    from clif.observe.health import ObserveHealth
+
+    mc = {"fdc_pct": 100.0, "fdc_expected": 195, "fdc_participated": 195, "missing_in_span": 5, "fu_updates": 195}
+    h = ObserveHealth(network="flare", enabled=True, window_rounds=40, complete=40, registered=True,
+                      last_block=100, head=101, reward_epoch=426, mincond=mc)  # lag 1 ⇒ live
+    assert h.severity == "WARN" and h.recovering is False
+    # a hole while CATCHING UP (backfill in progress) is not yet flagged
+    catching = ObserveHealth(network="flare", enabled=True, window_rounds=40, complete=40, registered=True,
+                             last_block=100, head=500, reward_epoch=426, mincond=mc)  # lag 400 ⇒ catching up
+    assert catching.stream_state == "catching_up"

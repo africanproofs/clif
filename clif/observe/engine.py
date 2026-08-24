@@ -36,6 +36,7 @@ from clif.observe.iqr import build_voter_weight_map
 from clif.observe.iqr_history import append_tally, load_history, prune_history
 from clif.observe.mincond import (
     append_record as mincond_append,
+    epoch_gap_ranges,
     epoch_of,
     epoch_tally,
     from_round as mincond_from_round,
@@ -551,9 +552,11 @@ def run_engine(
                             # fresh mid-epoch start `old` is the seeded epoch, so no rollover fires
                             # until the next real boundary.
                             if old is not None:
+                                _gr, _gt = epoch_gap_ranges(mincond_recs, epoch=old)
                                 for _ln in render_epoch_closeout(
                                     epoch_tally(mincond_recs, epoch=old), uptime_pct=up["pct"],
                                     network=network, blocks_scanned=mincond_blocks["n"],
+                                    gap_ranges=_gr, gap_total=_gt,
                                 ):
                                     log.info(_ln)
                             for _ln in render_epoch_open(re, network=network):

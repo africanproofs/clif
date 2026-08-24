@@ -106,21 +106,53 @@ def epoch_tally(records: dict[int, RoundRecord] | list[RoundRecord], *, epoch: i
     `fdc_pct` is None until the epoch has had at least one FDC-request round."""
     vals = records.values() if isinstance(records, dict) else records
     ep = [r for r in vals if epoch_of(r.rid) == epoch]
-    n = len(ep)
-    fdc_exp = sum(r.fexp for r in ep)
-    fdc_ok = sum(r.fok for r in ep)
-    ftso_rev = sum(r.s2 for r in ep)
-    ftso_clean = sum(r.cl for r in ep)
+    n = fdc_exp = fdc_ok = ftso_rev = ftso_clean = fu = 0
+    first_rid = last_rid = None
+    for r in ep:  # single pass — also tracks the observed span for gap accounting
+        n += 1
+        fdc_exp += r.fexp
+        fdc_ok += r.fok
+        ftso_rev += r.s2
+        ftso_clean += r.cl
+        fu += r.fu
+        if first_rid is None or r.rid < first_rid:
+            first_rid = r.rid
+        if last_rid is None or r.rid > last_rid:
+            last_rid = r.rid
+    span = (last_rid - first_rid + 1) if n else 0
+    # Humility: rounds present between the first and last recorded round but NOT in the ledger —
+    # a hole the never-skip backfill should have filled. Distinct from partial coverage (rounds
+    # before/after the observed span). Any non-zero value while LIVE is a real integrity flag.
+    missing_in_span = max(0, span - n)
     return {
         "epoch": epoch,
         "rounds_recorded": n,
         "rounds_expected": VRS_PER_REWARD_EPOCH,
         "coverage_pct": (round(100.0 * n / VRS_PER_REWARD_EPOCH, 1) if n else 0.0),
+        "first_rid": first_rid,
+        "last_rid": last_rid,
+        "span": span,
+        "missing_in_span": missing_in_span,
         "ftso_revealed": ftso_rev,
         "ftso_clean": ftso_clean,
         "ftso_pct": (round(100.0 * ftso_rev / n, 1) if n else None),
         "fdc_expected": fdc_exp,
         "fdc_participated": fdc_ok,
         "fdc_pct": (round(100.0 * fdc_ok / fdc_exp, 1) if fdc_exp else None),
-        "fu_updates": sum(r.fu for r in ep),
+        "fu_updates": fu,
     }
+
+
+def epoch_gap_ranges(
+    records: dict[int, RoundRecord] | list[RoundRecord], *, epoch: int, limit: int = 6
+) -> tuple[list[tuple[int, int]], int]:
+    """The missing round ranges within the observed span for `epoch` — `([(lo, hi), …], total)`.
+    Empty when coverage is contiguous. `total` is the full count even if the list is capped at
+    `limit` (for the close-out display). O(n log n); called only at the epoch boundary, not per cycle."""
+    vals = records.values() if isinstance(records, dict) else records
+    rids = sorted(r.rid for r in vals if epoch_of(r.rid) == epoch)
+    ranges: list[tuple[int, int]] = []
+    for i in range(1, len(rids)):
+        if rids[i] > rids[i - 1] + 1:
+            ranges.append((rids[i - 1] + 1, rids[i] - 1))
+    return ranges[:limit], len(ranges)

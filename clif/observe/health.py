@@ -228,6 +228,8 @@ class ObserveHealth:
             return "CRIT"  # EXACT full-epoch FDC has breached the 60% minimal-condition floor
         if self.validator_node and self.uptime_pct is not None and self.uptime_pct < _UPTIME_MIN_PCT:
             return "CRIT"  # validator uptime below the 80% minimal-condition floor — staking reward risk
+        if self.stream_state == "live" and (mc.get("missing_in_span") or 0) > 0:
+            return "WARN"  # a coverage hole while LIVE — rounds unaccounted (the never-skip backfill missed some)
         if self.missing_submit1 or self.missing_submit2 or self.off_window or self.fdc_missing:
             return "WARN"  # isolated miss / off-window / FDC gap — worth a look, not yet systemic
         if self.disputed_facts:
@@ -243,6 +245,8 @@ class ObserveHealth:
         for CRIT (a real, current problem), a still-warming window, or a disputed-quorum WARN."""
         if self.severity != "WARN" or self.window_rounds == 0:
             return False
+        if (self.mincond or {}).get("missing_in_span"):
+            return False  # a coverage hole is an integrity issue, not a self-clearing isolated miss
         isolated_miss = bool(
             self.missing_submit1 or self.missing_submit2 or self.off_window or self.fdc_missing
         )
@@ -619,6 +623,8 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
         conds.append(f"{uc}uptime {h.uptime_pct:g}% (≥{_UPTIME_MIN_PCT:g}){_RESET}")
     if mc.get("fu_updates") is not None:  # cumulative epoch fast-updates (volume, not a hard floor)
         conds.append(f"\033[2mFU {mc['fu_updates']} (epoch){_RESET}")
+    if mc.get("missing_in_span"):  # humility flag — rounds unaccounted within the observed span
+        conds.append(f"{_RED}⚠ {mc['missing_in_span']} rounds UNACCOUNTED{_RESET}")
     if conds:
         prog = f"  [ep {b['rounds_elapsed']}/{b['rounds_total']}]" if b.get("rounds_total") else ""
         lines.append(f"  min-cond     : {' · '.join(conds)}{prog}")
@@ -740,8 +746,14 @@ def render_round_report(
     )
 
 
+def _fmt_ranges(ranges: list, total: int) -> str:
+    shown = ", ".join(f"{lo}" if lo == hi else f"{lo}–{hi}" for lo, hi in ranges)
+    return shown + (f", +{total - len(ranges)} more" if total > len(ranges) else "")
+
+
 def render_epoch_closeout(
-    tally: dict, *, uptime_pct: float | None, network: str, blocks_scanned: int | None = None
+    tally: dict, *, uptime_pct: float | None, network: str, blocks_scanned: int | None = None,
+    gap_ranges: list | None = None, gap_total: int = 0,
 ) -> list[str]:
     """The epoch-CLOSE-OUT ceremony — the final minimal-conditions report card for the epoch that
     just ended, with a PASS/BREACH verdict per gate. Driven by the exact per-epoch ledger."""
@@ -770,6 +782,7 @@ def render_epoch_closeout(
         f"{_BADGE_OBS}   {_DIM}FastUpd {tally.get('fu_updates')} updates (epoch total){_RESET}",
         f"{_BADGE_OBS}   {_DIM}processed {tally.get('rounds_recorded')} voting rounds"
         + (f" · {blocks_scanned} blocks scanned" if blocks_scanned is not None else "")
+        + (f" · span {tally.get('first_rid')}–{tally.get('last_rid')}" if tally.get("last_rid") is not None else "")
         + f"{_RESET}",
     ]
     if cov < 99.0:
@@ -777,11 +790,24 @@ def render_epoch_closeout(
             f"{_BADGE_OBS}   {_YELLOW}⚠ coverage {cov}% of the epoch observed — tracker started mid-epoch; "
             f"figures cover observed rounds only{_RESET}"
         )
-    verdict = (
-        f"{_RED}🔴 BREACHED: {', '.join(breached)} — epoch {e} NOT reward-eligible{_RESET}"
-        if breached
-        else f"{_GREEN}✅ ALL MINIMAL CONDITIONS MET — epoch {e} reward-eligible{_RESET}"
-    )
+    # Humility: any hole WITHIN the observed span is unaccounted — the %s above are computed over
+    # recorded rounds only, so they can't certify eligibility for the missing ones.
+    missing = tally.get("missing_in_span") or 0
+    if missing:
+        rng = f" (rounds {_fmt_ranges(gap_ranges, gap_total)})" if gap_ranges else ""
+        lines.append(
+            f"{_BADGE_OBS}   {_RED}⚠ {missing} rounds MISSING within the observed span{rng} — UNACCOUNTED; "
+            f"the figures above cover recorded rounds only{_RESET}"
+        )
+    if breached:
+        verdict = f"{_RED}🔴 BREACHED: {', '.join(breached)} — epoch {e} NOT reward-eligible{_RESET}"
+    elif missing:
+        verdict = (
+            f"{_YELLOW}⚠ PROVISIONAL — recorded rounds meet every floor, but {missing} unaccounted "
+            f"round(s) mean epoch {e} eligibility cannot be fully certified{_RESET}"
+        )
+    else:
+        verdict = f"{_GREEN}✅ ALL MINIMAL CONDITIONS MET — epoch {e} reward-eligible{_RESET}"
     lines.append(f"{_BADGE_OBS}   ➜ {verdict}")
     lines.append(f"{_BADGE_OBS} {head_c}{_CEREMONY_BAR}{_RESET}")
     return lines
