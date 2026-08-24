@@ -785,7 +785,8 @@ def render_epoch_closeout(
         + (f" · span {tally.get('first_rid')}–{tally.get('last_rid')}" if tally.get("last_rid") is not None else "")
         + f"{_RESET}",
     ]
-    if cov < 99.0:
+    partial = cov < 99.0
+    if partial:
         lines.append(
             f"{_BADGE_OBS}   {_YELLOW}⚠ coverage {cov}% of the epoch observed — tracker started mid-epoch; "
             f"figures cover observed rounds only{_RESET}"
@@ -799,12 +800,20 @@ def render_epoch_closeout(
             f"{_BADGE_OBS}   {_RED}⚠ {missing} rounds MISSING within the observed span{rng} — UNACCOUNTED; "
             f"the figures above cover recorded rounds only{_RESET}"
         )
+    # Certify eligibility ONLY from a complete, hole-free epoch. A breach is definitive; anything
+    # less than full contiguous coverage (internal holes and/or a mid-epoch start) is PROVISIONAL —
+    # the gates pass over what we saw, but we can't vouch for the rounds we didn't.
     if breached:
         verdict = f"{_RED}🔴 BREACHED: {', '.join(breached)} — epoch {e} NOT reward-eligible{_RESET}"
-    elif missing:
+    elif missing or partial:
+        why = []
+        if missing:
+            why.append(f"{missing} unaccounted round(s)")
+        if partial:
+            why.append(f"only {cov}% of the epoch observed")
         verdict = (
-            f"{_YELLOW}⚠ PROVISIONAL — recorded rounds meet every floor, but {missing} unaccounted "
-            f"round(s) mean epoch {e} eligibility cannot be fully certified{_RESET}"
+            f"{_YELLOW}⚠ PROVISIONAL — recorded rounds meet every floor, but {' and '.join(why)} "
+            f"— epoch {e} eligibility cannot be fully certified{_RESET}"
         )
     else:
         verdict = f"{_GREEN}✅ ALL MINIMAL CONDITIONS MET — epoch {e} reward-eligible{_RESET}"

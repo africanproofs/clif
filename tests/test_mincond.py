@@ -105,6 +105,9 @@ def test_closeout_flags_partial_coverage():
     recs = {rid: RoundRecord(rid, s2=1, cl=1, fexp=1, fok=1, fu=1) for rid in range(426 * VRS, 426 * VRS + 500)}
     out = _plain(render_epoch_closeout(epoch_tally(recs, epoch=426), uptime_pct=99.99, network="flare"))
     assert "coverage" in out and "tracker started mid-epoch" in out
+    # partial coverage can't certify the whole epoch even with every gate passing → PROVISIONAL
+    assert "PROVISIONAL" in out and "of the epoch observed" in out
+    assert "reward-eligible" not in out
 
 
 def test_open_ceremony_names_epoch_and_round_range():
