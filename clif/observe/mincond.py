@@ -29,10 +29,13 @@ from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH
 
 @dataclass
 class RoundRecord:
-    rid: int   # voting round id (→ reward epoch = rid // VRS_PER_REWARD_EPOCH)
-    fexp: int  # FDC expected this round (had attestation requests) — 0/1
-    fok: int   # FDC participated (expected & AP bitvoted) — 0/1
-    fu: int    # fast-update submissions attributed to this round
+    rid: int       # voting round id (→ reward epoch = rid // VRS_PER_REWARD_EPOCH)
+    s1: int = 0    # submit1 (commit) seen — 0/1
+    s2: int = 0    # submit2 (reveal) seen — 0/1 (the FTSO minimal condition is on the reveal)
+    cl: int = 0    # fully clean round — 0/1
+    fexp: int = 0  # FDC expected this round (had attestation requests) — 0/1
+    fok: int = 0   # FDC participated (expected & AP bitvoted) — 0/1
+    fu: int = 0    # fast-update submissions attributed to this round
 
 
 def epoch_of(rid: int) -> int:
@@ -43,6 +46,9 @@ def from_round(rs) -> RoundRecord:
     """Build the compact record from a finalized RoundState."""
     return RoundRecord(
         rid=rs.round_id,
+        s1=1 if rs.submit1_seen else 0,
+        s2=1 if rs.submit2_seen else 0,
+        cl=1 if rs.clean else 0,
         fexp=1 if rs.fdc_expected else 0,
         fok=1 if (rs.fdc_expected and rs.fdc_bitvote_seen and not rs.fdc_gap) else 0,
         fu=int(getattr(rs, "fu_count", 0) or 0),
@@ -100,11 +106,19 @@ def epoch_tally(records: dict[int, RoundRecord] | list[RoundRecord], *, epoch: i
     `fdc_pct` is None until the epoch has had at least one FDC-request round."""
     vals = records.values() if isinstance(records, dict) else records
     ep = [r for r in vals if epoch_of(r.rid) == epoch]
+    n = len(ep)
     fdc_exp = sum(r.fexp for r in ep)
     fdc_ok = sum(r.fok for r in ep)
+    ftso_rev = sum(r.s2 for r in ep)
+    ftso_clean = sum(r.cl for r in ep)
     return {
         "epoch": epoch,
-        "rounds_recorded": len(ep),
+        "rounds_recorded": n,
+        "rounds_expected": VRS_PER_REWARD_EPOCH,
+        "coverage_pct": (round(100.0 * n / VRS_PER_REWARD_EPOCH, 1) if n else 0.0),
+        "ftso_revealed": ftso_rev,
+        "ftso_clean": ftso_clean,
+        "ftso_pct": (round(100.0 * ftso_rev / n, 1) if n else None),
         "fdc_expected": fdc_exp,
         "fdc_participated": fdc_ok,
         "fdc_pct": (round(100.0 * fdc_ok / fdc_exp, 1) if fdc_exp else None),

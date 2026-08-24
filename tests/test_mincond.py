@@ -13,6 +13,9 @@ from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH as VRS
 @dataclass
 class _FakeRound:
     round_id: int
+    submit1_seen: bool = True
+    submit2_seen: bool = True
+    _clean: bool = True
     fdc_request_count: int = 0
     fdc_bitvote_seen: bool = False
     fdc_gap: bool = False
@@ -22,33 +25,40 @@ class _FakeRound:
     def fdc_expected(self) -> bool:
         return self.fdc_request_count > 0
 
+    @property
+    def clean(self) -> bool:
+        return self._clean
+
 
 def test_from_round_maps_participation():
-    assert from_round(_FakeRound(1, 0, False, False, 3)) == RoundRecord(1, 0, 0, 3)          # no FDC req
-    assert from_round(_FakeRound(2, 2, True, False, 1)) == RoundRecord(2, 1, 1, 1)           # FDC ok
-    assert from_round(_FakeRound(3, 2, False, True, 0)) == RoundRecord(3, 1, 0, 0)           # FDC gap
-    assert from_round(_FakeRound(4, 2, True, True, 0)) == RoundRecord(4, 1, 0, 0)            # gap wins
+    assert from_round(_FakeRound(1, fu_count=3)) == RoundRecord(1, s1=1, s2=1, cl=1, fu=3)  # no FDC req
+    assert from_round(_FakeRound(2, fdc_request_count=2, fdc_bitvote_seen=True)) == RoundRecord(2, s1=1, s2=1, cl=1, fexp=1, fok=1)
+    assert from_round(_FakeRound(3, fdc_request_count=2, fdc_gap=True)) == RoundRecord(3, s1=1, s2=1, cl=1, fexp=1, fok=0)  # FDC gap
+    miss = from_round(_FakeRound(4, submit2_seen=False, _clean=False))
+    assert miss.s2 == 0 and miss.cl == 0  # a missed reveal
 
 
 def test_epoch_tally_exact():
     e = 426
     recs = {}
     for rid in range(e * VRS, e * VRS + 100):
-        recs[rid] = RoundRecord(rid=rid, fexp=1 if rid % 2 == 0 else 0, fok=1 if rid % 2 == 0 else 0, fu=1)
-    recs[e * VRS + 2] = RoundRecord(rid=e * VRS + 2, fexp=1, fok=0, fu=1)  # one FDC miss
+        recs[rid] = RoundRecord(rid=rid, s2=1, cl=1, fexp=1 if rid % 2 == 0 else 0, fok=1 if rid % 2 == 0 else 0, fu=1)
+    recs[e * VRS + 2] = RoundRecord(rid=e * VRS + 2, s2=1, cl=1, fexp=1, fok=0, fu=1)  # one FDC miss
     t = epoch_tally(recs, epoch=e)
     assert t["fdc_expected"] == 50 and t["fdc_participated"] == 49
     assert t["fdc_pct"] == round(100 * 49 / 50, 1) and t["fu_updates"] == 100
+    assert t["ftso_revealed"] == 100 and t["ftso_pct"] == 100.0  # all 100 rounds revealed
+    assert t["rounds_recorded"] == 100 and t["rounds_expected"] == VRS
     # a different epoch is excluded
     assert epoch_tally(recs, epoch=e + 1)["fdc_expected"] == 0
 
 
 def test_load_dedups_and_scopes_to_current_and_prior_epoch(tmp_path):
     p = tmp_path / "mc.jsonl"
-    append_record(p, RoundRecord(424 * VRS + 5, 1, 1, 1))   # two epochs back → dropped
-    append_record(p, RoundRecord(425 * VRS + 5, 1, 0, 2))   # prior epoch → kept
-    append_record(p, RoundRecord(426 * VRS + 5, 1, 1, 3))   # current → kept
-    append_record(p, RoundRecord(426 * VRS + 5, 1, 1, 9))   # re-finalized dup → last wins
+    append_record(p, RoundRecord(424 * VRS + 5, fexp=1, fok=1, fu=1))   # two epochs back → dropped
+    append_record(p, RoundRecord(425 * VRS + 5, fexp=1, fok=0, fu=2))   # prior epoch → kept
+    append_record(p, RoundRecord(426 * VRS + 5, fexp=1, fok=1, fu=3))   # current → kept
+    append_record(p, RoundRecord(426 * VRS + 5, fexp=1, fok=1, fu=9))   # re-finalized dup → last wins
     recs = load_history(p, reward_epoch=426)
     assert set(epoch_of(r) for r in recs) == {425, 426}
     assert recs[426 * VRS + 5].fu == 9  # dedup kept the latest
@@ -57,6 +67,48 @@ def test_load_dedups_and_scopes_to_current_and_prior_epoch(tmp_path):
 def test_prune_rewrites_current_and_prior_only(tmp_path):
     p = tmp_path / "mc.jsonl"
     for rid in (423 * VRS, 425 * VRS, 426 * VRS):
-        append_record(p, RoundRecord(rid, 1, 1, 1))
+        append_record(p, RoundRecord(rid, fexp=1, fok=1, fu=1))
     prune_history(p, reward_epoch=426)
     assert set(epoch_of(r) for r in load_history(p, reward_epoch=426)) == {425, 426}
+
+
+# ---- epoch ceremony renderers (start banner + close-out report card) ------------
+
+
+def _plain(lines):
+    import re
+    return "\n".join(re.sub(r"\x1b\[[0-9;]*m", "", ln) for ln in lines)
+
+
+def test_closeout_all_pass_is_eligible():
+    from clif.observe.health import render_epoch_closeout
+
+    t = epoch_tally({rid: RoundRecord(rid, s2=1, cl=1, fexp=1, fok=1, fu=2) for rid in range(426 * VRS, 426 * VRS + 3360)}, epoch=426)
+    out = _plain(render_epoch_closeout(t, uptime_pct=99.99, network="flare"))
+    assert "REWARD EPOCH 426 CLOSED" in out
+    assert "FTSO    100.0% (≥80)  ✓ PASS" in out and "FDC     100.0% (≥60)  ✓ PASS" in out
+    assert "ALL MINIMAL CONDITIONS MET — epoch 426 reward-eligible" in out
+
+
+def test_closeout_fdc_breach_is_not_eligible():
+    from clif.observe.health import render_epoch_closeout
+
+    recs = {rid: RoundRecord(rid, s2=1, cl=1, fexp=1, fok=1 if rid % 2 else 0, fu=1) for rid in range(426 * VRS, 426 * VRS + 3360)}
+    out = _plain(render_epoch_closeout(epoch_tally(recs, epoch=426), uptime_pct=99.99, network="flare"))
+    assert "✗ BREACH" in out and "🔴 BREACHED: FDC — epoch 426 NOT reward-eligible" in out
+
+
+def test_closeout_flags_partial_coverage():
+    from clif.observe.health import render_epoch_closeout
+
+    recs = {rid: RoundRecord(rid, s2=1, cl=1, fexp=1, fok=1, fu=1) for rid in range(426 * VRS, 426 * VRS + 500)}
+    out = _plain(render_epoch_closeout(epoch_tally(recs, epoch=426), uptime_pct=99.99, network="flare"))
+    assert "coverage" in out and "tracker started mid-epoch" in out
+
+
+def test_open_ceremony_names_epoch_and_round_range():
+    from clif.observe.health import render_epoch_open
+
+    out = _plain(render_epoch_open(427, network="flare"))
+    assert "REWARD EPOCH 427 OPEN" in out and "trackers armed" in out
+    assert f"{427 * VRS}–{428 * VRS - 1}" in out

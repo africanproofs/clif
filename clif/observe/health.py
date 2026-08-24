@@ -15,6 +15,9 @@ from pathlib import Path
 
 from clif.funding import _BADGE_OBS, _GREEN, _RED, _RESET, _YELLOW
 from clif.observe.gaps import hms
+from clif.observe.reward_rule import VRS_PER_REWARD_EPOCH
+
+_DIM = "\033[2m"
 
 _STALE_AFTER_SEC = 300  # no fresh status write in 5 min ⇒ the engine is dead → CRIT
 _PARTICIPATION_CRIT_PCT = 90.0  # sustained on-time completeness below this ⇒ CRIT
@@ -700,6 +703,63 @@ def render_protocol_report(h: ObserveHealth) -> list[str]:
     lines.append(f"  VERDICT      : {vc}{headline}{_RESET}")
     for a in actions:
         lines.append(f"  → ACTION     : {vc}{a}{_RESET}")
+    return lines
+
+
+_CEREMONY_BAR = "═" * 62
+
+
+def render_epoch_open(epoch: int, *, network: str) -> list[str]:
+    """The epoch-START ceremony — a banner the observer logs when a new reward epoch opens and its
+    fresh minimal-conditions trackers are armed."""
+    lo, hi = epoch * VRS_PER_REWARD_EPOCH, (epoch + 1) * VRS_PER_REWARD_EPOCH - 1
+    return [
+        f"{_BADGE_OBS} {_GREEN}{_CEREMONY_BAR}{_RESET}",
+        f"{_BADGE_OBS} {_GREEN}🚩 REWARD EPOCH {epoch} OPEN · {network} — minimal-conditions trackers armed{_RESET}",
+        f"{_BADGE_OBS} {_DIM}recording FTSO · FDC · uptime · FastUpd · rounds {lo}–{hi} · every round persisted (gap-free across restarts/outages){_RESET}",
+        f"{_BADGE_OBS} {_GREEN}{_CEREMONY_BAR}{_RESET}",
+    ]
+
+
+def render_epoch_closeout(tally: dict, *, uptime_pct: float | None, network: str) -> list[str]:
+    """The epoch-CLOSE-OUT ceremony — the final minimal-conditions report card for the epoch that
+    just ended, with a PASS/BREACH verdict per gate. Driven by the exact per-epoch ledger."""
+    e = tally.get("epoch")
+    ftso_pct, fdc_pct = tally.get("ftso_pct"), tally.get("fdc_pct")
+
+    def gate(pct, floor):
+        if pct is None:
+            return _DIM, "· n/a", False
+        ok = pct >= floor
+        return (_GREEN, "✓ PASS", False) if ok else (_RED, "✗ BREACH", True)
+
+    fc, fs, f_bad = gate(ftso_pct, _FTSO_MIN_PCT)
+    dc, ds, d_bad = gate(fdc_pct, _FDC_MIN_PCT)
+    uc, us, u_bad = gate(uptime_pct, _UPTIME_MIN_PCT)
+    breached = [n for n, bad in (("FTSO", f_bad), ("FDC", d_bad), ("uptime", u_bad)) if bad]
+    head_c = _RED if breached else _GREEN
+    up_s = f"{uptime_pct:g}" if uptime_pct is not None else "n/a"
+    cov = tally.get("coverage_pct", 0.0)
+    lines = [
+        f"{_BADGE_OBS} {head_c}{_CEREMONY_BAR}{_RESET}",
+        f"{_BADGE_OBS} {head_c}🏁 REWARD EPOCH {e} CLOSED · {network} — final minimal-conditions report{_RESET}",
+        f"{_BADGE_OBS}   {fc}FTSO    {ftso_pct}% (≥{_FTSO_MIN_PCT:g})  {fs}{_RESET}   [{tally.get('ftso_revealed')}/{tally.get('rounds_recorded')} revealed]",
+        f"{_BADGE_OBS}   {dc}FDC     {fdc_pct}% (≥{_FDC_MIN_PCT:g})  {ds}{_RESET}   [{tally.get('fdc_participated')}/{tally.get('fdc_expected')} request-rounds]",
+        f"{_BADGE_OBS}   {uc}uptime  {up_s}% (≥{_UPTIME_MIN_PCT:g})  {us}{_RESET}",
+        f"{_BADGE_OBS}   {_DIM}FastUpd {tally.get('fu_updates')} updates (epoch total){_RESET}",
+    ]
+    if cov < 99.0:
+        lines.append(
+            f"{_BADGE_OBS}   {_YELLOW}⚠ coverage {cov}% of the epoch observed — tracker started mid-epoch; "
+            f"figures cover observed rounds only{_RESET}"
+        )
+    verdict = (
+        f"{_RED}🔴 BREACHED: {', '.join(breached)} — epoch {e} NOT reward-eligible{_RESET}"
+        if breached
+        else f"{_GREEN}✅ ALL MINIMAL CONDITIONS MET — epoch {e} reward-eligible{_RESET}"
+    )
+    lines.append(f"{_BADGE_OBS}   ➜ {verdict}")
+    lines.append(f"{_BADGE_OBS} {head_c}{_CEREMONY_BAR}{_RESET}")
     return lines
 
 

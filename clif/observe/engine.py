@@ -23,6 +23,8 @@ from clif.observe.decode import decode_submit
 from clif.observe.health import (
     build_status,
     observe_health_from_dict,
+    render_epoch_closeout,
+    render_epoch_open,
     render_protocol_report,
 )
 from clif.observe.budget import read_ftso_budget
@@ -406,10 +408,12 @@ def run_engine(
     if mincond_history_file:
         mincond_recs.update(mincond_load(Path(mincond_history_file), reward_epoch=reg["epoch"]))
         mincond_epoch["e"] = reg["epoch"]
-        if log and mincond_recs:
+        if log and reg["epoch"] is not None:
+            here = sum(1 for k in mincond_recs if epoch_of(k) == reg["epoch"])
             log.info(
-                "\033[38;5;208m OBS\033[0m min-conditions ledger seeded: %d rounds (reward epoch %s) from %s",
-                len(mincond_recs), reg["epoch"], mincond_history_file,
+                "\033[38;5;208m OBS\033[0m min-conditions: resuming reward epoch %s tracking "
+                "(%d rounds recorded this epoch; %d in ledger)",
+                reg["epoch"], here, len(mincond_recs),
             )
     # Outage/backfill ledger — records each outage so the surface can say LIVE vs CATCHING UP
     # unambiguously and tabulate what was replayed. `catching_up` gates the backfill-progress logs.
@@ -528,11 +532,20 @@ def run_engine(
                 if mincond_history_file and rs.round_id not in mincond_recs:
                     re = epoch_of(rs.round_id)
                     if mincond_epoch["e"] is None or re > mincond_epoch["e"]:
+                        old = mincond_epoch["e"]
                         mincond_epoch["e"] = re
                         if log:
-                            log.info(
-                                "\033[38;5;208m OBS\033[0m min-conditions: reward epoch %d tracker started", re,
-                            )
+                            # A genuine epoch rollover → close out the epoch that just ended (its
+                            # exact final report card from the ledger), then open the new one. On a
+                            # fresh mid-epoch start `old` is the seeded epoch, so no rollover fires
+                            # until the next real boundary.
+                            if old is not None:
+                                for _ln in render_epoch_closeout(
+                                    epoch_tally(mincond_recs, epoch=old), uptime_pct=up["pct"], network=network,
+                                ):
+                                    log.info(_ln)
+                            for _ln in render_epoch_open(re, network=network):
+                                log.info(_ln)
                     rec = mincond_from_round(rs)
                     mincond_recs[rs.round_id] = rec
                     mincond_append(Path(mincond_history_file), rec)
