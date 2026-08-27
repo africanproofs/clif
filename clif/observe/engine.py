@@ -82,6 +82,28 @@ def report_interval(severity: str, *, healthy_sec: float, degraded_sec: float, r
     return degraded_sec if (severity != "OK" and not recovering) else healthy_sec
 
 
+def expire_epoch_overlays(new_epoch: int, reg: dict, *overlays: dict) -> None:
+    """A reward-epoch boundary just crossed — expire every epoch-scoped overlay NOW.
+
+    The overlays (registration, budget, delegation, uptime, IQR) are polled on
+    `registration_refresh_sec` (1h), so without this they keep serving the CLOSED epoch's
+    answer for up to an hour into the new one: the report header, min-conditions and
+    reveal-offence penalty stay keyed to the old epoch, `registered` asserts a stale YES (the
+    RE423 blind spot the detector exists to catch), and IQR scores the new epoch's rounds
+    against the old epoch's offer band + voter weights, filing them under the old epoch id.
+    The round id is the authoritative, immediate boundary signal — poll cadence must not
+    outrank it.
+
+    `new_epoch` only ever moves the tracked epoch FORWARD: a backfill replaying rounds from a
+    closed epoch must not rewind the header or blank a good registration answer.
+    """
+    if new_epoch > (reg["epoch"] if reg["epoch"] is not None else -1):
+        reg["epoch"] = new_epoch  # header/tally right immediately, even if the re-probe fails
+        reg["registered"] = None  # unknown until re-probed — never assert a stale YES
+    for st in (reg, *overlays):
+        st["checked"] = 0.0  # defeats the 1h guard ⇒ re-probe on the next overlay pass
+
+
 # keccak256("AttestationRequest(bytes,uint256)") — FdcHub's per-request event topic0.
 _ATTESTATION_REQUEST_TOPIC = "0x251377668af6553101c9bb094ba89c0c536783e005e203625e6cd57345918cc9"
 _SUBMIT2_SELECTOR = "9d00c9fd"
@@ -598,6 +620,8 @@ def run_engine(
                                     log.info(_ln)
                             for _ln in render_epoch_open(re, network=network):
                                 log.info(_ln)
+                        if old is not None:  # a real boundary (not a fresh mid-epoch seed)
+                            expire_epoch_overlays(re, reg, bud, deleg, up, iqr)
                         mincond_blocks["n"] = 0  # start the new epoch's block-scan counter
                     rec = mincond_from_round(rs)
                     if catching_up:

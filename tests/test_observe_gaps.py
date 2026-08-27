@@ -153,3 +153,44 @@ def test_resume_cursor_gap_free_across_restarts():
     assert resume_cursor(h, lookback_blocks=lb, prior_last_block=h - 500_000, max_blocks=200_000) == h - 200_000
     assert resume_cursor(h, lookback_blocks=lb, prior_last_block=h - 500_000, max_blocks=0) == h - 500_000 - lb
     assert resume_cursor(h, lookback_blocks=lb, prior_last_block=0) == h - lb              # bad/zero prior ⇒ fresh
+
+
+# ---- reward-epoch rollover expires the epoch-scoped overlays ---------------------
+
+
+def _overlays(epoch=427, registered=True, checked=9_000.0):
+    """The five epoch-scoped overlay caches as run_engine holds them."""
+    reg = {"registered": registered, "epoch": epoch, "checked": checked}
+    bud = {"data": {"epoch": epoch}, "checked": checked}
+    deleg = {"data": {}, "checked": checked}
+    up = {"pct": 99.99, "connected": True, "checked": checked}
+    iqr = {"epoch": epoch, "checked": checked, "ready": True}
+    return reg, bud, deleg, up, iqr
+
+
+def test_epoch_rollover_expires_every_epoch_scoped_overlay():
+    """RE427→428: without this the report stayed keyed to the CLOSED epoch for up to an hour
+    (stale header + min-cond + reveal-offence penalty). Every overlay must re-probe at once."""
+    from clif.observe.engine import expire_epoch_overlays
+
+    reg, bud, deleg, up, iqr = _overlays(epoch=427)
+    expire_epoch_overlays(428, reg, bud, deleg, up, iqr)
+
+    assert reg["epoch"] == 428  # header/tally flip immediately, without waiting for the RPC probe
+    assert reg["registered"] is None  # never carry the old epoch's YES across the boundary
+    now, refresh = 10_000.0, 3600.0
+    # the exact guards inside _refresh_* must now fall through to a real probe
+    assert not (reg["epoch"] is not None and now - reg["checked"] < refresh)
+    for st in (bud, deleg, up, iqr):
+        assert not (st["checked"] and now - st["checked"] < refresh)
+
+
+def test_epoch_rollover_never_rewinds_on_a_backfilled_old_round():
+    """A backfill replaying a CLOSED epoch must not rewind the header or blank a good
+    registration answer — the tracked epoch only ever moves forward."""
+    from clif.observe.engine import expire_epoch_overlays
+
+    reg, bud, deleg, up, iqr = _overlays(epoch=428)
+    expire_epoch_overlays(426, reg, bud, deleg, up, iqr)  # replaying an old epoch
+
+    assert reg["epoch"] == 428 and reg["registered"] is True  # untouched
